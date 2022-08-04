@@ -68,7 +68,7 @@ void TmpWidth::recompute(Code& code)
     
     auto assumeTheWorst = [&] (Tmp tmp) {
         if (bank == Arg(tmp).bank()) {
-            Width conservative = conservativeWidth(bank);
+            Width conservative = Options::useWebAssemblySIMD() ? conservativeWidth(bank) : conservativeWidthWithoutVectors(bank);
             addWidths(tmp, { conservative, conservative });
         }
     };

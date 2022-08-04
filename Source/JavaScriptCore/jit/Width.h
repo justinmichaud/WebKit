@@ -26,6 +26,7 @@
 #pragma once
 
 #include "Reg.h"
+#include "SIMDInfo.h"
 #include <wtf/PrintStream.h>
 
 namespace JSC {
@@ -123,7 +124,7 @@ ALWAYS_INLINE constexpr Width conservativeWidthWithoutVectors(const Reg reg)
 
 ALWAYS_INLINE constexpr Width conservativeWidth(const Reg reg)
 {
-    return reg.isFPR() ? Width64 : widthForBytes(sizeof(CPURegister));
+    return reg.isFPR() ? Width128 : widthForBytes(sizeof(CPURegister));
 }
 
 ALWAYS_INLINE constexpr unsigned conservativeRegisterBytes(const Reg reg)
@@ -134,6 +135,11 @@ ALWAYS_INLINE constexpr unsigned conservativeRegisterBytes(const Reg reg)
 ALWAYS_INLINE constexpr unsigned conservativeRegisterBytesWithoutVectors(const Reg reg)
 {
     return bytesForWidth(conservativeWidthWithoutVectors(reg));
+}
+
+constexpr Width elementSize(SIMDLane simdLane)
+{
+    return widthForBytes(elementByteSize(simdLane));
 }
 
 } // namespace JSC

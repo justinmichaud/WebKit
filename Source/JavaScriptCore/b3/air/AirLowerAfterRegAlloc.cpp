@@ -246,6 +246,7 @@ void lowerAfterRegAlloc(Code& code)
                         Tmp tmp(reg);
                         Arg arg(tmp);
                         StackSlot* stackSlot = stackSlots[stackSlotIndex++];
+                        ASSERT(stackSlot->byteSize() >= bytesForWidth(width));
                         pairs.append(ShufflePair(Arg::stack(stackSlot), arg, width));
                     });
                 if (result) {
