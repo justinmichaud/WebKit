@@ -43,6 +43,25 @@ namespace JSC {
 
 namespace Wasm {
 
+constexpr Type scalarType(SIMDLane lane)
+{
+    switch (lane) {
+    case SIMDLane::v128:
+        RELEASE_ASSERT_NOT_REACHED();
+        return Types::Void;
+    case SIMDLane::i64x2:
+        return Types::I64;
+    case SIMDLane::f64x2:
+        return Types::F64;
+    case SIMDLane::i8x16:
+    case SIMDLane::i16x8:
+    case SIMDLane::i32x4:
+        return Types::I32;
+    case SIMDLane::f32x4:
+        return Types::F32;
+    }
+}
+
 using FunctionArgCount = uint32_t;
 using StructFieldCount = uint32_t;
 using RecursionGroupCount = uint32_t;
@@ -67,6 +86,7 @@ constexpr size_t typeKindSizeInBytes(TypeKind kind)
     case TypeKind::RefNull: {
         return sizeof(WriteBarrierBase<Unknown>);
     }
+    case TypeKind::V128:
     case TypeKind::Array:
     case TypeKind::Func:
     case TypeKind::Struct:

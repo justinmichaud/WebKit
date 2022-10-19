@@ -31,6 +31,7 @@
 #include "Width.h"
 #include <cstddef>
 #include <wtf/PrintStream.h>
+#include <cstddef>
 
 namespace JSC {
 
@@ -44,7 +45,7 @@ public:
         , m_offsetBits((offset >> 2) & 0xFFFFFFFFFFFFFF)
     {
         ASSERT(!(offset & 0b11));
-        ASSERT(width == conservativeWidthWithoutVectors(reg));
+        ASSERT(width == conservativeWidthWithoutVectors(reg) || Options::useWebAssemblySIMD());
         ASSERT(reg.index() < (1 << 6));
         ASSERT(Reg::last().index() < (1 << 6));
         ASSERT(this->reg() == reg);

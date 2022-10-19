@@ -160,6 +160,7 @@ defines.append("\n\n")
 defines = "".join(defines)
 
 opValueSet = set([op for op in wasm.opcodeIterator(lambda op: True, lambda op: opcodes[op]["value"])])
+opValueSet.add(0xFD)  # ExtSIMD
 maxOpValue = max(opValueSet)
 
 
@@ -205,7 +206,10 @@ contents = wasm.header + """
 
 #if ENABLE(WEBASSEMBLY)
 
+#include "SIMDInfo.h"
+#include "WasmSIMDOpcodes.h"
 #include "Width.h"
+
 #include <cstdint>
 #include <wtf/PrintStream.h>
 
@@ -349,6 +353,7 @@ inline TypeKind linearizedToType(int i)
     FOR_EACH_WASM_MEMORY_LOAD_OP(macro) \\
     FOR_EACH_WASM_MEMORY_STORE_OP(macro) \\
     macro(Ext1,  0xFC, Oops, 0) \\
+    macro(ExtSIMD, 0xFD, Oops, 0) \\
     macro(GCPrefix,  0xFB, Oops, 0) \\
     macro(ExtAtomic, 0xFE, Oops, 0)
 
@@ -385,6 +390,10 @@ enum class StoreOpType : uint8_t {
 enum class Ext1OpType : uint8_t {
     FOR_EACH_WASM_TABLE_OP(CREATE_ENUM_VALUE)
     FOR_EACH_WASM_TRUNC_SATURATED_OP(CREATE_ENUM_VALUE)
+};
+
+enum class ExtSIMDOpType : uint8_t {
+    FOR_EACH_WASM_EXT_SIMD_OP(CREATE_ENUM_VALUE)
 };
 
 enum class GCOpType : uint8_t {
@@ -472,6 +481,24 @@ inline const char* makeString(OpType op)
     return nullptr;
 }
 #undef CREATE_CASE
+
+inline constexpr Wasm::Type simdScalarType(SIMDLane lane) {
+    switch (lane) {
+    case SIMDLane::i8x16:
+    case SIMDLane::i16x8:
+    case SIMDLane::i32x4:
+        return Wasm::Types::I32;
+    case SIMDLane::i64x2:
+        return Wasm::Types::I64;
+    case SIMDLane::f32x4:
+        return Wasm::Types::F32;
+    case SIMDLane::f64x2:
+        return Wasm::Types::F64;
+    case SIMDLane::v128:
+        RELEASE_ASSERT_NOT_REACHED();
+        return Wasm::Types::I32;
+    }
+}
 
 } } // namespace JSC::Wasm
 

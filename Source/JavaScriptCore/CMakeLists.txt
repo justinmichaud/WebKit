@@ -890,6 +890,7 @@ set(JavaScriptCore_PRIVATE_FRAMEWORK_HEADERS
     jit/RegisterMap.h
     jit/RegisterSet.h
     jit/ScratchRegisterAllocator.h
+    jit/SIMDInfo.h
     jit/Snippet.h
     jit/SnippetParams.h
     jit/SnippetReg.h
@@ -1268,6 +1269,7 @@ set(JavaScriptCore_PRIVATE_FRAMEWORK_HEADERS
     wasm/WasmNameSection.h
     wasm/WasmOSREntryData.h
     wasm/WasmPageCount.h
+    wasm/WasmSIMDOpcodes.h
     wasm/WasmSections.h
     wasm/WasmTypeDefinition.h
     wasm/WasmStreamingCompiler.h
