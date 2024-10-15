@@ -57,7 +57,12 @@ WebAssemblyWrapperFunction* WebAssemblyWrapperFunction::create(VM& vm, JSGlobalO
         executable = vm.getHostFunction(callWebAssemblyWrapperFunction, ImplementationVisibility::Public, NoIntrinsic, callHostFunctionAsConstructor, nullptr, name);
 
     RELEASE_ASSERT(JSValue(function).isCallable());
-    WebAssemblyWrapperFunction* result = new (NotNull, allocateCell<WebAssemblyWrapperFunction>(vm)) WebAssemblyWrapperFunction(vm, executable, globalObject, structure, instance, function, Wasm::WasmToWasmImportableFunction { typeIndex, &instance->importFunctionInfo(importIndex)->importFunctionStub, &Wasm::NullWasmCallee, rtt.get() });
+    WebAssemblyWrapperFunction* result = new (NotNull, allocateCell<WebAssemblyWrapperFunction>(vm)) WebAssemblyWrapperFunction(vm, executable, globalObject, structure, instance, function,
+        Wasm::WasmToWasmImportableFunction {
+            { &Wasm::NullWasmCallee, { vm, nullptr, instance },
+            &instance->importFunctionInfo(importIndex)->importFunctionStub },
+            typeIndex,
+            rtt.get() });
     result->finishCreation(vm, executable, signature.argumentCount(), name);
     return result;
 }
