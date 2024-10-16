@@ -898,11 +898,16 @@ end)
 op(wasm_to_wasm_wrapper_entry, macro()
     # We have only pushed PC (intel) or pushed nothing(others), and we
     # are still in the caller frame.
-    # In our CodeBlock slot, instead of an instance, we have a WasmCallableFunction* from doWasmCall and friends.
-    loadp (CodeBlock - CallerFrameAndPCSize + PrologueStackPointerDelta)[sp], ws1
+    loadp (Callee - CallerFrameAndPCSize + PrologueStackPointerDelta)[sp], ws0
 
-    loadp JSC::Wasm::WasmCallableFunction::entrypointLoadLocation[ws1], ws0
-    loadp JSC::Wasm::WasmCallableFunction::targetInstance[ws1], wasmInstance
+if JSVALUE64
+    andp ~(constexpr JSValue::NativeCalleeTag), ws0
+end
+    leap WTFConfig + constexpr WTF::offsetOfWTFConfigLowestAccessibleAddress, ws1
+    loadp [ws1], ws1
+    addp ws1, ws0
+
+    loadp JSC::Wasm::LLIntCallee::m_entrypoint[ws1], ws0
 
     # Memory
     if ARM64 or ARM64E
@@ -915,7 +920,6 @@ op(wasm_to_wasm_wrapper_entry, macro()
         cagedPrimitiveMayBeNull(memoryBase, ws1)
     end
 
-    loadp [ws0], ws0
     jmp ws0, WasmEntryPtrTag
 end)
 
@@ -925,7 +929,7 @@ op(wasm_to_js_wrapper_entry, macro()
     # are still in the caller frame.
     # Load this before we create the stack frame, since we lose old cfr, which we wrote Callee to
 
-    # In our CodeBlock slot, instead of an instance, we have a WasmCallableFunction* from doWasmCall and friends.
+    # We repurpose this slot temporarily for a WasmCallableFunction* from doWasmCall and friends.
     loadp (CodeBlock - CallerFrameAndPCSize + PrologueStackPointerDelta)[sp], ws0
     loadp (Callee - CallerFrameAndPCSize + PrologueStackPointerDelta)[sp], ws1
 
@@ -1572,7 +1576,6 @@ if ASSERT_ENABLED
     else
         move 0xBEEF, a0
         storep a0, Callee[sp]
-        storep a0, CodeBlock[sp]
     end
 end
 

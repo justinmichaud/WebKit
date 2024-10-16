@@ -604,7 +604,6 @@ static inline UGPRPair doWasmCall(Register* partiallyConstructedCalleeFrame, JSW
     Register& calleeStackSlot = partiallyConstructedCalleeFrame[static_cast<int>(CallFrameSlot::callee)];
     Register& functionInfoSlot = partiallyConstructedCalleeFrame[static_cast<int>(CallFrameSlot::codeBlock)];
     ASSERT(calleeStackSlot.unboxedInt64() == 0xBEEF);
-    ASSERT(functionInfoSlot.unboxedInt64() == 0xBEEF);
 
     if (functionIndex < importFunctionCount) {
         auto* functionInfo = instance->importFunctionInfo(functionIndex);
@@ -613,9 +612,10 @@ static inline UGPRPair doWasmCall(Register* partiallyConstructedCalleeFrame, JSW
         // In the jit case, they already have everything they need to set the callee and target instance.
         // For the non-jit case, we set those here.
         calleeStackSlot = *functionInfo->boxedWasmCalleeLoadLocation;
-        // For the non-jit wasm_to_wasm case specifically, we also pass along this functionInfo*, since
+        // For the non-jit wasm_to_js case specifically, we also pass along this functionInfo*, since
         // this new callee will have no way to access it.
-        functionInfoSlot = reinterpret_cast<uintptr_t>(static_cast<Wasm::WasmCallableFunction*>(functionInfo));
+        if (!functionInfo->targetInstance)
+            functionInfoSlot = reinterpret_cast<uintptr_t>(static_cast<Wasm::WasmCallableFunction*>(functionInfo));
     } else {
         // Target is a wasm function within the same instance
         codePtr = *instance->calleeGroup()->entrypointLoadLocationFromFunctionIndexSpace(functionIndex);
@@ -653,10 +653,10 @@ static inline UGPRPair doWasmCallIndirect(Register* partiallyConstructedCalleeFr
     Register& calleeStackSlot = partiallyConstructedCalleeFrame[static_cast<int>(CallFrameSlot::callee)];
     Register& functionInfoSlot = partiallyConstructedCalleeFrame[static_cast<int>(CallFrameSlot::codeBlock)];
     ASSERT(calleeStackSlot.unboxedInt64() == 0xBEEF);
-    ASSERT(functionInfoSlot.unboxedInt64() == 0xBEEF);
 
     calleeStackSlot = CalleeBits::encodeBoxedNativeCallee(reinterpret_cast<void*>(*function.m_function.boxedWasmCalleeLoadLocation));
-    functionInfoSlot = reinterpret_cast<uintptr_t>(static_cast<const Wasm::WasmCallableFunction*>(&function.m_function));
+    if (!function.m_function.targetInstance)
+        functionInfoSlot = reinterpret_cast<uintptr_t>(static_cast<const Wasm::WasmCallableFunction*>(&function.m_function));
 
     auto callTarget = *function.m_function.entrypointLoadLocation;
     WASM_CALL_RETURN(function.m_instance, callTarget);
@@ -689,10 +689,10 @@ static inline UGPRPair doWasmCallRef(Register* partiallyConstructedCalleeFrame, 
     Register& calleeStackSlot = partiallyConstructedCalleeFrame[static_cast<int>(CallFrameSlot::callee)];
     Register& functionInfoSlot = partiallyConstructedCalleeFrame[static_cast<int>(CallFrameSlot::codeBlock)];
     ASSERT(calleeStackSlot.unboxedInt64() == 0xBEEF);
-    ASSERT(functionInfoSlot.unboxedInt64() == 0xBEEF);
 
     calleeStackSlot = CalleeBits::encodeBoxedNativeCallee(reinterpret_cast<void*>(*function.boxedWasmCalleeLoadLocation));
-    functionInfoSlot = reinterpret_cast<uintptr_t>(static_cast<const Wasm::WasmCallableFunction*>(&function));
+    if (!function.targetInstance)
+        functionInfoSlot = reinterpret_cast<uintptr_t>(static_cast<const Wasm::WasmCallableFunction*>(&function));
 
     // FIXME: https://bugs.webkit.org/show_bug.cgi?id=260820
     ASSERT(function.typeIndex == CALLEE()->signature(typeIndex).index());
