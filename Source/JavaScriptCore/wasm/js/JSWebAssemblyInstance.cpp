@@ -197,7 +197,7 @@ void JSWebAssemblyInstance::finalizeCreation(VM& vm, JSGlobalObject* globalObjec
             info->boxedCallee = CalleeBits::encodeNativeCallee(importCallees.last().ptr());
         } else {
             info->importFunctionStub = wasmCalleeGroup->wasmToWasmExitStub(functionSpaceIndex);
-            ASSERT(info->boxedWasmCalleeLoadLocation && info->boxedWasmCalleeLoadLocation != &Wasm::NullWasmCallee);
+            ASSERT(info->boxedWasmCalleeLoadLocation && *info->boxedWasmCalleeLoadLocation);
         }
     }
 

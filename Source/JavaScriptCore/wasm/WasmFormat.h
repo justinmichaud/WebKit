@@ -783,15 +783,13 @@ struct InternalFunction {
     unsigned osrEntryScratchBufferSize { 0 };
 };
 
-static constexpr uintptr_t NullWasmCallee = 0;
-
 struct WasmCallableFunction {
     WTF_MAKE_STRUCT_FAST_ALLOCATED;
     using LoadLocation = CodePtr<WasmEntryPtrTag>*;
     static constexpr ptrdiff_t offsetOfEntrypointLoadLocation() { return OBJECT_OFFSETOF(WasmCallableFunction, entrypointLoadLocation); }
     static constexpr ptrdiff_t offsetOfBoxedWasmCalleeLoadLocation() { return OBJECT_OFFSETOF(WasmCallableFunction, boxedWasmCalleeLoadLocation); }
 
-    const uintptr_t* boxedWasmCalleeLoadLocation { &NullWasmCallee };
+    const uintptr_t* boxedWasmCalleeLoadLocation { nullptr };
     // Target instance and entrypoint are only set for wasm->wasm calls, and are otherwise nullptr. The js-specific logic occurs through import function.
     WriteBarrier<JSWebAssemblyInstance> targetInstance { };
     LoadLocation entrypointLoadLocation { };
@@ -800,7 +798,7 @@ struct WasmCallableFunction {
 // WebAssembly direct calls and call_indirect use indices into "function index space". This space starts
 // with all imports, and then all internal functions. WasmToWasmImportableFunction and FunctionIndexSpace are only
 // meant as fast lookup tables for these opcodes and do not own code.
-struct WasmToWasmImportableFunction final : public WasmCallableFunction {
+struct WasmToWasmImportableFunction : public WasmCallableFunction {
     WTF_MAKE_STRUCT_FAST_ALLOCATED;
     static constexpr ptrdiff_t offsetOfSignatureIndex() { return OBJECT_OFFSETOF(WasmToWasmImportableFunction, typeIndex); }
     static constexpr ptrdiff_t offsetOfRTT() { return OBJECT_OFFSETOF(WasmToWasmImportableFunction, rtt); }
@@ -812,7 +810,7 @@ struct WasmToWasmImportableFunction final : public WasmCallableFunction {
 };
 using FunctionIndexSpace = Vector<WasmToWasmImportableFunction>;
 
-struct WasmOrJSImportableFunction final : public WasmCallableFunction {
+struct WasmOrJSImportableFunction final : public WasmToWasmImportableFunction {
     WTF_MAKE_STRUCT_FAST_ALLOCATED;
     using LoadLocation = CodePtr<WasmEntryPtrTag>*;
 

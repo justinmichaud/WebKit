@@ -252,8 +252,6 @@ public:
     // Tail accessors.
     static constexpr size_t offsetOfTail() { return WTF::roundUpToMultipleOf<sizeof(uint64_t)>(sizeof(JSWebAssemblyInstance)); }
 
-    static constexpr uintptr_t NullWasmCallee = 0;
-
     unsigned numImportFunctions() const { return m_numImportFunctions; }
     WasmOrJSImportableFunction* importFunctionInfo(size_t importFunctionNum)
     {

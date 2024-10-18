@@ -1011,42 +1011,26 @@ end
 
     leap JSC::Wasm::WasmOrJSImportableFunction::callLinkInfo[t2], t2
 
-if not JSVALUE64
-    # branchIfNotCell(t0)
-    bineq t0, constexpr(JSValue::CellTag), .notacell
-end
-
     # calleeGPR = t0
     # callLinkInfoGPR = t2
     # callTargetGPR = t5
     loadp CallLinkInfo::m_monomorphicCallDestination[t2], t5
 
-if RISCV64
-    bpeq CallLinkInfo::m_callee[t2], t0, .found
-    btpnz CallLinkInfo::m_callee[t2], (constexpr CallLinkInfo::polymorphicCalleeMask), .found
-else
     # scratch = t3
     loadp CallLinkInfo::m_callee[t2], t3
     bpeq t3, t0, .found
     btpnz t3, (constexpr CallLinkInfo::polymorphicCalleeMask), .found
-end
 
-if not JSVALUE64
-.notacell:
-end
-
-.found:
 if ARM64 or ARM64E
     pcrtoaddr _llint_default_call_trampoline, t5
 else
     leap (_llint_default_call_trampoline), t5
 end
-    # not a tail call
+.found:
     # jit.transferPtr CallLinkInfo::codeBlock[t2], CodeBlock[cfr]
     loadp CallLinkInfo::m_codeBlock[t2], t3
-    const offset = CallerFrameAndPCSize
-    storep t3, (CodeBlock - offset)[sp]
-    call t5
+    storep t3, (CodeBlock - CallerFrameAndPCSize)[sp]
+    call t5, JSEntryPtrTag
 
     subp RegisterSpaceScratchSize, sp
     storep r0, [sp]
