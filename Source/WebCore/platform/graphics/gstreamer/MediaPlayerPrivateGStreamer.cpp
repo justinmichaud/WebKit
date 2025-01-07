@@ -183,6 +183,7 @@ MediaPlayerPrivateGStreamer::MediaPlayerPrivateGStreamer(MediaPlayer* player)
     , m_logger(player->mediaPlayerLogger())
     , m_logIdentifier(player->mediaPlayerLogIdentifier())
 #endif
+    , m_startTime(MediaTime::invalidTime())
 #if USE(TEXTURE_MAPPER_DMABUF)
     , m_swapchain(adoptRef(new GBMBufferSwapchain(GBMBufferSwapchain::BufferSwapchainSize::Eight)))
 #endif
