@@ -666,7 +666,10 @@ private:
 #endif
 
     bool m_isMuted { false };
-    bool m_visible { false };
+
+    // Whether the page containing the HTMLMediaElement is visible, reflects: setPageIsVisible()
+    bool m_pageIsVisible { false };
+
     bool m_suspended { false };
 
     // playbin3 only:
@@ -721,7 +724,6 @@ private:
 
     bool m_didTryToRecoverPlayingState { false };
 
-    // The state the pipeline should be set back to after the player becomes visible in the viewport again.
     GstState m_invisiblePlayerState { GST_STATE_VOID_PENDING };
 
     // Specific to MediaStream playback.

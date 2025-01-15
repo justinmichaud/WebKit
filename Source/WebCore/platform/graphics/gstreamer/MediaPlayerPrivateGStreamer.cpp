@@ -4316,7 +4316,7 @@ void MediaPlayerPrivateGStreamer::paint(GraphicsContext& context, const FloatRec
     if (context.paintingDisabled())
         return;
 
-    if (!m_visible || m_isPausedByViewport)
+    if (!m_pageIsVisible || m_isPausedByViewport)
         return;
 
     // Keep a reference to the sample to avoid keeping the sampleMutex locked, which would be prone
@@ -4935,7 +4935,7 @@ void MediaPlayerPrivateGStreamer::setVideoRectangle(const IntRect& rect)
 
     Locker locker { m_holePunchLock };
 
-    if (!m_visible || m_suspended)
+    if (!m_pageIsVisible || m_suspended)
         return;
 
     if (m_quirksManagerForTesting) {
@@ -4949,18 +4949,18 @@ void MediaPlayerPrivateGStreamer::setVideoRectangle(const IntRect& rect)
 
 void MediaPlayerPrivateGStreamer::setPageIsVisible(bool visible)
 {
-    if (m_visible == visible)
+    if (m_pageIsVisible == visible)
         return;
 
     if (!isHolePunchRenderingEnabled() || !m_videoSink) {
-        m_visible = visible;
+        m_pageIsVisible = visible;
         return;
     }
 
     Locker locker { m_holePunchLock };
-    m_visible = visible;
+    m_pageIsVisible = visible;
 
-    if (!m_visible) {
+    if (!m_pageIsVisible) {
         if (m_quirksManagerForTesting) {
             m_quirksManagerForTesting->setHolePunchVideoRectangle(m_videoSink.get(), IntRect());
             return;
