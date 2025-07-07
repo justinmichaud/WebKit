@@ -53,6 +53,8 @@ public:
 
     void setPresentationTime(const MediaTime&);
 
+    void setMetadata(std::optional<VideoFrameTimeMetadata>&&);
+
     RefPtr<VideoFrameGStreamer> resizeTo(const IntSize&);
 
     GRefPtr<GstSample> resizedSample(const IntSize&);
