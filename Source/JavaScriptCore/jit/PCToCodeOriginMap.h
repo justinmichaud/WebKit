@@ -107,6 +107,7 @@ private:
     };
 
     Vector<CodeRange> m_codeRanges;
+    HashSet<CallSiteIndex> m_poppedFrameCallSiteIndices;
     bool m_shouldBuildMapping;
 };
 
@@ -119,6 +120,7 @@ public:
     ~PCToCodeOriginMap();
 
     std::optional<CodeOrigin> findPC(void* pc) const;
+    bool isPoppedFrame(CallSiteIndex) const;
 
     double memorySize();
 
@@ -129,6 +131,7 @@ private:
     uint8_t* m_compressedCodeOrigins;
     uintptr_t m_pcRangeStart;
     uintptr_t m_pcRangeEnd;
+    HashSet<CallSiteIndex> m_poppedFrameCallSiteIndices;
 };
 
 } // namespace JSC

@@ -448,6 +448,45 @@ public:
         return m_callSiteIndex;
     }
 
+    CallSiteFrameState callSiteFrameState() const
+    {
+        if (m_inlineParent)
+            return m_inlineRoot->callSiteFrameState();
+        return m_callSiteFrameState;
+    }
+
+    // See CallSiteFrameState comment
+    // A inline-calls B, B tail calls C: then B must popInlinedFrame and inlinedReturnResetFrameState.
+    // This must only be done for a real call; tail calls to inlined callees must 
+    void popInlinedFrame()
+    {
+        advanceCallSiteIndex();
+        ASSERT(m_inlineParent);
+        auto* root = this;
+        while (root->m_inlineParent)
+            root = root->m_inlineParent;
+        root->m_callSiteFrameState = CallSiteFrameState::PoppedFrame;
+        root->m_callSiteIndexPoppedFrame = callSiteIndex();
+        advanceCallSiteIndex();
+    }
+
+    void inlinedReturnResetFrameState()
+    {
+        advanceCallSiteIndex();
+        ASSERT(m_inlineParent);
+        auto* root = this;
+        while (root->m_inlineParent)
+            root = root->m_inlineParent;
+        ASSERT(root->m_callSiteFrameState != CallSiteFrameState::NormalFrame);
+        ASSERT(root->m_callSiteIndexPoppedFrame <= callSiteIndex());
+        root->m_callSiteFrameState = CallSiteFrameState::NormalFrame;
+        // After the frame is popped, we should look up one level for catch handlers.
+        dataLogLnIf(WasmOMGIRGeneratorInternal::verbose, "Adding inline tail call delegate from ", root->m_callSiteIndexPoppedFrame, " to ", callSiteIndex(), " to depth ", m_inlineParent->m_tryCatchDepth);
+        m_exceptionHandlers.append({ HandlerType::Delegate, root->m_callSiteIndexPoppedFrame, callSiteIndex(), 0, m_tryCatchDepth, m_inlineParent->m_tryCatchDepth });
+        root->m_callSiteIndexPoppedFrame = UINT32_MAX;
+        advanceCallSiteIndex();
+    }
+
     OMGIRGenerator(AbstractHeapRepository&, CompilationContext&, Module&, CalleeGroup&, const ModuleInformation&, IPIntCallee&, InliningNode*, OptimizingJITCallee&, Procedure&, Vector<UnlinkedWasmToWasmCall>&, FixedBitVector& outgoingDirectCallees, unsigned& osrEntryScratchBufferSize, MemoryMode, CompilationMode, unsigned functionIndex, unsigned loopIndexForOSREntry);
     OMGIRGenerator(AbstractHeapRepository&, CompilationContext&, OMGIRGenerator& inlineCaller, OMGIRGenerator& inlineRoot, Module&, CalleeGroup&, unsigned functionIndex, IPIntCallee&, InliningNode*, BasicBlock* returnContinuation, Vector<Value*> args);
 
@@ -840,7 +879,7 @@ public:
     auto createTailCallPatchpoint(BasicBlock*, const TypeDefinition&, const CallInformation& wasmCallerInfoAsCallee, const CallInformation& wasmCalleeInfoAsCallee, const ArgumentList& tmpArgSourceLocations, Vector<B3::ConstrainedValue> patchArgs) -> CallPatchpointData;
 
     InliningNode* canInline(FunctionSpaceIndex functionIndexSpace, unsigned callProfileIndex) const;
-    WARN_UNUSED_RETURN PartialResult emitInlineDirectCall(InliningNode*, FunctionCodeIndex calleeIndex, const TypeDefinition&, const ArgumentList& args, ValueResults&);
+    WARN_UNUSED_RETURN PartialResult emitInlineDirectCall(InliningNode*, FunctionCodeIndex calleeIndex, const TypeDefinition&, const ArgumentList& args, ValueResults&, CallSiteInlinedFrameState);
 
     void dump(const ControlStack&, const Stack* expressionStack);
     void setParser(FunctionParser<OMGIRGenerator>* parser) { m_parser = parser; };
@@ -1099,6 +1138,10 @@ private:
 
     Checked<unsigned> m_tryCatchDepth { 0 };
     Checked<unsigned> m_callSiteIndex { 0 };
+
+    CallSiteFrameState m_callSiteFrameState { CallSiteFrameState::NormalFrame };
+    unsigned m_callSiteIndexPoppedFrame { UINT32_MAX };
+
     StackMaps m_stackmaps;
     Vector<UnlinkedHandlerInfo> m_exceptionHandlers;
 
@@ -6126,7 +6169,7 @@ InliningNode* OMGIRGenerator::canInline(FunctionSpaceIndex functionIndexSpace, u
     return result;
 }
 
-auto OMGIRGenerator::emitInlineDirectCall(InliningNode* inlining, FunctionCodeIndex calleeFunctionIndex, const TypeDefinition& calleeSignature, const ArgumentList& args, ValueResults& results) -> PartialResult
+auto OMGIRGenerator::emitInlineDirectCall(InliningNode* inlining, FunctionCodeIndex calleeFunctionIndex, const TypeDefinition& calleeSignature, const ArgumentList& args, ValueResults& results, CallSiteInlinedFrameState inlineFrameState) -> PartialResult
 {
     Vector<Value*> getArgs;
     for (auto& arg : args)
@@ -6176,9 +6219,14 @@ auto OMGIRGenerator::emitInlineDirectCall(InliningNode* inlining, FunctionCodeIn
 
     auto lastInlineCallSiteIndex = advanceCallSiteIndex();
     advanceCallSiteIndex();
-    m_callee->addCodeOrigin(firstInlineCallSiteIndex, lastInlineCallSiteIndex, m_info, calleeFunctionIndex + m_numImportFunctions);
-
+    m_callee->addCodeOrigin(firstInlineCallSiteIndex, lastInlineCallSiteIndex, m_info, calleeFunctionIndex + m_numImportFunctions, inlineFrameState);
     dataLogLnIf(WasmOMGIRGeneratorInternal::verboseInlining, "Inlining CallSiteIndex range: ", firstInlineCallSiteIndex, " -> ", lastInlineCallSiteIndex, " [", inlining->depth(), "]");
+
+    if (inlineFrameState == CallSiteInlinedFrameState::InlinedTailCall) {
+        ASSERT(m_inlineParent);
+        dataLogLnIf(WasmOMGIRGeneratorInternal::verboseInlining, "Adding delegate for inlined tail call body: ", firstInlineCallSiteIndex, " -> ", lastInlineCallSiteIndex, " of function ", calleeFunctionIndex," [", inlining->depth(), "] to try depth ", m_inlineParent->m_tryCatchDepth);
+        m_exceptionHandlers.append({ HandlerType::Delegate, firstInlineCallSiteIndex, lastInlineCallSiteIndex, 0, m_tryCatchDepth, m_inlineParent->m_tryCatchDepth });
+    }
 
     return { };
 }
@@ -6248,6 +6296,7 @@ auto OMGIRGenerator::emitDirectCall(unsigned callProfileIndex, FunctionSpaceInde
             patchArgsIndex += m_proc.resultCount(patchpoint->type());
             patchpoint->setGenerator([this, patchArgsIndex, handle, isTailCallRootCaller, tailCallStackOffsetFromFP, prepareForCall](CCallHelpers& jit, const B3::StackmapGenerationParams& params) {
                 AllowMacroScratchRegisterUsage allowScratch(jit);
+                JIT_COMMENT(jit, "Direct call to import");
                 if (prepareForCall)
                     prepareForCall->run(jit, params);
                 ASSERT(!isTailCallRootCaller || !handle);
@@ -6278,6 +6327,9 @@ auto OMGIRGenerator::emitDirectCall(unsigned callProfileIndex, FunctionSpaceInde
             return { };
         }
 
+        if (callType == CallType::TailCall)
+            popInlinedFrame();
+
         auto [patchpoint, handle, prepareForCall] = createCallPatchpoint(m_currentBlock, signature, wasmCalleeInfo, args);
         emitCallToImport(patchpoint, handle, prepareForCall);
 
@@ -6286,6 +6338,9 @@ auto OMGIRGenerator::emitDirectCall(unsigned callProfileIndex, FunctionSpaceInde
 
         // The call could have been to another WebAssembly instance, and / or could have modified our Memory.
         restoreWebAssemblyGlobalState(m_info.memory, instanceValue(), m_currentBlock);
+
+        if (callType == CallType::TailCall)
+            inlinedReturnResetFrameState();
         return { };
     } // isImportedFunctionFromFunctionIndexSpace
 
@@ -6306,6 +6361,7 @@ auto OMGIRGenerator::emitDirectCall(unsigned callProfileIndex, FunctionSpaceInde
             bool selfRecursion = &m_inlineRoot->m_info == &m_info && m_info.toCodeIndex(functionIndexSpace) == m_inlineRoot->m_functionIndex;
             if (!(selfRecursion && !isTailCallRootCaller)) {
                 Ref<IPIntCallee> callee = m_calleeGroup.ipintCalleeFromFunctionIndexSpace(functionIndexSpace);
+                JIT_COMMENT(jit, "Direct call to wasm function ", callee->indexOrName());
                 jit.storeWasmCalleeToCalleeCallFrame(CCallHelpers::TrustedImmPtr(CalleeBits::boxNativeCallee(callee.ptr())), isTailCallRootCaller ? sizeof(CallerFrameAndPC) - prologueStackPointerDelta() : 0);
             }
             auto call = isTailCallRootCaller ? jit.threadSafePatchableNearTailCall() : jit.threadSafePatchableNearCall();
@@ -6323,13 +6379,14 @@ auto OMGIRGenerator::emitDirectCall(unsigned callProfileIndex, FunctionSpaceInde
         return { };
     }
 
-    if (callType == CallType::Call) {
-        if (auto* inlining = canInline(functionIndexSpace, callProfileIndex)) {
-            auto functionIndex = m_info.toCodeIndex(functionIndexSpace);
-            dataLogLnIf(WasmOMGIRGeneratorInternal::verboseInlining, " inlining call to ", functionIndex, " from ", m_functionIndex, " depth ", inlining->depth());
-            return emitInlineDirectCall(inlining, functionIndex, signature, args, results);
-        }
+    if (auto* inlining = canInline(functionIndexSpace, callProfileIndex)) {
+        auto functionIndex = m_info.toCodeIndex(functionIndexSpace);
+        dataLogLnIf(WasmOMGIRGeneratorInternal::verboseInlining, " inlining call to ", functionIndex, " from ", m_functionIndex, " depth ", inlining->depth());
+        return emitInlineDirectCall(inlining, functionIndex, signature, args, results, callType == CallType::TailCall ? CallSiteInlinedFrameState::InlinedTailCall : CallSiteInlinedFrameState::NormalFrame);
     }
+
+    if (callType == CallType::TailCall)
+        popInlinedFrame();
 
     // We do not need to store |this| with JS instance since,
     // 1. It is not tail-call. So this does not clobber the arguments of this function.
@@ -6347,6 +6404,9 @@ auto OMGIRGenerator::emitDirectCall(unsigned callProfileIndex, FunctionSpaceInde
         patchpoint->clobberLate(RegisterSetBuilder::wasmPinnedRegisters());
         restoreWebAssemblyGlobalState(m_info.memory, instanceValue(), m_currentBlock);
     }
+
+    if (callType == CallType::TailCall)
+        inlinedReturnResetFrameState();
 
     return { };
 }
@@ -6747,6 +6807,8 @@ auto OMGIRGenerator::origin() -> Origin
     WasmOrigin result { CallSiteIndex(callSiteIndex()), opcodeOrigin };
     if (m_context.origins.isEmpty() || m_context.origins.last() != result)
         m_context.origins.append(result);
+    if (callSiteFrameState() == CallSiteFrameState::PoppedFrame)
+        return Origin(&m_context.origins.last(), Origin::PoppedFrameTag::PoppedFrame);
     return Origin(&m_context.origins.last());
 }
 
@@ -6764,6 +6826,7 @@ static bool shouldDumpIRFor(uint32_t functionIndex)
 Expected<std::unique_ptr<InternalFunction>, String> parseAndCompileOMG(CompilationContext& compilationContext, IPIntCallee& profiledCallee, OptimizingJITCallee& callee, const FunctionData& function, const TypeDefinition& signature, Vector<UnlinkedWasmToWasmCall>& unlinkedWasmToWasmCalls, Module& module, CalleeGroup& calleeGroup, const ModuleInformation& info, MemoryMode mode, CompilationMode compilationMode, FunctionCodeIndex functionIndex, uint32_t loopIndexForOSREntry)
 {
     CompilerTimingScope totalScope("B3"_s, "Total OMG compilation"_s);
+    RELEASE_ASSERT(Options::wasmFunctionIndexRangeToCompile().isInRange(functionIndex));
 
     Wasm::Thunks::singleton().stub(Wasm::catchInWasmThunkGenerator);
 
@@ -6783,6 +6846,8 @@ Expected<std::unique_ptr<InternalFunction>, String> parseAndCompileOMG(Compilati
     procedure.setOriginPrinter([](PrintStream& out, Origin origin) {
         if (auto* impl = origin.maybeWasmOrigin())
             out.print("Wasm: ", impl->m_opcodeOrigin, " CallSiteIndex: ", impl->m_callSiteIndex.bits());
+        if (origin.isPoppedFrame())
+            out.print(" PoppedFrame");
     });
 
     // This means we cannot use either StackmapGenerationParams::usedRegisters() or

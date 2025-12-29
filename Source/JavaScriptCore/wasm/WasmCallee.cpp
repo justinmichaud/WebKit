@@ -289,7 +289,7 @@ const RegisterAtOffsetList* IPIntCallee::calleeSaveRegistersImpl()
 }
 
 #if ENABLE(WEBASSEMBLY_OMGJIT)
-void OptimizingJITCallee::addCodeOrigin(unsigned firstInlineCSI, unsigned lastInlineCSI, const Wasm::ModuleInformation& info, uint32_t functionIndex)
+void OptimizingJITCallee::addCodeOrigin(unsigned firstInlineCSI, unsigned lastInlineCSI, const Wasm::ModuleInformation& info, uint32_t functionIndex, CallSiteInlinedFrameState frameState)
 {
     if (!nameSections.size())
         nameSections.append(info.nameSection);
@@ -298,25 +298,25 @@ void OptimizingJITCallee::addCodeOrigin(unsigned firstInlineCSI, unsigned lastIn
 #if ASSERT_ENABLED
     ASSERT(firstInlineCSI <= lastInlineCSI);
     for (unsigned i = 0; i + 1 < codeOrigins.size(); ++i)
-        ASSERT(codeOrigins[i].lastInlineCSI <= codeOrigins[i + 1].lastInlineCSI);
+        ASSERT(codeOrigins[i].lastInlineCSI() <= codeOrigins[i + 1].lastInlineCSI());
     for (unsigned i = 0; i < codeOrigins.size(); ++i)
-        ASSERT(codeOrigins[i].lastInlineCSI <= lastInlineCSI);
+        ASSERT(codeOrigins[i].lastInlineCSI() <= lastInlineCSI);
     ASSERT(nameSections.size() == 1);
     ASSERT(nameSections[0].ptr() == info.nameSection.ptr());
 #endif
-    codeOrigins.append({ firstInlineCSI, lastInlineCSI, functionIndex, 0 });
+    codeOrigins.append({ firstInlineCSI, lastInlineCSI, functionIndex, 0, frameState });
 }
 
 const WasmCodeOrigin* OptimizingJITCallee::getCodeOrigin(unsigned csi, unsigned depth, bool& isInlined) const
 {
     isInlined = false;
-    auto iter = std::lower_bound(codeOrigins.begin(), codeOrigins.end(), WasmCodeOrigin { 0, csi, 0, 0 }, [&](const auto& a, const auto& b) {
-        return b.lastInlineCSI - a.lastInlineCSI;
+    auto iter = std::lower_bound(codeOrigins.begin(), codeOrigins.end(), WasmCodeOrigin { 0, csi, 0, 0, CallSiteInlinedFrameState::NormalFrame }, [&](const auto& a, const auto& b) {
+        return b.lastInlineCSI() - a.lastInlineCSI();
     });
     if (!iter || iter == codeOrigins.end())
         iter = codeOrigins.begin();
     while (iter != codeOrigins.end()) {
-        if (iter->firstInlineCSI <= csi && iter->lastInlineCSI >= csi && !(depth--)) {
+        if (iter->firstInlineCSI() <= csi && iter->lastInlineCSI() >= csi && !(depth--)) {
             isInlined = true;
             return iter;
         }
@@ -330,7 +330,7 @@ IndexOrName OptimizingJITCallee::getIndexOrName(const WasmCodeOrigin* codeOrigin
 {
     if (!codeOrigin)
         return indexOrName();
-    return IndexOrName(codeOrigin->functionIndex, nameSections[codeOrigin->moduleIndex]->get(codeOrigin->functionIndex));
+    return IndexOrName(codeOrigin->functionIndex(), nameSections[codeOrigin->moduleIndex()]->get(codeOrigin->functionIndex()));
 }
 
 IndexOrName OptimizingJITCallee::getOrigin(unsigned csi, unsigned depth, bool& isInlined) const
@@ -340,14 +340,18 @@ IndexOrName OptimizingJITCallee::getOrigin(unsigned csi, unsigned depth, bool& i
     return indexOrName();
 }
 
-std::optional<CallSiteIndex> OptimizingJITCallee::tryGetCallSiteIndex(const void* pc) const
+std::optional<CallSiteIndex> OptimizingJITCallee::tryGetCallSiteIndex(const void* pc, CallSiteFrameState& frameState) const
 {
     constexpr bool verbose = false;
+    frameState = CallSiteFrameState::NormalFrame;
     if (m_callSiteIndexMap) {
         dataLogLnIf(verbose, "Querying ", RawPointer(pc));
         if (std::optional<CodeOrigin> codeOrigin = m_callSiteIndexMap->findPC(removeCodePtrTag<void*>(pc))) {
             dataLogLnIf(verbose, "Found ", *codeOrigin);
-            return CallSiteIndex { codeOrigin->bytecodeIndex().offset() };
+            auto csi = CallSiteIndex { codeOrigin->bytecodeIndex().offset() };
+            if (m_callSiteIndexMap->isPoppedFrame(csi))
+                frameState = CallSiteFrameState::PoppedFrame;
+            return csi;
         }
     }
     return std::nullopt;
@@ -374,15 +378,7 @@ Box<PCToCodeOriginMap> OptimizingJITCallee::materializePCToOriginMap(B3::PCToOri
     ASSERT(originMap.ranges().size());
     dataLogLnIf(verbose, "Materializing PCToOriginMap of size: ", originMap.ranges().size());
     constexpr bool shouldBuildMapping = true;
-    PCToCodeOriginMapBuilder builder(shouldBuildMapping);
-    for (const B3::PCToOriginMap::OriginRange& originRange : originMap.ranges()) {
-        B3::Origin b3Origin = originRange.origin;
-        if (auto* origin = b3Origin.maybeWasmOrigin()) {
-            // We stash the location into a BytecodeIndex.
-            builder.appendItem(originRange.label, CodeOrigin(BytecodeIndex(origin->m_callSiteIndex.bits())));
-        } else
-            builder.appendItem(originRange.label, PCToCodeOriginMapBuilder::defaultCodeOrigin());
-    }
+    PCToCodeOriginMapBuilder builder(PCToCodeOriginMapBuilder::WasmCodeOriginMap, originMap);
     auto map = Box<PCToCodeOriginMap>::create(WTF::move(builder), linkBuffer);
     WTF::storeStoreFence();
     m_callSiteIndexMap = WTF::move(map);

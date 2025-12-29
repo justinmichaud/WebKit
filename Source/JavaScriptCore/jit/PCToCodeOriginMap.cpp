@@ -129,10 +129,13 @@ PCToCodeOriginMapBuilder::PCToCodeOriginMapBuilder(WasmTag, const B3::PCToOrigin
 {
     for (const B3::PCToOriginMap::OriginRange& originRange : b3PCToOriginMap.ranges()) {
         B3::Origin b3Origin = originRange.origin;
-        if (b3Origin) {
-            Wasm::OpcodeOrigin wasmOrigin { b3Origin };
+        if (b3Origin && b3Origin.isPoppedFrame())
+            m_poppedFrameCallSiteIndices.add(b3Origin.wasmOrigin()->m_callSiteIndex);
+        // WasmOpcodeOrigin makes this, so we should never see it.
+        RELEASE_ASSERT(!b3Origin || !b3Origin.isPackedWasmOrigin());
+        if (auto o = b3Origin.maybeWasmOrigin()) {
             // We stash the location into a BytecodeIndex.
-            appendItem(originRange.label, CodeOrigin(BytecodeIndex(wasmOrigin.location())));
+            appendItem(originRange.label, CodeOrigin(BytecodeIndex(o->m_callSiteIndex.bits())));
         } else
             appendItem(originRange.label, PCToCodeOriginMapBuilder::defaultCodeOrigin());
     }
@@ -162,6 +165,8 @@ static constexpr int8_t sentinelBytecodeDelta = 0;
 PCToCodeOriginMap::PCToCodeOriginMap(PCToCodeOriginMapBuilder&& builder, LinkBuffer& linkBuffer)
 {
     RELEASE_ASSERT(builder.didBuildMapping());
+
+    m_poppedFrameCallSiteIndices = WTF::move(builder.m_poppedFrameCallSiteIndices);
 
     if (!builder.m_codeRanges.size()) {
         m_pcRangeStart = std::numeric_limits<uintptr_t>::max();
@@ -258,6 +263,11 @@ double PCToCodeOriginMap::memorySize()
     size += m_compressedPCBufferSize;
     size += m_compressedCodeOriginsSize;
     return size;
+}
+
+bool PCToCodeOriginMap::isPoppedFrame(CallSiteIndex csi) const
+{
+    return m_poppedFrameCallSiteIndices.contains(csi);
 }
 
 std::optional<CodeOrigin> PCToCodeOriginMap::findPC(void* pc) const

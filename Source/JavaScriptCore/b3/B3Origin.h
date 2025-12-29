@@ -53,7 +53,14 @@ public:
         DFGOriginPtr,
         WasmOriginPtr,
         PackedWasmOrigin,
+        PoppedFrame,
     };
+
+    enum class PoppedFrameTag { PoppedFrame };
+    explicit Origin(const Wasm::WasmOrigin* data, PoppedFrameTag)
+        : m_data(data, PoppedFrame)
+    {
+    }
 
     explicit Origin(const Wasm::WasmOrigin* data)
         : m_data(data, WasmOriginPtr)
@@ -72,8 +79,9 @@ public:
     explicit operator bool() const { return !!m_data.bits(); }
 
     bool isDFGOrigin() const { return !m_data.bits() || m_data.tag() == DFGOriginPtr; }
-    bool isWasmOrigin() const { return !m_data.bits() || m_data.tag() == WasmOriginPtr; }
+    bool isWasmOrigin() const { return !m_data.bits() || m_data.tag() == WasmOriginPtr || isPoppedFrame(); }
     bool isPackedWasmOrigin() const { return !m_data.bits() || m_data.tag() == PackedWasmOrigin; }
+    bool isPoppedFrame() const { return m_data.tag() == PoppedFrame; }
 
     Wasm::WasmOrigin* wasmOrigin() const
     {

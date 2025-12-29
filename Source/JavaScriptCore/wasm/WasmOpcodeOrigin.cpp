@@ -44,6 +44,7 @@ OpcodeOrigin::OpcodeOrigin(B3::Origin origin)
 
 B3::Origin OpcodeOrigin::asB3Origin()
 {
+    RELEASE_ASSERT_NOT_REACHED();
     return B3::Origin(packedData);
 }
 #endif

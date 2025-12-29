@@ -28,6 +28,7 @@
 #include <JavaScriptCore/BytecodeIndex.h>
 #include <JavaScriptCore/CalleeBits.h>
 #include <JavaScriptCore/LineColumn.h>
+#include <JavaScriptCore/NativeCallee.h>
 #include <JavaScriptCore/SourceID.h>
 #include <JavaScriptCore/WasmIndexOrName.h>
 #include <wtf/Function.h>
@@ -148,6 +149,10 @@ public:
         bool m_isWasmFrame : 1 { false };
         Wasm::IndexOrName m_wasmFunctionIndexOrName { };
         size_t m_wasmFunctionIndex { 0 };
+        // m_callSiteFrameState is used for tracking the pc ranges in this frame that pop their frame (eg. when making a tail call in an inline frame),
+        // while m_callSiteInlinedFrameState represents the entire pc range of this inlined frame (eg. when inlining a direct tail call).
+        CallSiteInlinedFrameState m_callSiteInlinedFrameState { };
+        CallSiteFrameState m_callSiteFrameState { };
         uint32_t m_wasmCallSiteIndexBits { };
 
         friend class StackVisitor;
