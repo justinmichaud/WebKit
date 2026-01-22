@@ -2201,8 +2201,7 @@ else
             tagCodePtr t3, BytecodePtrTag, AddressDiversified, t4
             storep t3, [t4]
         elsif ARMv7
-            mvlbl (label - _%kind%_relativePCBase), t4
-            addp t4, t3, t4
+            mvlbl label, t4
             move index, t5
             storep t4, [map, t5, 4]
         end

@@ -766,8 +766,9 @@ class Instruction
             armMoveImmediate(operands[0].value >> 32, operands[1])
             armMoveImmediate(operands[0].value & 0xffffffff, operands[2])
         when "mvlbl"
-                $asm.puts "movw #{operands[1].armOperand}, \#:lower16:#{operands[0].value}"
-                $asm.puts "movt #{operands[1].armOperand}, \#:upper16:#{operands[0].value}"
+            $asm.puts "b.n #+2"
+            $asm.puts ".word #{operands[0].value}"
+            $asm.puts "ldr.w #{operands[1].armOperand}, [pc, #-8]"
         when "sxb2i"
             $asm.puts "sxtb #{armFlippedOperands(operands)}"
         when "sxh2i"
