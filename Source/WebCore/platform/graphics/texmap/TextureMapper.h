@@ -118,7 +118,7 @@ private:
     bool beginRoundedRectClip(const TransformationMatrix&, const FloatRoundedRect&);
     void bindDefaultSurface();
     ClipStack& clipStack();
-    TextureMapperGLData& data() { return *m_data; }
+    TextureMapperGLData& data() const { return *m_data; }
 
     void updateProjectionMatrix();
 
