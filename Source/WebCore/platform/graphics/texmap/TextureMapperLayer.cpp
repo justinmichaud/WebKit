@@ -1127,6 +1127,11 @@ bool TextureMapperLayer::syncAnimations(MonotonicTime time)
     m_layerTransforms.futureLocalTransform = futureApplicationResults.transform.value_or(m_layerTransforms.localTransform);
 #endif
 
+    // If the layer is invisible because of opacity and there's no opacity animation, the content won't
+    // be visible ever, so triggering repaints doesn't make sense.
+    if (!m_state.opacity && !applicationResults.opacity)
+        return false;
+
     return applicationResults.hasRunningAnimations;
 }
 
