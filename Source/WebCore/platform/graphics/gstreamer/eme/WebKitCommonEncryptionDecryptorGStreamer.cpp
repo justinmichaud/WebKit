@@ -80,6 +80,7 @@ static gboolean acceptCaps(GstBaseTransform*, GstPadDirection, GstCaps*);
 static GstFlowReturn transformInPlace(GstBaseTransform*, GstBuffer*);
 static gboolean sinkEventHandler(GstBaseTransform*, GstEvent*);
 static void setContext(GstElement*, GstContext*);
+static bool isCDMProxyAvailable(WebKitMediaCommonEncryptionDecrypt* self);
 
 GST_DEBUG_CATEGORY(webkit_media_common_encryption_decrypt_debug_category);
 #define GST_CAT_DEFAULT webkit_media_common_encryption_decrypt_debug_category
@@ -170,13 +171,18 @@ static GstCaps* transformCaps(GstBaseTransform* base, GstPadDirection direction,
                 gst_structure_remove_fields(outgoingStructure.get(), "base-profile", "codec_data", "height", "framerate", "level", "pixel-aspect-ratio", "profile", "rate", "width", nullptr);
 
                 auto name = WebCore::gstStructureGetName(incomingStructure);
-                gst_structure_set(outgoingStructure.get(), "protection-system", G_TYPE_STRING, klass->protectionSystemId(self),
-                    "original-media-type", G_TYPE_STRING, reinterpret_cast<const char*>(name.rawCharacters()) , nullptr);
+                gst_structure_set(outgoingStructure.get(), "original-media-type", G_TYPE_STRING, reinterpret_cast<const char*>(name.rawCharacters()), nullptr);
+                if (!isCDMProxyAvailable(self)) {
+                    GST_WARNING_OBJECT(base, "CDM proxy is not available yet, transformed caps might be inaccurate.");
+                    gst_structure_set_name(outgoingStructure.get(), "application/x-cenc");
+                } else {
+                    gst_structure_set(outgoingStructure.get(), "protection-system", G_TYPE_STRING, klass->protectionSystemId(self), nullptr);
 
-                // GST_PROTECTION_UNSPECIFIED_SYSTEM_ID was added in the GStreamer
-                // developement git master which will ship as version 1.16.0.
-                gst_structure_set_name(outgoingStructure.get(), !g_strcmp0(klass->protectionSystemId(self),
-                    GST_PROTECTION_UNSPECIFIED_SYSTEM_ID) ? "application/x-webm-enc" : "application/x-cenc");
+                    // GST_PROTECTION_UNSPECIFIED_SYSTEM_ID was added in the GStreamer
+                    // developement git master which will ship as version 1.16.0.
+                    gst_structure_set_name(outgoingStructure.get(), !g_strcmp0(klass->protectionSystemId(self),
+                        GST_PROTECTION_UNSPECIFIED_SYSTEM_ID) ? "application/x-webm-enc" : "application/x-cenc");
+                }
             }
         }
 
