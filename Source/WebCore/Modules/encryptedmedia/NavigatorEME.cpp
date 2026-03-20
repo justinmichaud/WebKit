@@ -62,7 +62,7 @@ template<typename T>
 struct LogArgument<std::optional<T>> {
     static String toString(const std::optional<T>& value)
     {
-        return value ? "nullopt"_s : LogArgument<T>::toString(value.value());
+        return value ? LogArgument<T>::toString(value.value()) : "nullopt"_s;
     }
 };
 
@@ -153,10 +153,10 @@ static void tryNextSupportedConfiguration(Document& document, RefPtr<CDM>&& impl
 
                 // Obtain reference to the key system string before the `implementation` RefPtr<> is cleared out.
                 const String& keySystem = implementation->keySystem();
+                infoLog(logger, identifier, "Resolved: keySystem(", keySystem, "), supportedConfiguration(", supportedConfiguration, ")");
                 auto access = MediaKeySystemAccess::create(document, keySystem, WTFMove(supportedConfiguration.value()), implementation.releaseNonNull());
 
                 // 6.3.3.2. Resolve promise with access and abort the parallel steps of this algorithm.
-                infoLog(logger, identifier, "Resolved: keySystem(", keySystem, "), supportedConfiguration(", supportedConfiguration, ")");
                 promise->resolveWithNewlyCreated<IDLInterface<MediaKeySystemAccess>>(WTFMove(access));
                 return;
             }
