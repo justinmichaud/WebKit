@@ -638,6 +638,10 @@ FontCascade::CodePath FontCascade::codePath(const TextRun& run, std::optional<un
     UNUSED_PARAM(to);
 #endif
 
+    // Enable the complex path for features and variants.
+    if (m_fontDescription.featureSettings().size() > 0 || !m_fontDescription.variantSettings().isAllNormal())
+        return CodePath::Complex;
+
     // FIXME: https://bugs.webkit.org/show_bug.cgi?id=150791: @font-face features should also cause this to be complex.
 
 #if 0 && !USE(FONT_VARIANT_VIA_FEATURES) && !USE(FREETYPE)
