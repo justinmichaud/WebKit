@@ -81,7 +81,7 @@ struct SameSizeAsContainerNode : public Node {
     void* lastChild;
 };
 
-static_assert(sizeof(ContainerNode) == sizeof(SameSizeAsContainerNode), "ContainerNode should stay small");
+static_assert(sizeof(ContainerNode) <= sizeof(SameSizeAsContainerNode), "ContainerNode should stay small");
 
 static void dispatchChildInsertionEvents(Node&);
 static void dispatchChildRemovalEvents(Ref<Node>&);

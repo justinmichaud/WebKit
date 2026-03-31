@@ -80,6 +80,10 @@ PAS_API void pas_page_malloc_commit_without_mprotect(
 PAS_API void pas_page_malloc_decommit_without_mprotect(
     void* base, size_t size, pas_mmap_capability mmap_capability);
 
+#if PAS_OS(LINUX)
+PAS_API uintptr_t pas_page_malloc_constrained_base(void);
+#endif
+
 PAS_END_EXTERN_C;
 
 #endif /* PAS_PAGE_MALLOC_H */

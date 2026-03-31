@@ -86,40 +86,41 @@ class RefPtr {
 public:
     using PtrTraits = _PtrTraits;
     using RefDerefTraits = _RefDerefTraits;
+    using StorageType = typename PtrTraits::StorageType;
     typedef T ValueType;
     typedef ValueType* PtrType;
 
     static constexpr bool isRefPtr = true;
 
-    ALWAYS_INLINE constexpr RefPtr() : m_ptr(nullptr) { }
-    ALWAYS_INLINE constexpr RefPtr(std::nullptr_t) : m_ptr(nullptr) { }
-    ALWAYS_INLINE RefPtr(T* ptr) : m_ptr(RefDerefTraits::refIfNotNull(ptr)) { }
-    ALWAYS_INLINE RefPtr(T& ptr) : m_ptr(&RefDerefTraits::ref(ptr)) { }
-    ALWAYS_INLINE RefPtr(const RefPtr& o) : m_ptr(RefDerefTraits::refIfNotNull(PtrTraits::unwrap(o.m_ptr))) { }
-    template<typename X, typename Y, typename Z> RefPtr(const RefPtr<X, Y, Z>& o) : m_ptr(RefDerefTraits::refIfNotNull(PtrTraits::unwrap(o.get()))) { }
+    ALWAYS_INLINE constexpr RefPtr() : m_ptr(StorageType { }) { }
+    ALWAYS_INLINE constexpr RefPtr(std::nullptr_t) : m_ptr(StorageType { }) { }
+    ALWAYS_INLINE RefPtr(T* ptr) : m_ptr(PtrTraits::compress(RefDerefTraits::refIfNotNull(ptr))) { }
+    ALWAYS_INLINE RefPtr(T& ptr) : m_ptr(PtrTraits::compress(&RefDerefTraits::ref(ptr))) { }
+    ALWAYS_INLINE RefPtr(const RefPtr& o) : m_ptr(PtrTraits::compress(RefDerefTraits::refIfNotNull(PtrTraits::unwrap(o.m_ptr)))) { }
+    template<typename X, typename Y, typename Z> RefPtr(const RefPtr<X, Y, Z>& o) : m_ptr(PtrTraits::compress(RefDerefTraits::refIfNotNull(o.get()))) { }
 
-    ALWAYS_INLINE RefPtr(RefPtr&& o) : m_ptr(o.leakRef()) { }
-    template<typename X, typename Y, typename Z> RefPtr(RefPtr<X, Y, Z>&& o) : m_ptr(o.leakRef()) { }
+    ALWAYS_INLINE RefPtr(RefPtr&& o) : m_ptr(PtrTraits::compress(o.leakRef())) { }
+    template<typename X, typename Y, typename Z> RefPtr(RefPtr<X, Y, Z>&& o) : m_ptr(PtrTraits::compress(o.leakRef())) { }
     template<typename X, typename Y> RefPtr(Ref<X, Y>&&);
-    template<typename X, typename Y, typename Z> RefPtr(const WeakPtr<X, Y, Z>& o) requires std::is_convertible_v<X*, T*> : m_ptr(RefDerefTraits::refIfNotNull(o.get())) { }
-    template<typename X, typename Y> RefPtr(const CheckedPtr<X, Y>& o) requires std::is_convertible_v<X*, T*> : m_ptr(RefDerefTraits::refIfNotNull(o.get())) { }
-    template<typename X, typename Y> RefPtr(const ThreadSafeWeakPtr<X, Y>& o) requires std::is_convertible_v<X*, T*> : m_ptr(RefDerefTraits::refIfNotNull(o.get())) { }
+    template<typename X, typename Y, typename Z> RefPtr(const WeakPtr<X, Y, Z>& o) requires std::is_convertible_v<X*, T*> : m_ptr(PtrTraits::compress(RefDerefTraits::refIfNotNull(o.get()))) { }
+    template<typename X, typename Y> RefPtr(const CheckedPtr<X, Y>& o) requires std::is_convertible_v<X*, T*> : m_ptr(PtrTraits::compress(RefDerefTraits::refIfNotNull(o.get()))) { }
+    template<typename X, typename Y> RefPtr(const ThreadSafeWeakPtr<X, Y>& o) requires std::is_convertible_v<X*, T*> : m_ptr(PtrTraits::compress(RefDerefTraits::refIfNotNull(o.get()))) { }
 
     // Hash table deleted values, which are only constructed and never copied or destroyed.
     RefPtr(HashTableDeletedValueType) : m_ptr(PtrTraits::hashTableDeletedValue()) { }
     bool isHashTableDeletedValue() const { return PtrTraits::isHashTableDeletedValue(m_ptr); }
 
-    RefPtr(HashTableEmptyValueType) : m_ptr(hashTableEmptyValue()) { }
-    bool isHashTableEmptyValue() const { return m_ptr == hashTableEmptyValue(); }
+    RefPtr(HashTableEmptyValueType) : m_ptr(StorageType { }) { }
+    bool isHashTableEmptyValue() const { return m_ptr == StorageType { }; }
     static T* hashTableEmptyValue() { return nullptr; }
 
-    ALWAYS_INLINE ~RefPtr() { RefDerefTraits::derefIfNotNull(PtrTraits::exchange(m_ptr, nullptr)); }
+    ALWAYS_INLINE ~RefPtr() { RefDerefTraits::derefIfNotNull(PtrTraits::exchange(m_ptr, StorageType { })); }
 
     T* get() const LIFETIME_BOUND { return PtrTraits::unwrap(m_ptr); }
     T* unsafeGet() const { return PtrTraits::unwrap(m_ptr); } // FIXME: Replace with get() then remove.
     operator T*() const LIFETIME_BOUND { return PtrTraits::unwrap(m_ptr); }
 
-    Ref<T> releaseNonNull() { ASSERT(m_ptr); Ref<T> tmp(adoptRef(*m_ptr)); m_ptr = nullptr; return tmp; }
+    Ref<T> releaseNonNull() { ASSERT(m_ptr); Ref<T> tmp(adoptRef(*get())); m_ptr = StorageType { }; return tmp; }
 
     [[nodiscard]] T* leakRef();
 
@@ -140,7 +141,7 @@ public:
     template<typename X, typename Y, typename Z> void swap(RefPtr<X, Y, Z>&);
 
     RefPtr copyRef() && = delete;
-    [[nodiscard]] RefPtr copyRef() const & { return RefPtr(m_ptr); }
+    [[nodiscard]] RefPtr copyRef() const & { return RefPtr(get()); }
 
 private:
     friend RefPtr adoptRef<T, PtrTraits, RefDerefTraits>(T*);
@@ -152,9 +153,9 @@ private:
     friend bool operator==(const RefPtr<T1, U, V>&, X*);
 
     enum AdoptTag { Adopt };
-    RefPtr(T* ptr, AdoptTag) : m_ptr(ptr) { }
+    RefPtr(T* ptr, AdoptTag) : m_ptr(PtrTraits::compress(ptr)) { }
 
-    typename PtrTraits::StorageType m_ptr;
+    StorageType m_ptr;
 } SWIFT_ESCAPABLE;
 
 // Template deduction guide.
@@ -169,14 +170,14 @@ template<typename X, typename Y> RefPtr(ThreadSafeWeakPtr<X, Y>&) -> RefPtr<X, R
 template<typename T, typename U, typename V>
 template<typename X, typename Y>
 inline RefPtr<T, U, V>::RefPtr(Ref<X, Y>&& reference)
-    : m_ptr(&reference.leakRef())
+    : m_ptr(U::compress(&reference.leakRef()))
 {
 }
 
 template<typename T, typename U, typename V>
 inline T* RefPtr<T, U, V>::leakRef()
 {
-    return U::exchange(m_ptr, nullptr);
+    return U::exchange(m_ptr, typename U::StorageType { });
 }
 
 template<typename T, typename U, typename V>
@@ -207,7 +208,7 @@ inline RefPtr<T, U, V>& RefPtr<T, U, V>::operator=(T* optr)
 template<typename T, typename U, typename V>
 inline RefPtr<T, U, V>& RefPtr<T, U, V>::operator=(std::nullptr_t)
 {
-    V::derefIfNotNull(U::exchange(m_ptr, nullptr));
+    V::derefIfNotNull(U::exchange(m_ptr, typename U::StorageType { }));
     return *this;
 }
 
@@ -253,13 +254,13 @@ inline void swap(RefPtr<T, U, V>& a, RefPtr<T, U, V>& b)
 template<typename T, typename U, typename V, typename X, typename Y, typename Z>
 inline bool operator==(const RefPtr<T, U, V>& a, const RefPtr<X, Y, Z>& b)
 {
-    return a.m_ptr == b.m_ptr;
+    return a.get() == b.get();
 }
 
 template<typename T, typename U, typename V, typename X>
 inline bool operator==(const RefPtr<T, U, V>& a, X* b)
 {
-    return a.m_ptr == b;
+    return a.get() == b;
 }
 
 template<typename T, typename U, typename V>

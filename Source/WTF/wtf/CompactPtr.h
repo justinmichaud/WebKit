@@ -298,6 +298,15 @@ struct CompactPtrTraits {
 
     static constexpr bool is32Bit = StorageType::is32Bit;
 
+    static ALWAYS_INLINE StorageType compress(T* ptr) { return StorageType { ptr }; }
+
+    static ALWAYS_INLINE T* exchange(StorageType& ptr, StorageType newValue)
+    {
+        T* old = ptr.get();
+        ptr = newValue;
+        return old;
+    }
+
     template <typename U>
     static ALWAYS_INLINE T* exchange(StorageType& ptr, U&& newValue) { return ptr.exchange(newValue); }
 

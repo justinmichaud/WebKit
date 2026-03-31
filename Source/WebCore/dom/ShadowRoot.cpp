@@ -70,7 +70,7 @@ struct SameSizeAsShadowRoot : public DocumentFragment, public TreeScope {
 
 static_assert(sizeof(ShadowRoot) == sizeof(SameSizeAsShadowRoot), "shadowroot should stay small");
 #if !ASSERT_ENABLED && ASSERT_WITH_SECURITY_IMPLICATION_DISABLED
-static_assert(sizeof(WeakPtr<Element, WeakPtrImplWithEventTargetData>) == sizeof(void*), "WeakPtr should be same size as raw pointer");
+static_assert(sizeof(WeakPtr<Element, WeakPtrImplWithEventTargetData>) <= sizeof(void*), "WeakPtr should be same size as raw pointer");
 #endif
 
 ShadowRoot::ShadowRoot(Document& document, ShadowRootMode mode, SlotAssignmentMode assignmentMode, ShadowRootDelegatesFocus delegatesFocus, Clonable clonable, ShadowRootSerializable serializable, ShadowRootAvailableToElementInternals availableToElementInternals, RefPtr<CustomElementRegistry>&& registry, ShadowRootScopedCustomElementRegistry scopedRegistry, const AtomString& referenceTarget)

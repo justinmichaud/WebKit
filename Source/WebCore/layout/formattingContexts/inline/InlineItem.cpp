@@ -47,7 +47,7 @@ struct SameSizeAsInlineItem {
     uint8_t glyphBottomOverflow : 3;
 };
 
-static_assert(sizeof(InlineItem) == sizeof(SameSizeAsInlineItem));
+static_assert(sizeof(InlineItem) <= sizeof(SameSizeAsInlineItem));
 
 }
 }

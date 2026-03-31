@@ -61,19 +61,19 @@ public:
     ~CheckedRef()
     {
         unpoison(*this);
-        if (auto* ptr = PtrTraits::exchange(m_ptr, nullptr))
-            PtrTraits::unwrap(ptr)->decrementCheckedPtrCount();
+        if (auto* ptr = PtrTraits::exchange(m_ptr, typename PtrTraits::StorageType { }))
+            ptr->decrementCheckedPtrCount();
     }
 
     CheckedRef(T& object)
-        : m_ptr(&object)
+        : m_ptr(PtrTraits::compress(&object))
     {
         PtrTraits::unwrap(m_ptr)->incrementCheckedPtrCount();
     }
 
     enum AdoptTag { Adopt };
     CheckedRef(T& object, AdoptTag)
-        : m_ptr(&object)
+        : m_ptr(PtrTraits::compress(&object))
     {
     }
 
@@ -85,20 +85,20 @@ public:
 
     template<typename OtherType, typename OtherPtrTraits>
     CheckedRef(const CheckedRef<OtherType, OtherPtrTraits>& other)
-        : m_ptr { OtherPtrTraits::unwrap(other.m_ptr) }
+        : m_ptr { PtrTraits::compress(OtherPtrTraits::unwrap(other.m_ptr)) }
     {
         PtrTraits::unwrap(m_ptr)->incrementCheckedPtrCount();
     }
 
     ALWAYS_INLINE CheckedRef(CheckedRef&& other)
-        : m_ptr { other.releasePtr() }
+        : m_ptr { PtrTraits::compress(other.releasePtr()) }
     {
         ASSERT(m_ptr);
     }
 
     template<typename OtherType, typename OtherPtrTraits>
     CheckedRef(CheckedRef<OtherType, OtherPtrTraits>&& other)
-        : m_ptr { other.releasePtr() }
+        : m_ptr { PtrTraits::compress(other.releasePtr()) }
     {
         ASSERT(m_ptr);
     }
@@ -111,8 +111,8 @@ public:
     CheckedRef(HashTableDeletedValueType) : m_ptr(PtrTraits::hashTableDeletedValue()) { }
     bool isHashTableDeletedValue() const { return PtrTraits::isHashTableDeletedValue(m_ptr); }
 
-    CheckedRef(HashTableEmptyValueType) : m_ptr(hashTableEmptyValue()) { }
-    bool isHashTableEmptyValue() const { return m_ptr == hashTableEmptyValue(); }
+    CheckedRef(HashTableEmptyValueType) : m_ptr(typename PtrTraits::StorageType { }) { }
+    bool isHashTableEmptyValue() const { return m_ptr == typename PtrTraits::StorageType { }; }
     static T* hashTableEmptyValue() { return nullptr; }
 
     const T* ptrAllowingHashTableEmptyValue() const { ASSERT(m_ptr || isHashTableEmptyValue()); return PtrTraits::unwrap(m_ptr); }
@@ -188,7 +188,7 @@ private:
 
     T* releasePtr()
     {
-        T* ptr = PtrTraits::exchange(m_ptr, nullptr);
+        T* ptr = PtrTraits::exchange(m_ptr, typename PtrTraits::StorageType { });
         poison(*this);
         return ptr;
     }

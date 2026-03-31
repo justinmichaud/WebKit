@@ -66,6 +66,13 @@ public:
     // Use an intermediate cast to uintptr_t to silence unsafe casting warning. It's locally "obvious" (other than the fact that RefPtr uses StorageType's constructor instead of a wrap) the
     // return value is of type T.
     static T* unwrap(const CalleeBits& calleeBits) { return reinterpret_cast<T*>(reinterpret_cast<uintptr_t>(calleeBits.asNativeCallee())); }
+    static StorageType compress(T* ptr) { return CalleeBits(reinterpret_cast<NativeCallee*>(ptr)); }
+    static T* exchange(CalleeBits& calleeBits, StorageType newValue)
+    {
+        T* result = unwrap(calleeBits);
+        calleeBits = newValue;
+        return result;
+    }
     static T* exchange(CalleeBits& calleeBits, T* newCallee)
     {
         T* result = unwrap(calleeBits);

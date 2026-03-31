@@ -325,7 +325,7 @@ private:
     RefPtr<StringImpl> m_impl;
 } SWIFT_ESCAPABLE;
 
-static_assert(sizeof(String) == sizeof(void*), "String should effectively be a pointer to a StringImpl, and efficient to pass by value");
+static_assert(sizeof(String) <= sizeof(void*), "String should effectively be no larger than a pointer, and efficient to pass by value");
 
 inline bool operator==(const String& a, const String& b) { return equal(a.impl(), b.impl()); }
 inline bool operator==(const String& a, ASCIILiteral b) { return equal(a.impl(), b); }
@@ -358,20 +358,8 @@ WTF_EXPORT_PRIVATE std::strong_ordering codePointCompare(const String&, const St
 bool codePointCompareLessThan(const String&, const String&);
 
 // Shared global empty and null string.
-struct StaticString {
-    constexpr StaticString(StringImpl::StaticStringImpl* pointer)
-        : m_pointer(pointer)
-    {
-    }
-
-    StringImpl::StaticStringImpl* m_pointer;
-};
-static_assert(sizeof(String) == sizeof(StaticString), "String and StaticString must be the same size!");
-extern WTF_EXPORT_PRIVATE const StaticString nullStringData;
-extern WTF_EXPORT_PRIVATE const StaticString emptyStringData;
-
-inline const String& nullString() { SUPPRESS_MEMORY_UNSAFE_CAST return *reinterpret_cast<const String*>(&nullStringData); }
-inline const String& emptyString() { SUPPRESS_MEMORY_UNSAFE_CAST return *reinterpret_cast<const String*>(&emptyStringData); }
+WTF_EXPORT_PRIVATE const String& nullString();
+WTF_EXPORT_PRIVATE const String& emptyString();
 
 template<typename> struct DefaultHash;
 template<> struct DefaultHash<String>;

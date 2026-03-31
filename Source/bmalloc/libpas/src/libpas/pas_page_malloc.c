@@ -143,6 +143,19 @@ PAS_NEVER_INLINE size_t pas_page_malloc_alignment_shift_slow(void)
     return result;
 }
 
+#if PAS_OS(LINUX)
+#define PAS_CONSTRAINED_REGION_SIZE ((size_t)4ull * 1024 * 1024 * 1024)
+
+static void* pas_constrained_region_base = NULL;
+static size_t pas_constrained_region_bump = 0;
+static pthread_mutex_t pas_constrained_region_lock = PTHREAD_MUTEX_INITIALIZER;
+
+uintptr_t pas_page_malloc_constrained_base(void)
+{
+    return (uintptr_t)pas_constrained_region_base;
+}
+#endif
+
 static void*
 pas_page_malloc_try_map_pages(size_t size, bool may_contain_small_or_medium)
 {
@@ -151,9 +164,6 @@ pas_page_malloc_try_map_pages(size_t size, bool may_contain_small_or_medium)
     PAS_PROFILE(PAGE_ALLOCATION, size, may_contain_small_or_medium, PAS_VM_TAG);
     PAS_MTE_HANDLE(PAGE_ALLOCATION, size, may_contain_small_or_medium, PAS_VM_TAG);
 
-    // PAS_STATS is not currently supported on Windows, so we do not currently
-    // increment pas_stats_page_alloc_counts counters here. If that ever
-    // changes, we should call PAS_RECORD_STAT here as well.
     PAS_TESTING_ASSERT(!PAS_ENABLE_STATS);
 
     return virtual_alloc_with_retry(NULL, size, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
@@ -163,16 +173,57 @@ pas_page_malloc_try_map_pages(size_t size, bool may_contain_small_or_medium)
     PAS_PROFILE(PAGE_ALLOCATION, size, may_contain_small_or_medium, PAS_VM_TAG);
     PAS_MTE_HANDLE(PAGE_ALLOCATION, size, may_contain_small_or_medium, PAS_VM_TAG);
 
+#if PAS_OS(LINUX)
+    /* Allocate within a 4GB constrained region. Reserve virtual address space
+       on first use, then bump-allocate and commit pages with MAP_FIXED. */
+    {
+        size_t page_align = pas_page_malloc_alignment();
+        size_t aligned_size = (size + page_align - 1) & ~(page_align - 1);
+
+        pthread_mutex_lock(&pas_constrained_region_lock);
+
+        if (!pas_constrained_region_base) {
+            void* reserved = mmap(NULL, PAS_CONSTRAINED_REGION_SIZE, PROT_NONE,
+                                  MAP_PRIVATE | MAP_ANON | MAP_NORESERVE, -1, 0);
+            if (reserved == MAP_FAILED) {
+                pthread_mutex_unlock(&pas_constrained_region_lock);
+                errno = 0;
+                return NULL;
+            }
+            pas_constrained_region_base = reserved;
+            pas_constrained_region_bump = 0;
+        }
+
+        size_t bump = pas_constrained_region_bump;
+        bump = (bump + page_align - 1) & ~(page_align - 1);
+
+        if (bump + aligned_size > PAS_CONSTRAINED_REGION_SIZE) {
+            pthread_mutex_unlock(&pas_constrained_region_lock);
+            errno = 0;
+            return NULL;
+        }
+
+        mmap_result = (char*)pas_constrained_region_base + bump;
+        void* committed = mmap(mmap_result, aligned_size, PROT_READ | PROT_WRITE,
+                               MAP_PRIVATE | MAP_ANON | MAP_FIXED | MAP_NORESERVE, PAS_VM_TAG, 0);
+        if (committed == MAP_FAILED) {
+            pthread_mutex_unlock(&pas_constrained_region_lock);
+            errno = 0;
+            return NULL;
+        }
+
+        pas_constrained_region_bump = bump + aligned_size;
+        pthread_mutex_unlock(&pas_constrained_region_lock);
+    }
+#else
     mmap_result = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON | PAS_NORESERVE, PAS_VM_TAG, 0);
     if (mmap_result == MAP_FAILED) {
-        errno = 0; /* Clear the error so that we don't leak errno in those
-                      cases where we handle the allocation failure
-                      internally. If we want to set errno for clients then we
-                      do that explicitly. */
+        errno = 0;
         return NULL;
-    } else
-        PAS_RECORD_STAT(page_alloc_counts, size, may_contain_small_or_medium, false);
+    }
+#endif
 
+    PAS_RECORD_STAT(page_alloc_counts, size, may_contain_small_or_medium, false);
     return mmap_result;
 #endif
 }

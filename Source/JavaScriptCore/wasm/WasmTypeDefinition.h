@@ -839,7 +839,7 @@ class alignas(16) RTT final : public ThreadSafeRefCounted<RTT>, private Trailing
     using TrailingArrayType = TrailingArray<RTT, RefPtr<const RTT>>;
     friend TrailingArrayType;
 public:
-    static_assert(sizeof(const RTT*) == sizeof(RefPtr<const RTT>));
+    static_assert(sizeof(RefPtr<const RTT>) <= sizeof(const RTT*));
     static constexpr unsigned inlinedDisplaySize = 6;
     RTT() = delete;
 

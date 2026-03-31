@@ -68,15 +68,15 @@ class CheckedPtr {
 public:
 
     constexpr CheckedPtr()
-        : m_ptr(nullptr)
+        : m_ptr(typename PtrTraits::StorageType { })
     { }
 
     constexpr CheckedPtr(std::nullptr_t)
-        : m_ptr(nullptr)
+        : m_ptr(typename PtrTraits::StorageType { })
     { }
 
     ALWAYS_INLINE CheckedPtr(T* ptr)
-        : m_ptr { ptr }
+        : m_ptr { PtrTraits::compress(ptr) }
     {
         refIfNotNull();
     }
@@ -88,7 +88,7 @@ public:
     }
 
     ALWAYS_INLINE CheckedPtr(CheckedPtr&& other)
-        : m_ptr { PtrTraits::exchange(other.m_ptr, nullptr) }
+        : m_ptr { PtrTraits::compress(PtrTraits::exchange(other.m_ptr, typename PtrTraits::StorageType { })) }
     {
     }
 
@@ -102,7 +102,7 @@ public:
     { }
 
     template<typename OtherType, typename OtherPtrTraits> CheckedPtr(CheckedPtr<OtherType, OtherPtrTraits>&& other)
-        : m_ptr { OtherPtrTraits::exchange(other.m_ptr, nullptr) }
+        : m_ptr { PtrTraits::compress(OtherPtrTraits::exchange(other.m_ptr, typename OtherPtrTraits::StorageType { })) }
     {
     }
 
@@ -115,13 +115,13 @@ public:
     { }
 
     CheckedPtr(CheckedRef<T, PtrTraits>&& other)
-        : m_ptr { other.releasePtr() }
+        : m_ptr { PtrTraits::compress(other.releasePtr()) }
     {
         ASSERT(get());
     }
 
     template<typename OtherType, typename OtherPtrTraits> CheckedPtr(CheckedRef<OtherType, OtherPtrTraits>&& other)
-        : m_ptr { other.releasePtr() }
+        : m_ptr { PtrTraits::compress(other.releasePtr()) }
     {
         ASSERT(get());
     }
@@ -147,22 +147,22 @@ public:
     CheckedRef<T> releaseNonNull()
     {
         RELEASE_ASSERT(m_ptr);
-        auto& ptr = *PtrTraits::unwrap(std::exchange(m_ptr, nullptr));
+        auto& ptr = *PtrTraits::exchange(m_ptr, typename PtrTraits::StorageType { });
         return CheckedRef { ptr, CheckedRef<T>::Adopt };
     }
 
-    bool operator==(const T* other) const { return m_ptr == other; }
-    template<typename U> bool operator==(U* other) const { return m_ptr == other; }
+    bool operator==(const T* other) const { return get() == other; }
+    template<typename U> bool operator==(U* other) const { return get() == other; }
 
     bool operator==(const CheckedPtr& other) const { return m_ptr == other.m_ptr; }
 
     template<typename OtherType, typename OtherPtrTraits>
-    bool operator==(const CheckedPtr<OtherType, OtherPtrTraits>& other) const { return m_ptr == other.m_ptr; }
+    bool operator==(const CheckedPtr<OtherType, OtherPtrTraits>& other) const { return get() == other.get(); }
 
     CheckedPtr& operator=(std::nullptr_t)
     {
         derefIfNotNull();
-        m_ptr = nullptr;
+        m_ptr = typename PtrTraits::StorageType { };
         return *this;
     }
 

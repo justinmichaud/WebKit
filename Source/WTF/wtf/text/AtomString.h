@@ -246,12 +246,9 @@ struct StaticAtomString {
 
     StringImpl::StaticStringImpl* m_pointer;
 };
-static_assert(sizeof(AtomString) == sizeof(StaticAtomString), "AtomString and StaticAtomString must be the same size!");
-extern WTF_EXPORT_PRIVATE const StaticAtomString nullAtomData;
-extern WTF_EXPORT_PRIVATE const StaticAtomString emptyAtomData;
 
-inline const AtomString& nullAtom() { SUPPRESS_MEMORY_UNSAFE_CAST return *reinterpret_cast<const AtomString*>(&nullAtomData); }
-inline const AtomString& emptyAtom() { SUPPRESS_MEMORY_UNSAFE_CAST return *reinterpret_cast<const AtomString*>(&emptyAtomData); }
+WTF_EXPORT_PRIVATE const AtomString& nullAtom();
+WTF_EXPORT_PRIVATE const AtomString& emptyAtom();
 
 inline AtomString::AtomString(ASCIILiteral literal)
     : m_string(literal.isNull() ? RefPtr<AtomStringImpl> { } : literal.length() ? AtomStringImpl::add(literal) : Ref { *emptyAtom().impl() })

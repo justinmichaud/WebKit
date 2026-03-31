@@ -92,53 +92,53 @@ public:
         if (__asan_address_is_poisoned(this))
             __asan_unpoison_memory_region(this, sizeof(*this));
 #endif
-        if (auto* ptr = PtrTraits::exchange(m_ptr, nullptr))
+        if (auto* ptr = PtrTraits::exchange(m_ptr, typename PtrTraits::StorageType { }))
             RefDerefTraits::derefIfNotNull(ptr);
     }
 
     Ref(T& object)
-        : m_ptr(&RefDerefTraits::ref(object))
+        : m_ptr(PtrTraits::compress(&RefDerefTraits::ref(object)))
     {
     }
 
     Ref(const Ref& other)
-        : m_ptr(&RefDerefTraits::ref(other.get()))
+        : m_ptr(PtrTraits::compress(&RefDerefTraits::ref(other.get())))
     {
     }
 
     template<typename X, typename Y> Ref(const Ref<X, Y>& other)
-        : m_ptr(&RefDerefTraits::ref(other.get()))
+        : m_ptr(PtrTraits::compress(&RefDerefTraits::ref(other.get())))
     {
     }
 
     Ref(Ref&& other)
-        : m_ptr(&other.leakRef())
+        : m_ptr(PtrTraits::compress(&other.leakRef()))
     {
         ASSERT(m_ptr);
     }
 
     template<typename X, typename Y>
     Ref(Ref<X, Y>&& other)
-        : m_ptr(&other.leakRef())
+        : m_ptr(PtrTraits::compress(&other.leakRef()))
     {
         ASSERT(m_ptr);
     }
 
     template<typename X, typename WeakPtrImplType>
     Ref(const WeakRef<X, WeakPtrImplType>& other) requires std::is_convertible_v<X*, T*>
-        : m_ptr(&RefDerefTraits::ref(other.get()))
+        : m_ptr(PtrTraits::compress(&RefDerefTraits::ref(other.get())))
     {
     }
 
     template<typename X, typename Y>
     Ref(const CheckedRef<X, Y>& other) requires std::is_convertible_v<X*, T*>
-        : m_ptr(&RefDerefTraits::ref(other.get()))
+        : m_ptr(PtrTraits::compress(&RefDerefTraits::ref(other.get())))
     {
     }
 
     template<typename X, typename Y>
     Ref(const ThreadSafeWeakRef<X, Y>& other) requires std::is_convertible_v<X*, T*>
-        : m_ptr(&RefDerefTraits::ref(other.get()))
+        : m_ptr(PtrTraits::compress(&RefDerefTraits::ref(other.get())))
     {
     }
 
@@ -155,8 +155,8 @@ public:
     Ref(HashTableDeletedValueType) : m_ptr(PtrTraits::hashTableDeletedValue()) { }
     bool isHashTableDeletedValue() const { return PtrTraits::isHashTableDeletedValue(m_ptr); }
 
-    Ref(HashTableEmptyValueType) : m_ptr(hashTableEmptyValue()) { }
-    bool isHashTableEmptyValue() const { return m_ptr == hashTableEmptyValue(); }
+    Ref(HashTableEmptyValueType) : m_ptr(typename PtrTraits::StorageType { }) { }
+    bool isHashTableEmptyValue() const { return m_ptr == typename PtrTraits::StorageType { }; }
     static T* hashTableEmptyValue() { return nullptr; }
 
     const T* ptrAllowingHashTableEmptyValue() const LIFETIME_BOUND { ASSERT(m_ptr || isHashTableEmptyValue()); return PtrTraits::unwrap(m_ptr); }
@@ -168,20 +168,20 @@ public:
     T& get() const LIFETIME_BOUND { ASSERT(m_ptr); return *PtrTraits::unwrap(m_ptr); }
     T& unsafeGet() const { ASSERT(m_ptr); return *PtrTraits::unwrap(m_ptr); } // FIXME: Replace with get() then remove.
     operator T&() const LIFETIME_BOUND { ASSERT(m_ptr); return *PtrTraits::unwrap(m_ptr); }
-    bool operator!() const { ASSERT(m_ptr); return !*m_ptr; }
+    bool operator!() const { ASSERT(m_ptr); return !*PtrTraits::unwrap(m_ptr); }
 
     template<typename X, typename Y, typename Z> [[nodiscard]] Ref<T, PtrTraits, RefDerefTraits> replace(Ref<X, Y, Z>&&);
 
     // copyRef() on a r-value reference is never needed.
     Ref copyRef() && = delete;
 
-    [[nodiscard]] Ref copyRef() const & { return Ref(*m_ptr); }
+    [[nodiscard]] Ref copyRef() const & { return Ref(*PtrTraits::unwrap(m_ptr)); }
 
     [[nodiscard]] T& leakRef()
     {
         ASSERT(m_ptr);
 
-        T& result = *PtrTraits::exchange(m_ptr, nullptr);
+        T& result = *PtrTraits::exchange(m_ptr, typename PtrTraits::StorageType { });
 #if ASAN_ENABLED
         __asan_poison_memory_region(this, sizeof(*this));
 #endif
@@ -197,7 +197,7 @@ private:
 
     enum AdoptTag { Adopt };
     Ref(T& object, AdoptTag)
-        : m_ptr(&object)
+        : m_ptr(PtrTraits::compress(&object))
     {
     }
 
@@ -275,7 +275,7 @@ inline Ref<T, _PtrTraits, RefDerefTraits>& Ref<T, _PtrTraits, RefDerefTraits>::o
 template<typename X, typename APtrTraits, typename ARefDerefTraits, typename Y, typename BPtrTraits, typename BRefDerefTraits>
 inline bool operator==(const Ref<X, APtrTraits, ARefDerefTraits>& a, const Ref<Y, BPtrTraits, BRefDerefTraits>& b)
 {
-    return a.m_ptr == b.m_ptr;
+    return a.ptr() == b.ptr();
 }
 
 template<typename X, typename _PtrTraits, typename RefDerefTraits>
@@ -300,8 +300,8 @@ inline Ref<X, _PtrTraits, RefDerefTraits> Ref<X, _PtrTraits, RefDerefTraits>::re
     if (__asan_address_is_poisoned(this))
         __asan_unpoison_memory_region(this, sizeof(*this));
 #endif
-    auto oldReference = adoptRef(*m_ptr);
-    m_ptr = &reference.leakRef();
+    auto oldReference = adoptRef(*PtrTraits::unwrap(m_ptr));
+    m_ptr = PtrTraits::compress(&reference.leakRef());
     return oldReference;
 }
 

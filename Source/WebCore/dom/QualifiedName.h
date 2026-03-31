@@ -115,7 +115,7 @@ public:
     WEBCORE_EXPORT static void init();
 
 private:
-    static QualifiedNameImpl* hashTableDeletedValue() { return RefPtr<QualifiedNameImpl>::PtrTraits::hashTableDeletedValue(); }
+    static QualifiedNameImpl* hashTableDeletedValue() { return RefPtr<QualifiedNameImpl>::PtrTraits::unwrap(RefPtr<QualifiedNameImpl>::PtrTraits::hashTableDeletedValue()); }
     
     RefPtr<QualifiedNameImpl> m_impl;
 };

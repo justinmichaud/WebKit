@@ -16262,7 +16262,7 @@ void SpeculativeJIT::compileWeakMapGet(Node* node)
     Label loop = label();
     and32(maskGPR, indexGPR);
     if (node->child1().useKind() == WeakSetObjectUse) {
-        static_assert(sizeof(WeakMapBucket<WeakMapBucketDataKey>) == sizeof(void*));
+        static_assert(sizeof(WeakMapBucket<WeakMapBucketDataKey>) <= sizeof(void*));
         zeroExtend32ToWord(indexGPR, bucketGPR);
         lshiftPtr(Imm32(sizeof(void*) == 4 ? 2 : 3), bucketGPR);
         addPtr(bufferGPR, bucketGPR);

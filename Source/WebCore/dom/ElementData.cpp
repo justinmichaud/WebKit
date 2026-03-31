@@ -64,7 +64,7 @@ struct SameSizeAsElementData : public RefCounted<SameSizeAsElementData> {
     void* refPtrs[3];
 };
 
-static_assert(sizeof(ElementData) == sizeof(SameSizeAsElementData), "element attribute data should stay small");
+static_assert(sizeof(ElementData) <= sizeof(SameSizeAsElementData), "element attribute data should stay small");
 
 static size_t NODELETE sizeForShareableElementDataWithAttributeCount(unsigned count)
 {

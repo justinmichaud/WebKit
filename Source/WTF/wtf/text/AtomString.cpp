@@ -31,8 +31,17 @@
 
 namespace WTF {
 
-const StaticAtomString nullAtomData { nullptr };
-const StaticAtomString emptyAtomData { &StringImpl::s_emptyAtomString };
+const AtomString& nullAtom()
+{
+    static const AtomString s;
+    return s;
+}
+
+const AtomString& emptyAtom()
+{
+    static const AtomString s { &StringImpl::s_emptyAtomString };
+    return s;
+}
 
 template<AtomString::CaseConvertType type>
 ALWAYS_INLINE AtomString AtomString::convertASCIICase() const

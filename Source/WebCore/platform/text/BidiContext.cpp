@@ -33,7 +33,7 @@ struct SameSizeAsBidiContext : public ThreadSafeRefCounted<SameSizeAsBidiContext
     void* parent;
 };
 
-static_assert(sizeof(BidiContext) == sizeof(SameSizeAsBidiContext), "BidiContext should stay small");
+static_assert(sizeof(BidiContext) <= sizeof(SameSizeAsBidiContext), "BidiContext should stay small");
 
 inline BidiContext::BidiContext(unsigned char level, UCharDirection direction, bool override, BidiEmbeddingSource source, BidiContext* parent)
     : m_level(level)

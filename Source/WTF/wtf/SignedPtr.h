@@ -132,6 +132,15 @@ struct SignedPtrTraits {
 
     using StorageType = SignedPtr<T, Tag>;
 
+    static ALWAYS_INLINE StorageType compress(T* ptr) { return StorageType { ptr }; }
+
+    static ALWAYS_INLINE T* exchange(StorageType& ptr, StorageType newValue)
+    {
+        T* old = ptr.get();
+        ptr = newValue;
+        return old;
+    }
+
     template<class U> static ALWAYS_INLINE T* exchange(StorageType& ptr, U&& newValue) { return ptr.exchange(newValue); }
     template<typename Other> static ALWAYS_INLINE void swap(StorageType& a, Other& b) { a.swap(b); }
 

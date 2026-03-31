@@ -35,7 +35,7 @@ namespace JSC {
 DEFINE_ALLOCATOR_WITH_HEAP_IDENTIFIER(MetadataTable);
 DEFINE_ALLOCATOR_WITH_HEAP_IDENTIFIER(UnlinkedMetadataTable);
 
-#if CPU(ADDRESS64)
+#if CPU(ADDRESS64) && !OS(LINUX)
 static_assert((UnlinkedMetadataTable::s_maxMetadataAlignment >=
 #define JSC_ALIGNMENT_CHECK(size) size) && (size >=
 FOR_EACH_BYTECODE_METADATA_ALIGNMENT(JSC_ALIGNMENT_CHECK)

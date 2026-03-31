@@ -581,8 +581,17 @@ float charactersToFloat(std::span<const char16_t> data, size_t& parsedLength)
     return static_cast<float>(toDoubleType<char16_t, TrailingJunkPolicy::Allow>(data, nullptr, parsedLength));
 }
 
-const StaticString nullStringData { nullptr };
-const StaticString emptyStringData { &StringImpl::s_emptyAtomString };
+const String& nullString()
+{
+    static const String s;
+    return s;
+}
+
+const String& emptyString()
+{
+    static const String s { &StringImpl::s_emptyAtomString };
+    return s;
+}
 
 } // namespace WTF
 

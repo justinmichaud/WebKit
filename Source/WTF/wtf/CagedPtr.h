@@ -41,11 +41,11 @@ public:
 
     CagedPtr() : CagedPtr(nullptr) { }
     CagedPtr(std::nullptr_t)
-        : m_ptr(nullptr)
+        : m_ptr(typename PtrTraits::StorageType { })
     { }
 
     CagedPtr(T* ptr)
-        : m_ptr(ptr)
+        : m_ptr(PtrTraits::compress(ptr))
     { }
 
     T* get() const LIFETIME_BOUND
@@ -88,13 +88,13 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
     }
 
     CagedPtr(CagedPtr&& other)
-        : m_ptr(PtrTraits::exchange(other.m_ptr, nullptr))
+        : m_ptr(PtrTraits::compress(PtrTraits::exchange(other.m_ptr, typename PtrTraits::StorageType { })))
     {
     }
 
     CagedPtr& operator=(CagedPtr&& ptr)
     {
-        m_ptr = PtrTraits::exchange(ptr.m_ptr, nullptr);
+        m_ptr = PtrTraits::compress(PtrTraits::exchange(ptr.m_ptr, typename PtrTraits::StorageType { }));
         return *this;
     }
 
@@ -112,7 +112,7 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 
     T* rawBits() const
     {
-        return std::bit_cast<T*>(m_ptr);
+        return PtrTraits::unwrap(m_ptr);
     }
     
 protected:

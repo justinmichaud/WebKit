@@ -52,6 +52,6 @@ struct SameSizeAsElementRareData : NodeRareData {
     WeakPtr<Element, WeakPtrImplWithEventTargetData> invokedPopoverWeakPtr;
 };
 
-static_assert(sizeof(ElementRareData) == sizeof(SameSizeAsElementRareData), "ElementRareData should stay small");
+static_assert(sizeof(ElementRareData) <= sizeof(SameSizeAsElementRareData), "ElementRareData should stay small");
 
 } // namespace WebCore

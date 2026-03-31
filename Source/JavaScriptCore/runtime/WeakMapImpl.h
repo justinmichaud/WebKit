@@ -44,7 +44,7 @@ struct WeakMapBucketDataKey {
     static const HashTableType Type = HashTableType::Key;
     WriteBarrier<JSCell> key;
 };
-static_assert(sizeof(WeakMapBucketDataKey) == sizeof(void*));
+static_assert(sizeof(WeakMapBucketDataKey) <= sizeof(void*));
 
 struct WeakMapBucketDataKeyValue {
     static const HashTableType Type = HashTableType::KeyValue;

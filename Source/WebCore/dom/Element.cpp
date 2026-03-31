@@ -201,7 +201,7 @@ struct SameSizeAsElement : public ContainerNode {
     void* shadowRoot;
 };
 
-static_assert(sizeof(Element) == sizeof(SameSizeAsElement), "Element should stay small");
+static_assert(sizeof(Element) <= sizeof(SameSizeAsElement), "Element should stay small");
 
 using namespace HTMLNames;
 using namespace XMLNames;

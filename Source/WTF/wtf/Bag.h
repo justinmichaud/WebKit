@@ -44,7 +44,7 @@ public:
     { }
     
     T m_item;
-    typename PtrTraits::StorageType m_next { nullptr };
+    typename PtrTraits::StorageType m_next { };
 };
 
 template<typename T, typename PassedPtrTraits = RawPtrTraits<T>, typename Malloc = FastMalloc>
@@ -61,8 +61,8 @@ public:
     Bag(Bag<T, U>&& other)
     {
         ASSERT(!m_head);
-        m_head = other.unwrappedHead();
-        other.m_head = nullptr;
+        m_head = PtrTraits::compress(other.unwrappedHead());
+        other.m_head = typename U::template RebindTraits<typename Bag<T, U>::Node>::StorageType { };
     }
 
     template<typename U>
@@ -72,9 +72,9 @@ public:
             return *this;
 
         Bag destroy;
-        destroy.m_head = unwrappedHead();
-        m_head = other.unwrappedHead();
-        other.m_head = nullptr;
+        destroy.m_head = PtrTraits::compress(unwrappedHead());
+        m_head = PtrTraits::compress(other.unwrappedHead());
+        other.m_head = typename U::template RebindTraits<typename Bag<T, U>::Node>::StorageType { };
 
         return *this;
     }
@@ -93,16 +93,16 @@ public:
             current->~Node();
             Malloc::free(current);
         }
-        m_head = nullptr;
+        m_head = typename PtrTraits::StorageType { };
     }
-    
+
     template<typename... Args>
     T* add(Args&&... args)
     {
         Node* newNode = static_cast<Node*>(Malloc::malloc(sizeof(Node)));
         new (NotNull, newNode) Node(std::forward<Args>(args)...);
-        newNode->m_next = unwrappedHead();
-        m_head = newNode;
+        newNode->m_next = Node::PtrTraits::compress(unwrappedHead());
+        m_head = PtrTraits::compress(newNode);
         return &newNode->m_item;
     }
     
@@ -154,7 +154,7 @@ public:
 private:
     Node* unwrappedHead() const { return PtrTraits::unwrap(m_head); }
 
-    typename PtrTraits::StorageType m_head { nullptr };
+    typename PtrTraits::StorageType m_head { };
 };
 
 } // namespace WTF

@@ -63,7 +63,7 @@ struct SameSizeAsComputedStyle : CanMakeCheckedPtr<SameSizeAsComputedStyle> {
 #endif
 };
 
-static_assert(sizeof(ComputedStyle) == sizeof(SameSizeAsComputedStyle), "ComputedStyle should stay small");
+static_assert(sizeof(ComputedStyle) <= sizeof(SameSizeAsComputedStyle), "ComputedStyle should stay small");
 
 void ComputedStyle::inheritFrom(const ComputedStyle& inheritParent)
 {

@@ -155,7 +155,7 @@ public:
 private:
     StorageType cell() const { return m_cell; }
 
-    StorageType m_cell;
+    StorageType m_cell { };
 };
 
 template <> class WriteBarrierBase<Unknown, RawValueTraits<Unknown>> {

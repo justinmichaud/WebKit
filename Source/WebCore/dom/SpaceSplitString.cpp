@@ -31,7 +31,7 @@ namespace WebCore {
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(SpaceSplitStringData);
 
-static_assert(!(sizeof(SpaceSplitStringData) % sizeof(uintptr_t)), "SpaceSplitStringDataTail is aligned to WordSize");
+static_assert(!(sizeof(SpaceSplitStringData) % alignof(AtomString)), "SpaceSplitStringDataTail is aligned for AtomString");
 
 template <typename CharacterType, typename TokenProcessor>
 static inline void tokenizeSpaceSplitString(TokenProcessor& tokenProcessor, std::span<const CharacterType> characters)

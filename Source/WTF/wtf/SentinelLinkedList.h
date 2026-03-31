@@ -57,8 +57,8 @@ public:
     
     BasicRawSentinelNode() = default;
     
-    void setPrev(BasicRawSentinelNode* prev) { m_prev = prev; }
-    void setNext(BasicRawSentinelNode* next) { m_next = next; }
+    void setPrev(BasicRawSentinelNode* prev) { m_prev = PtrTraits::compress(prev); }
+    void setNext(BasicRawSentinelNode* next) { m_next = PtrTraits::compress(next); }
     
     T* prev() const { return static_cast<T*>(PtrTraits::unwrap(m_prev)); }
     T* next() const { return static_cast<T*>(PtrTraits::unwrap(m_next)); }
@@ -75,8 +75,8 @@ public:
     void append(BasicRawSentinelNode*);
     
 private:
-    typename PtrTraits::StorageType m_next { nullptr };
-    typename PtrTraits::StorageType m_prev { nullptr };
+    typename PtrTraits::StorageType m_next { };
+    typename PtrTraits::StorageType m_prev { };
 };
 
 template <typename T, typename RawNode = T> class SentinelLinkedList {

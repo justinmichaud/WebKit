@@ -85,7 +85,12 @@ ALWAYS_INLINE void JSObject::markAuxiliaryAndVisitOutOfLineProperties(Visitor& v
         return;
 
     if (isCopyOnWrite(structure->indexingMode())) {
-        visitor.append(std::bit_cast<WriteBarrier<JSCell>>(JSCellButterfly::fromButterfly(butterfly)));
+        {
+            auto* cellButterfly = JSCellButterfly::fromButterfly(butterfly);
+            WriteBarrier<JSCell> barrier;
+            barrier.setWithoutWriteBarrier(reinterpret_cast<JSCell*>(cellButterfly));
+            visitor.append(barrier);
+        }
         return;
     }
 
