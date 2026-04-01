@@ -54,6 +54,8 @@ namespace WebCore {
 GST_DEBUG_CATEGORY_STATIC(webkit_media_gst_registry_scanner_debug);
 #define GST_CAT_DEFAULT webkit_media_gst_registry_scanner_debug
 
+static bool parseAC4LevelAndProfile(const String& codec);
+
 struct VideoDecodingLimits {
     unsigned mediaMaxWidth = 0;
     unsigned mediaMaxHeight = 0;
@@ -565,6 +567,7 @@ void GStreamerRegistryScanner::initializeDecoders(const GStreamerRegistryScanner
     Vector<GstCapsWebKitMapping> mseCompatibleMapping = {
         { ElementFactories::Type::AudioDecoder, "audio/x-ac3"_s, { }, { "x-ac3"_s, "ac-3"_s, "ac3"_s } },
         { ElementFactories::Type::AudioDecoder, "audio/x-eac3"_s, { "audio/x-ac3"_s }, { "x-eac3"_s, "ec3"_s, "ec-3"_s, "eac3"_s } },
+        { ElementFactories::Type::AudioDecoder, "audio/x-ac4"_s, { }, { "x-ac4"_s, "ac-4*"_s, "ac4"_s } },
         { ElementFactories::Type::AudioDecoder, "audio/x-flac"_s, { "audio/x-flac"_s, "audio/flac"_s }, { "x-flac"_s, "flac"_s, "fLaC"_s } },
     };
     fillMimeTypeSetFromCapsMapping(factories, mseCompatibleMapping);
@@ -801,6 +804,8 @@ GStreamerRegistryScanner::CodecLookupResult GStreamerRegistryScanner::isCodecSup
     else if ((codecName.startsWith("dvhe"_s) || codecName.startsWith("dvh1"_s)) && !supportsDVHCodec)
         result = { false, nullptr };
 #endif // PLATFORM(WPE)
+    else if (codecName.startsWith("ac-4"_s) && !parseAC4LevelAndProfile(codecName))
+        result = { false, nullptr };
     else {
         auto& codecMap = configuration == Configuration::Decoding ? m_decoderCodecMap : m_encoderCodecMap;
         for (const auto& [codecId, lookupResult] : codecMap) {
@@ -1016,6 +1021,38 @@ ASCIILiteral GStreamerRegistryScanner::configurationNameForLogging(Configuration
         return "decoding"_s;
     }
     return ""_s;
+}
+
+static bool parseAC4LevelAndProfile(const String& codec)
+{
+    auto parts = codec.split('.');
+    // "ac-4" with no dots is valid (generic, unconstrained).
+    if (parts.size() == 1 && equalIgnoringASCIICase(parts[0], "ac-4"_s))
+        return true;
+    // Full format requires exactly 4 components: ["ac-4", bitstream_version, presentation_version, mdcompat].
+    // See ETSI TS 103 190-2 v1.3.1 Appendix E.13.
+    if (parts.size() != 4) {
+        GST_WARNING("AC-4 codec string has wrong number of components: %s", codec.utf8().data());
+        return false;
+    }
+
+    // The current available AC-4 decoders don't have an agreed upon API to query support in a fine-grained manner,
+    // so instead we make some conservative assumptions, matching the subset of AC-4 supported in CMAF.
+
+    // presentation_version must be 1 (stereo/5.1); value 2 denotes IMS which is assumed not supported.
+    auto presentationVersion = parseInteger<unsigned>(parts[2]);
+    if (!presentationVersion || *presentationVersion != 1) {
+        GST_DEBUG("AC-4 codec string has unsupported presentation_version: %s", codec.utf8().data());
+        return false;
+    }
+    // md_compat (level): only levels 0-3 are assumed supported.
+    // Levels 4-6 are reserved by the AC-4 spec. Level 7 (unlimited number of tracks) is assumed unsupported.
+    auto mdcompat = parseInteger<unsigned>(parts[3]);
+    if (!mdcompat || *mdcompat > 3) {
+        GST_DEBUG("AC-4 codec string has unsupported mdcompat level: %s", codec.utf8().data());
+        return false;
+    }
+    return true;
 }
 
 GStreamerRegistryScanner::RegistryLookupResult GStreamerRegistryScanner::isConfigurationSupported(Configuration configuration, const MediaConfiguration& mediaConfiguration) const

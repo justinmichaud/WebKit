@@ -67,6 +67,7 @@ static GstStaticPadTemplate thunderParseSrcTemplate = GST_STATIC_PAD_TEMPLATE("s
         "audio/x-flac; "
         "audio/x-eac3; "
         "audio/x-ac3; "
+        "audio/x-ac4; "
         "video/x-h264; "
         "video/x-h265; "
         "video/x-vp9; video/x-vp8; "
