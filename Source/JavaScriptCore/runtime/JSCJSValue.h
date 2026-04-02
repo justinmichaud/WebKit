@@ -79,10 +79,11 @@ struct DumpContext;
 struct MethodTable;
 enum class Unknown { };
 
+template<typename T> struct WriteBarrierRawPtrTraits;
 template <class T, typename Traits> class WriteBarrierBase;
 template<class T>
 using WriteBarrierTraitsSelect = typename std::conditional<std::is_same<T, Unknown>::value,
-    RawValueTraits<T>, RawPtrTraits<T>
+    RawValueTraits<T>, WriteBarrierRawPtrTraits<T>
 >::type;
 
 enum PreferredPrimitiveType : uint8_t { NoPreference, PreferNumber, PreferString };

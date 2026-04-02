@@ -626,6 +626,7 @@ set(WTF_SOURCES
     UUID.cpp
     UniqueArray.cpp
     Vector.cpp
+    RawPtrTraits.cpp
     WTFAssertions.cpp
     WTFConfig.cpp
     WTFProcess.cpp

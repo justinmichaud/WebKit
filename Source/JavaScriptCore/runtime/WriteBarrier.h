@@ -43,9 +43,24 @@ class JSCell;
 class VM;
 class JSGlobalObject;
 
+// WriteBarrier uses uncompressed raw pointers because the LLInt reads these
+// fields directly as pointer-width values via loadp.
+template<typename T>
+struct WriteBarrierRawPtrTraits {
+    template<typename U> using RebindTraits = WriteBarrierRawPtrTraits<U>;
+    using StorageType = T*;
+    static ALWAYS_INLINE StorageType compress(T* ptr) { return ptr; }
+    template<typename U>
+    static ALWAYS_INLINE T* exchange(StorageType& ptr, U&& newValue) { return std::exchange(ptr, newValue); }
+    static ALWAYS_INLINE void swap(StorageType& a, StorageType& b) { std::swap(a, b); }
+    static ALWAYS_INLINE T* unwrap(const StorageType& ptr) { return ptr; }
+    static StorageType hashTableDeletedValue() { return std::bit_cast<StorageType>(static_cast<uintptr_t>(-1)); }
+    static ALWAYS_INLINE bool isHashTableDeletedValue(const StorageType& ptr) { return ptr == hashTableDeletedValue(); }
+};
+
 template<class T>
 using WriteBarrierTraitsSelect = typename std::conditional<std::is_same<T, Unknown>::value,
-    RawValueTraits<T>, RawPtrTraits<T>
+    RawValueTraits<T>, WriteBarrierRawPtrTraits<T>
 >::type;
 
 template<class T, typename Traits = WriteBarrierTraitsSelect<T>> class WriteBarrierBase;
@@ -128,7 +143,7 @@ public:
     void clear() { Traits::exchange(m_cell, nullptr); }
 
     // Slot cannot be used when pointers aren't stored as-is.
-    template<typename BarrierT, typename BarrierTraits, std::enable_if_t<std::is_same<BarrierTraits, RawPtrTraits<BarrierT>>::value, void*> = nullptr>
+    template<typename BarrierT, typename BarrierTraits, std::enable_if_t<std::is_same<typename BarrierTraits::StorageType, BarrierT*>::value, void*> = nullptr>
     struct SlotHelper {
         static BarrierT** reinterpret(typename BarrierTraits::StorageType* cell) { return reinterpret_cast<T**>(cell); }
     };

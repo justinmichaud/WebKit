@@ -38,7 +38,8 @@ namespace JSC {
 ALWAYS_INLINE void JSString::destroy(JSCell* cell)
 {
     auto* string = static_cast<JSString*>(cell);
-    string->valueInternal().~String();
+    if (auto* impl = std::bit_cast<StringImpl*>(string->m_fiber))
+        impl->deref();
 }
 
 ALWAYS_INLINE void JSRopeString::destroy(JSCell* cell)
@@ -46,7 +47,8 @@ ALWAYS_INLINE void JSRopeString::destroy(JSCell* cell)
     auto* string = static_cast<JSRopeString*>(cell);
     if (string->isRope())
         return;
-    string->valueInternal().~String();
+    if (auto* impl = std::bit_cast<StringImpl*>(string->m_fiber))
+        impl->deref();
 }
 
 bool JSString::equal(JSGlobalObject* globalObject, JSString* other) const
@@ -273,8 +275,9 @@ inline void JSRopeString::convertToNonRope(String&& string) const
     // store-store barrier here to ensure concurrent compiler threads see initialized String.
     ASSERT(JSString::isRope());
     WTF::storeStoreFence();
-    new (&uninitializedValueInternal()) String(WTF::move(string));
-    static_assert(sizeof(String) == sizeof(RefPtr<StringImpl>), "JSString's String initialization must be done in one pointer move.");
+    // Store raw StringImpl* pointer directly in m_fiber as a single pointer-width write.
+    // This avoids sizeof(String) != sizeof(uintptr_t) issues with pointer compression.
+    m_fiber = std::bit_cast<uintptr_t>(string.releaseImpl().leakRef());
     // We do not clear the trailing fibers and length information (fiber1 and fiber2) because we could be reading the length concurrently.
     ASSERT(!JSString::isRope());
     notifyNeedsDestruction();
@@ -725,7 +728,7 @@ inline JSString* jsSubstringOfResolved(VM& vm, GCDeferralContext* deferralContex
     }
 
     ASSERT(!s->isRope());
-    auto& base = s->valueInternal();
+    auto base = s->valueInternal();
     if (!offset && length == base.length())
         return s;
 

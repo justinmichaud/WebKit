@@ -226,7 +226,7 @@ GCOwnedDataScope<AtomStringImpl*> JSRopeString::resolveRopeToExistingAtomString(
 }
 
 template<bool reportAllocation, typename Function>
-const String& JSRopeString::resolveRopeWithFunction(JSGlobalObject* nullOrGlobalObjectForOOM, Function&& function) const
+String JSRopeString::resolveRopeWithFunction(JSGlobalObject* nullOrGlobalObjectForOOM, Function&& function) const
 {
     ASSERT(isRope());
     
@@ -271,7 +271,7 @@ const String& JSRopeString::resolveRopeWithFunction(JSGlobalObject* nullOrGlobal
     return valueInternal();
 }
 
-const String& JSRopeString::resolveRope(JSGlobalObject* nullOrGlobalObjectForOOM) const
+String JSRopeString::resolveRope(JSGlobalObject* nullOrGlobalObjectForOOM) const
 {
     constexpr bool reportAllocation = true;
     return resolveRopeWithFunction<reportAllocation>(nullOrGlobalObjectForOOM, [] (Ref<StringImpl>&& newImpl) {
@@ -279,7 +279,7 @@ const String& JSRopeString::resolveRope(JSGlobalObject* nullOrGlobalObjectForOOM
     });
 }
 
-const String& JSRopeString::resolveRopeWithoutGC() const
+String JSRopeString::resolveRopeWithoutGC() const
 {
     constexpr bool reportAllocation = false;
     return resolveRopeWithFunction<reportAllocation>(nullptr, [] (Ref<StringImpl>&& newImpl) {
@@ -340,7 +340,7 @@ bool JSString::getStringPropertyDescriptor(JSGlobalObject* globalObject, Propert
     return false;
 }
 
-GCOwnedDataScope<const String&> JSString::tryGetValueWithoutGC() const
+GCOwnedDataScope<String> JSString::tryGetValueWithoutGC() const
 {
     if (isRope()) {
         // Pass nullptr for the JSGlobalObject so that resolveRope does not throw in the event of an OOM error.

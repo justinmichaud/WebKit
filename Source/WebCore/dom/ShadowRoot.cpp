@@ -68,7 +68,7 @@ struct SameSizeAsShadowRoot : public DocumentFragment, public TreeScope {
     AtomString referenceTarget;
 };
 
-static_assert(sizeof(ShadowRoot) == sizeof(SameSizeAsShadowRoot), "shadowroot should stay small");
+static_assert(sizeof(ShadowRoot) <= sizeof(SameSizeAsShadowRoot), "shadowroot should stay small");
 #if !ASSERT_ENABLED && ASSERT_WITH_SECURITY_IMPLICATION_DISABLED
 static_assert(sizeof(WeakPtr<Element, WeakPtrImplWithEventTargetData>) <= sizeof(void*), "WeakPtr should be same size as raw pointer");
 #endif

@@ -141,15 +141,12 @@ public:
     inline void resolveToBuffer(std::span<CharacterType>);
 
 private:
-    String& uninitializedValueInternal() const
-    {
-        return *std::bit_cast<String*>(&m_fiber);
-    }
-
-    String& valueInternal() const
+    // m_fiber stores a raw StringImpl* pointer (not compressed).
+    // Do NOT type-pun as String& since sizeof(String) may differ from sizeof(uintptr_t).
+    String valueInternal() const
     {
         ASSERT(!isRope());
-        return uninitializedValueInternal();
+        return String(std::bit_cast<StringImpl*>(m_fiber));
     }
 
     static constexpr TypeInfo defaultTypeInfo() { return TypeInfo(StringType, StructureFlags); }
@@ -160,8 +157,8 @@ private:
 
     JSString(VM& vm, Ref<StringImpl>&& value)
         : JSCell(CreatingWellDefinedBuiltinCell, vm.stringStructure.get()->id(), defaultTypeInfoBlob())
+        , m_fiber(std::bit_cast<uintptr_t>(&value.leakRef()))
     {
-        new (&uninitializedValueInternal()) String(WTF::move(value));
     }
 
     JSString(VM& vm)
@@ -234,9 +231,9 @@ public:
 
     ALWAYS_INLINE bool equalInline(JSGlobalObject*, JSString* other) const;
     inline bool equal(JSGlobalObject*, JSString* other) const;
-    GCOwnedDataScope<const String&> value(JSGlobalObject*) const;
-    inline GCOwnedDataScope<const String&> tryGetValue(bool allocationAllowed = true) const;
-    GCOwnedDataScope<const String&> tryGetValueWithoutGC() const;
+    GCOwnedDataScope<String> value(JSGlobalObject*) const;
+    inline GCOwnedDataScope<String> tryGetValue(bool allocationAllowed = true) const;
+    GCOwnedDataScope<String> tryGetValueWithoutGC() const;
     StringImpl* getValueImpl() const;
     StringImpl* tryGetValueImpl() const;
     ALWAYS_INLINE unsigned length() const;
@@ -620,8 +617,8 @@ public:
 
     // If nullOrExecForOOM is null, resolveRope() will be do nothing in the event of an OOM error.
     // The rope value will remain a null string in that case.
-    JS_EXPORT_PRIVATE const String& resolveRope(JSGlobalObject* nullOrGlobalObjectForOOM) const;
-    JS_EXPORT_PRIVATE const String& resolveRopeWithoutGC() const;
+    JS_EXPORT_PRIVATE String resolveRope(JSGlobalObject* nullOrGlobalObjectForOOM) const;
+    JS_EXPORT_PRIVATE String resolveRopeWithoutGC() const;
 
     template<typename CharacterType>
     static void resolveToBuffer(JSString*, JSString*, JSString*, std::span<CharacterType> buffer, uint8_t* stackLimit);
@@ -662,7 +659,7 @@ private:
 
     friend JSValue jsStringFromRegisterArray(JSGlobalObject*, Register*, unsigned);
 
-    template<bool reportAllocation, typename Function> const String& resolveRopeWithFunction(JSGlobalObject* nullOrGlobalObjectForOOM, Function&&) const;
+    template<bool reportAllocation, typename Function> String resolveRopeWithFunction(JSGlobalObject* nullOrGlobalObjectForOOM, Function&&) const;
     JS_EXPORT_PRIVATE GCOwnedDataScope<AtomStringImpl*> resolveRopeToAtomString(JSGlobalObject*) const;
     JS_EXPORT_PRIVATE GCOwnedDataScope<AtomStringImpl*> resolveRopeToExistingAtomString(JSGlobalObject*) const;
     template<typename CharacterType> void resolveRopeInternalNoSubstring(std::span<CharacterType>, uint8_t* stackLimit) const;
@@ -903,7 +900,7 @@ ALWAYS_INLINE GCOwnedDataScope<AtomStringImpl*> JSString::toExistingAtomString(J
     return { };
 }
 
-inline GCOwnedDataScope<const String&> JSString::value(JSGlobalObject* globalObject) const
+inline GCOwnedDataScope<String> JSString::value(JSGlobalObject* globalObject) const
 {
     if constexpr (validateDFGDoesGC)
         vm().verifyCanGC();
@@ -912,7 +909,7 @@ inline GCOwnedDataScope<const String&> JSString::value(JSGlobalObject* globalObj
     return { this, valueInternal() };
 }
 
-inline GCOwnedDataScope<const String&> JSString::tryGetValue(bool allocationAllowed) const
+inline GCOwnedDataScope<String> JSString::tryGetValue(bool allocationAllowed) const
 {
     if (allocationAllowed) {
         if constexpr (validateDFGDoesGC)
@@ -1186,11 +1183,11 @@ ALWAYS_INLINE GCOwnedDataScope<StringView> JSRopeString::view(JSGlobalObject* gl
     if constexpr (validateDFGDoesGC)
         vm().verifyCanGC();
     if (isSubstring()) {
-        auto& base = substringBase()->valueInternal();
+        auto base = substringBase()->valueInternal();
         // We return the substring as that's the owner and JSStringJoiner will end up retaining a reference to the underlying string.
         return { substringBase(), StringView { base }.substring(substringOffset(), length()) };
     }
-    auto& string = resolveRope(globalObject);
+    auto string = resolveRope(globalObject);
     return { this, string };
 }
 

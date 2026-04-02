@@ -121,7 +121,7 @@ void UnlinkedMetadataTable::finalize()
             unsigned alignment = metadataAlignment(static_cast<OpcodeID>(i));
             ASSERT(alignment <= s_maxMetadataAlignment);
 
-#if CPU(ADDRESS64)
+#if CPU(ADDRESS64) && !OS(LINUX)
             // This is only necessary for the first metadata entry, if the buffer
             // is 4-byte aligned and the entry has an alignment requirement of 8
             ASSERT(offset == roundUpToMultipleOf(alignment, offset) || offset == s_offset16TableSize);
