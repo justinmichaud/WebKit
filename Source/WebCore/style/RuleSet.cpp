@@ -202,7 +202,7 @@ void RuleSet::addRule(RuleData&& ruleData, CascadeLayerIdentifier cascadeLayerId
             idSelector = selector;
             break;
         case CSSSelector::Match::Class: {
-            auto& className = selector->value();
+            auto className = selector->value();
             if (!classSelector) {
                 classSelector = selector;
                 classBucketSize = rulesCountForName(m_classRules, className);
@@ -461,7 +461,7 @@ void RuleSet::addRule(RuleData&& ruleData, CascadeLayerIdentifier cascadeLayerId
                 return false;
 
             ASSERT(last->tagQName().localName() == starAtom());
-            auto& namespaceURI = last->tagQName().namespaceURI();
+            auto namespaceURI = last->tagQName().namespaceURI();
             isHTMLNamespace = namespaceURI == xhtmlNamespaceURI;
             if (!isHTMLNamespace && namespaceURI != starAtom())
                 return false;

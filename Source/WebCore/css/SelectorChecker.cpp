@@ -757,7 +757,7 @@ static bool NODELETE canMatchHoverOrActiveInQuirksMode(const SelectorChecker::Lo
 
 static inline bool NODELETE tagMatches(const Element& element, const CSSSelector& simpleSelector)
 {
-    const QualifiedName& tagQName = simpleSelector.tagQName();
+    auto tagQName = simpleSelector.tagQName();
 
     if (tagQName == anyQName())
         return true;

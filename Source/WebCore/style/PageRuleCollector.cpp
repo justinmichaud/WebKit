@@ -95,7 +95,7 @@ static bool NODELETE checkPageSelectorComponents(const CSSSelector& selector, bo
 {
     for (const CSSSelector* component = &selector; component; component = component->precedingInComplexSelector()) {
         if (component->match() == CSSSelector::Match::Tag) {
-            const AtomString& localName = component->tagQName().localName();
+            auto localName = component->tagQName().localName();
             if (localName != starAtom() && localName != pageName)
                 return false;
         } else if (component->match() == CSSSelector::Match::PagePseudoClass) {

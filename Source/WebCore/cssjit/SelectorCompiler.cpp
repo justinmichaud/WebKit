@@ -450,7 +450,7 @@ struct SelectorFragment {
     // FIXME: the large stack allocation caused by the inline capacity causes memory inefficiency. We should dump
     // the min/max/average of the vectors and pick better inline capacity.
     const CSSSelector* tagNameSelector = nullptr;
-    const AtomString* id = nullptr;
+    std::optional<AtomString> id;
     Vector<TextDirection> dirList;
     Vector<const FixedVector<PossiblyQuotedIdentifier>*> languageArgumentsList;
     Vector<const AtomStringImpl*, 8> classNames;
@@ -1524,12 +1524,12 @@ static FunctionType constructFragmentsInternal(const CSSSelector& rootSelector, 
                 fragment->onlyMatchesLinksInQuirksMode = false;
             break;
         case CSSSelector::Match::Id: {
-            const AtomString& id = selector->value();
+            auto id = selector->value();
             if (fragment->id) {
                 if (id != *fragment->id)
                     return FunctionType::CannotMatchAnything;
             } else
-                fragment->id = &(selector->value());
+                fragment->id = id;
             fragment->onlyMatchesLinksInQuirksMode = false;
             break;
         }
@@ -2026,11 +2026,11 @@ static inline TagNameEquality NODELETE equalTagNames(const CSSSelector* lhs, con
     if (!lhs || !rhs)
         return TagNameEquality::MaybeEqual;
 
-    const QualifiedName& lhsQualifiedName = lhs->tagQName();
+    auto lhsQualifiedName = lhs->tagQName();
     if (lhsQualifiedName == anyQName())
         return TagNameEquality::MaybeEqual;
 
-    const QualifiedName& rhsQualifiedName = rhs->tagQName();
+    auto rhsQualifiedName = rhs->tagQName();
     if (rhsQualifiedName == anyQName())
         return TagNameEquality::MaybeEqual;
 
@@ -4066,7 +4066,7 @@ void SelectorCodeGenerator::generateElementHasPlaceholderShown(Assembler::JumpLi
 
 inline void SelectorCodeGenerator::generateElementHasTagName(Assembler::JumpList& failureCases, const CSSSelector& tagMatchingSelector)
 {
-    const QualifiedName& nameToMatch = tagMatchingSelector.tagQName();
+    auto nameToMatch = tagMatchingSelector.tagQName();
     if (nameToMatch == anyQName())
         return;
 

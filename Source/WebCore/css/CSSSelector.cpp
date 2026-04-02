@@ -482,7 +482,7 @@ String CSSSelector::selectorText(StringView separator, StringView rightSide) con
     StringBuilder builder;
 
     if (match() == Match::Tag && !m_tagIsForNamespaceRule) {
-        if (auto& prefix = tagQName().prefix(); !prefix.isNull()) {
+        if (auto prefix = tagQName().prefix(); !prefix.isNull()) {
             serializeIdentifierOrStar(prefix, builder);
             builder.append('|');
         }

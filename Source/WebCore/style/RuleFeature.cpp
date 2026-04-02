@@ -479,7 +479,7 @@ void RuleFeatureSet::collectFeatures(CollectionContext& collectionContext, const
     auto addToMap = [&]<typename HostAffectingNames>(auto& map, auto& entries, HostAffectingNames hostAffectingNames) {
         for (auto& entry : entries) {
             auto& [selector, matchElement, isNegation] = entry;
-            auto& name = selector->value();
+            auto name = selector->value();
 
             auto& featureVector = *map.ensure(name, [] {
                 return makeUnique<RuleFeatureVector>();

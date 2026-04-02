@@ -148,11 +148,11 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
     const CSSSelector* NODELETE lastInCompound() const;
     const CSSSelector* NODELETE precedingInCompound() const;
 
-    const QualifiedName& tagQName() const LIFETIME_BOUND;
+    QualifiedName tagQName() const;
     const AtomString& tagLowercaseLocalName() const LIFETIME_BOUND;
 
-    const AtomString& value() const LIFETIME_BOUND;
-    const AtomString& serializingValue() const LIFETIME_BOUND;
+    AtomString value() const;
+    AtomString serializingValue() const;
     const QualifiedName& attribute() const LIFETIME_BOUND;
     const AtomString& argument() const LIFETIME_BOUND { return m_hasRareData ? m_data.rareData->argument : nullAtom(); }
     bool attributeValueMatchingIsCaseInsensitive() const;
@@ -416,9 +416,9 @@ inline CSSSelector::~CSSSelector()
         m_data.value->deref();
 }
 
-inline const QualifiedName& CSSSelector::tagQName() const
+inline QualifiedName CSSSelector::tagQName() const
 {
-    return *reinterpret_cast<const QualifiedName*>(&m_data.tagQName);
+    return QualifiedName(*m_data.tagQName);
 }
 
 inline const AtomString& CSSSelector::tagLowercaseLocalName() const
@@ -426,24 +426,22 @@ inline const AtomString& CSSSelector::tagLowercaseLocalName() const
     return tagQName().localNameLowercase();
 }
 
-inline const AtomString& CSSSelector::value() const
+inline AtomString CSSSelector::value() const
 {
     ASSERT(match() != Match::Tag);
     if (m_hasRareData)
         return m_data.rareData->matchingValue;
 
-    // AtomString is really just an AtomStringImpl* so the cast below is safe.
-    return *reinterpret_cast<const AtomString*>(&m_data.value);
+    return AtomString(m_data.value);
 }
 
-inline const AtomString& CSSSelector::serializingValue() const
+inline AtomString CSSSelector::serializingValue() const
 {
     ASSERT(match() != Match::Tag);
     if (m_hasRareData)
         return m_data.rareData->serializingValue;
 
-    // AtomString is really just an AtomStringImpl* so the cast below is safe.
-    return *reinterpret_cast<const AtomString*>(&m_data.value);
+    return AtomString(m_data.value);
 }
 
 inline bool CSSSelector::attributeValueMatchingIsCaseInsensitive() const

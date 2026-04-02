@@ -56,7 +56,7 @@ public:
     CSSSelector& selector() LIFETIME_BOUND { return m_selector; }
 
     void setValue(const AtomString& value, bool matchLowerCase = false) { m_selector.setValue(value, matchLowerCase); }
-    const AtomString& value() const LIFETIME_BOUND { return m_selector.value(); }
+    AtomString value() const { return m_selector.value(); }
 
     void setAttribute(const QualifiedName& value, CSSSelector::AttributeMatchType type) { m_selector.setAttribute(value, type); }
 

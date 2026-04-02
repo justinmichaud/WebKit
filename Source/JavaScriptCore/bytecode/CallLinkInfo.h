@@ -313,7 +313,7 @@ protected:
     CodePtr<JSEntryPtrTag> m_monomorphicCallDestination { nullptr };
     WriteBarrier<JSObject> m_callee;
     WriteBarrier<JSObject> m_lastSeenCallee;
-    RefPtr<PolymorphicCallStubRoutine> m_stub;
+    RefPtr<PolymorphicCallStubRoutine, UncompressedPtrTraits<PolymorphicCallStubRoutine>> m_stub;
     JSCell* m_owner { nullptr };
     CodeOrigin m_codeOrigin { };
 };

@@ -30,6 +30,28 @@
 
 #include <wtf/Assertions.h>
 #include <stdio.h>
+#include <signal.h>
+#include <execinfo.h>
+#include <unistd.h>
+
+static void crashHandler(int sig) {
+    void* frames[64];
+    int n = backtrace(frames, 64);
+    fprintf(stderr, "\n=== CRASH signal %d ===\n", sig);
+    backtrace_symbols_fd(frames, n, STDERR_FILENO);
+    fprintf(stderr, "=== END CRASH ===\n");
+    signal(sig, SIG_DFL);
+    raise(sig);
+}
+
+__attribute__((constructor)) static void installCrashHandler() {
+    signal(SIGSEGV, crashHandler);
+    signal(SIGBUS, crashHandler);
+}
+#include <signal.h>
+#include <execinfo.h>
+#include <unistd.h>
+
 
 static uintptr_t sideTableEntries[rawPtrSideTableMaxIndex];
 static uint32_t sideTableCount = 0;

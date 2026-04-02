@@ -491,7 +491,7 @@ public:
     const Ref<WatchpointSet> m_masqueradesAsUndefinedWatchpointSet;
     const Ref<WatchpointSet> m_havingABadTimeWatchpointSet;
     const Ref<WatchpointSet> m_varInjectionWatchpointSet;
-    const Ref<WatchpointSet> m_varReadOnlyWatchpointSet;
+    const Ref<WatchpointSet, UncompressedPtrTraits<WatchpointSet>> m_varReadOnlyWatchpointSet;
     const Ref<WatchpointSet> m_regExpRecompiledWatchpointSet;
     const Ref<WatchpointSet> m_arrayBufferDetachWatchpointSet;
 

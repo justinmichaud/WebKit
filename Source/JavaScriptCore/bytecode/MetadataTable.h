@@ -133,8 +133,12 @@ public:
 
     SUPPRESS_ASAN bool isDestroyed() const
     {
-        uintptr_t unlinkedMetadataPtr = *std::bit_cast<uintptr_t*>(&linkingData().unlinkedMetadata);
-        return !unlinkedMetadataPtr;
+        // Check whether the Ref's internal storage is zero (null/moved-from).
+        // Use the actual StorageType size rather than type-punning as uintptr_t,
+        // since pointer compression may make Ref smaller than a pointer.
+        using StorageType = typename Ref<UnlinkedMetadataTable>::PtrTraits::StorageType;
+        StorageType val = *std::bit_cast<StorageType*>(&linkingData().unlinkedMetadata);
+        return !val;
     }
 
 private:

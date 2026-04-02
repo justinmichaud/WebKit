@@ -253,7 +253,7 @@ ALWAYS_INLINE void SelectorDataList::executeFastPathForIdSelector(const Containe
     ASSERT(m_selectors.size() == 1);
     ASSERT(idSelector);
 
-    const AtomString& idToMatch = idSelector->value();
+    auto idToMatch = idSelector->value();
     if (rootNode.treeScope().containsMultipleElementsWithId(idToMatch)) [[unlikely]] {
         auto* elements = rootNode.treeScope().getAllElementsById(idToMatch);
         ASSERT(elements);
@@ -295,7 +295,7 @@ static Ref<ContainerNode> filterRootById(ContainerNode& rootNode, const CSSSelec
     bool inAdjacentChain = false;
     for (; selector; selector = selector->precedingInComplexSelector()) {
         if (canBeUsedForIdFastPath(*selector)) {
-            const AtomString& idToMatch = selector->value();
+            auto idToMatch = selector->value();
             if (RefPtr<ContainerNode> searchRoot = rootNode.treeScope().getElementById(idToMatch)) {
                 if (!rootNode.treeScope().containsMultipleElementsWithId(idToMatch)) [[likely]] {
                     if (inAdjacentChain)
@@ -369,7 +369,7 @@ ALWAYS_INLINE void SelectorDataList::executeSingleTagNameSelectorData(const Cont
     ASSERT(m_selectors.size() == 1);
     ASSERT(isSingleTagNameSelector(selectorData.selector));
 
-    const QualifiedName& tagQualifiedName = selectorData.selector.tagQName();
+    auto tagQualifiedName = selectorData.selector.tagQName();
     const AtomString& selectorLocalName = tagQualifiedName.localName();
     const AtomString& selectorLowercaseLocalName = selectorData.selector.tagLowercaseLocalName();
     const AtomString& selectorNamespaceURI = tagQualifiedName.namespaceURI();
