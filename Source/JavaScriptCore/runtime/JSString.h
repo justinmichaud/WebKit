@@ -846,10 +846,13 @@ ALWAYS_INLINE void JSString::swapToAtomString(VM& vm, RefPtr<AtomStringImpl>&& a
     // This is OK since (1) when finishing GC concurrent compiler threads and GC threads are stopped, and (2) AtomString is already held in the atom table,
     // and we anyway keep this old string until this JSString* is GC-ed. So it does not increase any memory pressure, we release at the same timing.
     ASSERT(!isCompilationThread() && !Thread::mayBeGCThread());
-    String target(WTF::move(atom));
+    ASSERT(!isRope());
+    // Swap the raw StringImpl* in m_fiber directly (cannot use valueInternal() which returns by value).
+    StringImpl* oldImpl = std::bit_cast<StringImpl*>(m_fiber);
+    StringImpl* newImpl = atom.leakRef(); // Takes ownership of the ref
     WTF::storeStoreFence(); // Ensure AtomStringImpl's string is fully initialized when it is exposed to concurrent threads.
-    valueInternal().swap(target);
-    vm.heap.appendPossiblyAccessedStringFromConcurrentThreads(WTF::move(target));
+    m_fiber = std::bit_cast<uintptr_t>(newImpl);
+    vm.heap.appendPossiblyAccessedStringFromConcurrentThreads(String(adoptRef(*oldImpl)));
 }
 
 ALWAYS_INLINE Identifier JSString::toIdentifier(JSGlobalObject* globalObject) const
