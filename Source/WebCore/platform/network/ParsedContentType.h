@@ -49,6 +49,7 @@ public:
     ParsedContentType(ParsedContentType&&) = default;
 
     String mimeType() const { return m_mimeType; }
+    String contentType() const { return m_contentType; }
     String charset() const;
     void setCharset(String&&);
 
