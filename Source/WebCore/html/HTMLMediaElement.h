@@ -1282,8 +1282,6 @@ private:
     bool m_volumeLocked : 1;
     bool m_cachedIsInVisibilityAdjustmentSubtree : 1 { false };
     bool m_requiresTextTrackRepresentation : 1 { false };
-    bool m_isResumingPlayback : 1 { false };
-    bool m_seekAfterPlaybackEnded : 1 { false };
 
     IntRect m_textTrackRepresentationBounds;
 
