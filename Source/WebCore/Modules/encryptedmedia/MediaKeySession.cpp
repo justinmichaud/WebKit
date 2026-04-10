@@ -124,6 +124,14 @@ const String& MediaKeySession::sessionId() const
     return m_sessionId;
 }
 
+bool MediaKeySession::hasSecurityOrigin(const String& origin) const
+{
+    String sessionOrigin;
+    if (RefPtr document = downcast<Document>(scriptExecutionContext()))
+        sessionOrigin = document->securityOrigin().toString();
+    return origin == sessionOrigin;
+}
+
 double MediaKeySession::expiration() const
 {
     return m_expiration;
@@ -314,25 +322,32 @@ void MediaKeySession::load(const String& sessionId, Ref<DeferredPromise>&& promi
             return;
         }
 
-        // 8.3. If there is a MediaKeySession object that is not closed in this object's Document whose sessionId attribute is sanitized session ID, reject promise with a QuotaExceededError.
-        // FIXME: This needs a global MediaKeySession tracker.
-
         String origin;
         if (RefPtr document = downcast<Document>(scriptExecutionContext()))
             origin = document->securityOrigin().toString();
+
+        // 8.3. If there is a MediaKeySession object that is not closed in this object's Document whose sessionId attribute is sanitized session ID, reject promise with a QuotaExceededError.
+        if (m_keys && m_keys->hasOpenSessionWithIdForOrigin(sanitizedSessionId.value(), WTFMove(origin))) {
+            ERROR_LOG(identifier, "Rejected: Another open MediaKeySession with the same session ID already exists for this security origin");
+            promise->reject(ExceptionCode::QuotaExceededError);
+            return;
+        }
 
         // 8.4. Let expiration time be NaN.
         // 8.5. Let message be null.
         // 8.6. Let message type be null.
         // 8.7. Let cdm be the CDM instance represented by this object's cdm instance value.
         // 8.8. Use the cdm to execute the following steps:
-        m_instanceSession->loadSession(m_sessionType, *sanitizedSessionId, origin, [this, weakThis, promise = WTFMove(promise), sanitizedSessionId = *sanitizedSessionId, identifier = WTFMove(identifier)] (std::optional<CDMInstanceSession::KeyStatusVector>&& knownKeys, std::optional<double>&& expiration, std::optional<CDMInstanceSession::Message>&& message, CDMInstanceSession::SuccessValue succeeded, CDMInstanceSession::SessionLoadFailure failure) mutable {
+        m_instanceSession->loadSession(m_sessionType, *sanitizedSessionId, origin,
+            [this, weakThis, promise = WTFMove(promise), sanitizedSessionId = *sanitizedSessionId, identifier = WTFMove(identifier), origin]
+            (std::optional<CDMInstanceSession::KeyStatusVector>&& knownKeys, std::optional<double>&& expiration,
+            std::optional<CDMInstanceSession::Message>&& message, CDMInstanceSession::SuccessValue succeeded,
+            CDMInstanceSession::SessionLoadFailure failure) mutable {
             auto protectedThis = RefPtr { weakThis.get() };
             if (!protectedThis) {
                 promise->reject(ExceptionCode::InvalidStateError);
                 return;
             }
-
             // 8.8.1. If there is no data stored for the sanitized session ID in the origin, resolve promise with false and abort these steps.
             // 8.8.2. If the stored session's session type is not the same as the current MediaKeySession session type, reject promise with a newly created TypeError.
             // 8.8.3. Let session data be the data stored for the sanitized session ID in the origin. This must not include data from other origin(s) or that is not associated with an origin.
@@ -366,7 +381,17 @@ void MediaKeySession::load(const String& sessionId, Ref<DeferredPromise>&& promi
             }
 
             // 8.9. Queue a task to run the following steps:
-            queueTaskKeepingObjectAlive(*this, TaskSource::Networking, [this, knownKeys = WTFMove(knownKeys), expiration = WTFMove(expiration), message = WTFMove(message), sanitizedSessionId, succeeded, promise = WTFMove(promise), identifier = WTFMove(identifier)] () mutable {
+            queueTaskKeepingObjectAlive(*this, TaskSource::Networking, [this, knownKeys = WTFMove(knownKeys), expiration = WTFMove(expiration), message = WTFMove(message), sanitizedSessionId, origin = WTFMove(origin), succeeded, promise = WTFMove(promise), identifier = WTFMove(identifier), origin = WTFMove(origin)] () mutable {
+                // We must reevaluate condition 8.3 to avoid a race condition in case the id of the sessions
+                // compared before were empty at the moment of comparison because they were in the middle of a
+                // session loading that completed asynchronously. Their ids should have settled now, so let's
+                // check again.
+                if (m_keys && m_keys->hasOpenSessionWithIdForOrigin(sanitizedSessionId, origin)) {
+                    ERROR_LOG(identifier, "Rejected (later): Another open MediaKeySession with the same session ID already exists for this security origin");
+                    promise->reject(ExceptionCode::QuotaExceededError);
+                    return;
+                }
+
                 // 8.9.1. If any of the preceding steps failed, reject promise with a the appropriate error name.
                 if (succeeded == CDMInstanceSession::SuccessValue::Failed) {
                     ERROR_LOG(identifier, "::task() Rejected: Other failure");

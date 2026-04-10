@@ -180,6 +180,15 @@ bool MediaKeys::hasOpenSessions() const
         });
 }
 
+bool MediaKeys::hasOpenSessionWithIdForOrigin(const String& sessionId, const String& origin) const
+{
+    return std::any_of(m_sessions.begin(), m_sessions.end(),
+        [&sessionId, &origin](auto& session) {
+            return session->sessionId() == sessionId && !session->isClosed()
+                && session->hasSecurityOrigin(origin);
+        });
+}
+
 void MediaKeys::unrequestedInitializationDataReceived(const String& initDataType, Ref<SharedBuffer>&& initData)
 {
     for (auto& cdmClient : m_cdmClients)
