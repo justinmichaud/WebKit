@@ -45,7 +45,7 @@ public:
     TextureMapperLayer* replicaLayer { nullptr };
     bool preserves3D { false };
     Vector<IntRect> holePunchRects;
-    bool isPreserves3DFirstTile { false };
+    bool isPreserves3DFirstPaint { false };
 };
 
 struct TextureMapperLayer::ComputeTransformData {
@@ -283,7 +283,7 @@ void TextureMapperLayer::paintPreserves3DHolePunch(TextureMapperPlatformLayer* c
     // background hole only once, while the transparent rectangle to this layer needs to be painted
     // for each tile.
 
-    if (options.isPreserves3DFirstTile) {
+    if (options.isPreserves3DFirstPaint) {
         // We can't use the passed transform here cause it was created with a modified offset to paint
         // into the intermediate surface. We need to calculate the real position of the video sink
         // here by using a transform that doesn't have the intermediate surface offset.
@@ -858,7 +858,7 @@ void TextureMapperLayer::paintWith3DRenderingContext(TextureMapperPaintOptions& 
                     SetForScope scopedSurface(options.surface, surface);
                     SetForScope scopedOffset(options.offset, -toIntSize(tileRect.location()));
                     SetForScope scopedOpacity(options.opacity, 1);
-                    SetForScope scopedFirstPass(options.isPreserves3DFirstTile, x == rect.x() && y == rect.y());
+                    SetForScope scopedFirstPass(options.isPreserves3DFirstPaint, rect == rects[0] && x == rect.x() && y == rect.y());
 
                     options.textureMapper.bindSurface(options.surface.get());
                     paintSelfAndChildrenWithReplica(options);
