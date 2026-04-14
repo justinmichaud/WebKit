@@ -381,7 +381,7 @@ void MediaKeySession::load(const String& sessionId, Ref<DeferredPromise>&& promi
             }
 
             // 8.9. Queue a task to run the following steps:
-            queueTaskKeepingObjectAlive(*this, TaskSource::Networking, [this, knownKeys = WTFMove(knownKeys), expiration = WTFMove(expiration), message = WTFMove(message), sanitizedSessionId, origin = WTFMove(origin), succeeded, promise = WTFMove(promise), identifier = WTFMove(identifier), origin = WTFMove(origin)] () mutable {
+            queueTaskKeepingObjectAlive(*this, TaskSource::Networking, [this, knownKeys = WTFMove(knownKeys), expiration = WTFMove(expiration), message = WTFMove(message), sanitizedSessionId, succeeded, promise = WTFMove(promise), identifier = WTFMove(identifier), origin = WTFMove(origin)] () mutable {
                 // We must reevaluate condition 8.3 to avoid a race condition in case the id of the sessions
                 // compared before were empty at the moment of comparison because they were in the middle of a
                 // session loading that completed asynchronously. Their ids should have settled now, so let's
