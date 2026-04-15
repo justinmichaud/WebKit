@@ -42,6 +42,10 @@
 #include "GetterSetter.h"
 #include "HeapProfiler.h"
 #include "HeapSnapshotBuilder.h"
+#if ENABLE(REFTRACKER)
+#include "TandemHeapAnalyzer.h"
+#include <wtf/StackTrace.h>
+#endif
 #include "InterpreterInlines.h"
 #include "JITSizeStatistics.h"
 #include "JSArray.h"
@@ -2608,9 +2612,19 @@ JSC_DEFINE_HOST_FUNCTION(functionTriggerMemoryPressure, (JSGlobalObject* globalO
     VMInspector::gc(&globalObject->vm());
     WTF::MemoryPressureHandler::singleton().endSimulatedMemoryPressure();
     WTF::MemoryPressureHandler::singleton().endSimulatedMemoryWarning();
-#if ENABLE(REFTRACKER)
-    if (Options::enableStrongRefTracker())
-        StrongRefTracker::refTrackerSingleton().logAllLiveReferences();
+#if ENABLE(REFTRACKER) && __has_include(<meta>)
+    if (Options::enableStrongRefTracker()) {
+        JSC::findAllOnNativeHeap<^^JSC::Strong>(globalObject->vm(), globalObject->vm(),
+            [](auto& strong) {
+                dataLogLn("Live Strong at ", RawPointer(std::addressof(strong)), ":");
+                auto frames = strong.refTrackerFrames();
+                if (!frames.empty())
+                    dataLogLn(WTF::StackTracePrinter { frames });
+                else
+                    dataLogLn("  (no stack trace - REFTRACKER flag was off at construction)");
+                dataLogLn();
+            });
+    }
 #endif
     return JSValue::encode(jsUndefined());
 }
@@ -4553,7 +4567,6 @@ void JSDollarVM::visitChildrenImpl(JSCell* cell, Visitor& visitor)
 }
 
 DEFINE_VISIT_CHILDREN(JSDollarVM);
-REFTRACKER_IMPL(StrongRefTracker);
 
 } // namespace JSC
 

@@ -571,6 +571,7 @@ heap/StructureAlignedMemoryAllocator.cpp
 heap/Subspace.cpp
 heap/SynchronousStopTheWorldMutatorScheduler.cpp
 heap/Synchronousness.cpp
+heap/TandemHeapAnalyzer.cpp
 heap/VerifierSlotVisitor.cpp
 heap/VisitRaceKey.cpp
 heap/WeakBlock.cpp

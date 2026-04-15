@@ -291,10 +291,12 @@ MediaPermissionResult checkSpeechRecognitionServiceAccess()
 {
     auto authorizationStatus = [PAL::getSFSpeechRecognizerClassSingleton() authorizationStatus];
 IGNORE_WARNINGS_BEGIN("deprecated-enum-compare")
+IGNORE_WARNINGS_BEGIN("enum-enum-conversion")
     if (authorizationStatus == SFSpeechRecognizerAuthorizationStatusDenied || authorizationStatus == SFSpeechRecognizerAuthorizationStatusRestricted)
         return MediaPermissionResult::Denied;
     if (authorizationStatus == SFSpeechRecognizerAuthorizationStatusAuthorized)
         return MediaPermissionResult::Granted;
+IGNORE_WARNINGS_END
 IGNORE_WARNINGS_END
     return MediaPermissionResult::Unknown;
 }

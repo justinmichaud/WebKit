@@ -1253,6 +1253,7 @@
 				WTF/Threading.cpp,
 				WTF/ThreadMessages.cpp,
 				WTF/Time.cpp,
+				WTF/TraceNativeHeap.cpp,
 				WTF/TruncateFloat.cpp,
 				WTF/UniqueArray.cpp,
 				WTF/UniqueRef.cpp,

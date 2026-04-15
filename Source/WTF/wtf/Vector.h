@@ -65,7 +65,7 @@ struct VectorCopier {
     template<typename U, std::size_t Extent>
     static void uninitializedCopy(std::span<const U, Extent> src, std::span<T> dst)
     {
-        if constexpr (std::is_trivial_v<T> && std::same_as<T, U>)
+        if constexpr (std::is_trivially_copyable_v<T> && std::same_as<T, U>)
             memcpySpan(dst, src);
         else {
             for (size_t i = 0; i < src.size(); ++i)
@@ -764,8 +764,8 @@ public:
     static constexpr ptrdiff_t sizeMemoryOffset() { return OBJECT_OFFSETOF(Vector, m_size); }
     [[nodiscard]] size_t capacity() const { return Base::capacity(); }
     [[nodiscard]] bool isEmpty() const { return !size(); }
-    [[nodiscard]] std::span<const T> span() const LIFETIME_BOUND { return { data(), size() }; }
-    [[nodiscard]] std::span<T> mutableSpan() LIFETIME_BOUND { return { data(), size() }; }
+    [[nodiscard]] std::span<const T> span() const LIFETIME_BOUND { return std::span<const T>(data(), size()); }
+    [[nodiscard]] std::span<T> mutableSpan() LIFETIME_BOUND { return std::span<T>(data(), size()); }
 
     Vector<T> subvector(size_t offset, size_t length = std::dynamic_extent) const
     {
@@ -864,9 +864,9 @@ public:
     template<typename... Args> ALWAYS_INLINE bool tryConstructAndAppend(Args&&... args) { return constructAndAppend<FailureAction::Report>(std::forward<Args>(args)...); }
 
     template<typename U, size_t Extent> ALWAYS_INLINE bool tryAppend(std::span<const U, Extent> span) { return append<FailureAction::Report>(span); }
-    template<typename U, size_t Extent> ALWAYS_INLINE bool tryAppend(std::span<U, Extent> span) { return append<FailureAction::Report>(std::span<const U> { span.data(), span.size() }); }
+    template<typename U, size_t Extent> ALWAYS_INLINE bool tryAppend(std::span<U, Extent> span) { return append<FailureAction::Report>(std::span<const U>(span.data(), span.size())); }
     template<typename U, size_t Extent> ALWAYS_INLINE void append(std::span<const U, Extent> span) { append<FailureAction::Crash>(span); }
-    template<typename U, size_t Extent> ALWAYS_INLINE void append(std::span<U, Extent> span) { append<FailureAction::Crash>(std::span<const U> { span.data(), span.size() }); }
+    template<typename U, size_t Extent> ALWAYS_INLINE void append(std::span<U, Extent> span) { append<FailureAction::Crash>(std::span<const U>(span.data(), span.size())); }
     template<typename U> ALWAYS_INLINE void appendList(std::initializer_list<U> initializerList) { append<FailureAction::Crash>(std::span { std::data(initializerList), initializerList.size() }); }
     template<typename U, size_t otherCapacity, typename OtherOverflowHandler, size_t otherMinCapacity, typename OtherMalloc> void appendVector(const Vector<U, otherCapacity, OtherOverflowHandler, otherMinCapacity, OtherMalloc>&);
     template<typename U, size_t otherCapacity, typename OtherOverflowHandler, size_t otherMinCapacity, typename OtherMalloc> void appendVector(Vector<U, otherCapacity, OtherOverflowHandler, otherMinCapacity, OtherMalloc>&&);

@@ -50,7 +50,9 @@ PlatformImagePtr ImageBackingStore::image() const
 
     m_pixels->ref(); // Balanced above in dataProviderReleaseCallback().
 IGNORE_WARNINGS_BEGIN("deprecated-enum-enum-conversion")
+IGNORE_WARNINGS_BEGIN("enum-enum-conversion")
     CGBitmapInfo bitmapInfo = (m_premultiplyAlpha ? kCGImageAlphaPremultipliedFirst : kCGImageAlphaFirst) | kCGImageByteOrder32Little;
+IGNORE_WARNINGS_END
 IGNORE_WARNINGS_END
     return adoptCF(CGImageCreate(width, height, bitsPerComponent, bytesPerPixel * 8, bytesPerRow, colorSpace.get(), bitmapInfo, dataProvider.get(), nullptr, true, kCGRenderingIntentDefault));
 }

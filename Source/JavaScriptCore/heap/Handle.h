@@ -59,7 +59,7 @@ protected:
         : m_slot(slot)
     {
     }
-    
+
     void swap(HandleBase& other) { std::swap(m_slot, other.m_slot); }
 
     void setSlot(HandleSlot slot)

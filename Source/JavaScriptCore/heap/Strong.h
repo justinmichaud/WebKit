@@ -34,17 +34,15 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 #include <JavaScriptCore/Heap.h>
 #include <JavaScriptCore/InitializeThreading.h>
 #include <JavaScriptCore/JSLock.h>
+#include <JavaScriptCore/Options.h>
 #include <JavaScriptCore/StrongForward.h>
 #include <wtf/HashFunctions.h>
-#include <wtf/RefTrackerMixin.h>
+#include <wtf/StackShot.h>
+#include <wtf/StackTrace.h>
 
 namespace JSC {
 
 class VM;
-
-REFTRACKER_DECL(StrongRefTracker, {
-    JSC::initialize();
-});
 
 // A strongly referenced handle that prevents the object it points to from being garbage collected.
 template <typename T, ShouldStrongDestructorGrabLock shouldStrongDestructorGrabLock> class Strong final : public Handle<T> {
@@ -156,6 +154,28 @@ public:
         }
     }
 
+    // Reflection-driven ref-tracker hook. The name is fixed by convention and
+    // is found via C++26 reflection by WTF::StackTraceProvider. Returning true
+    // makes each Strong<T> capture a birth-site backtrace on construction.
+    static bool isRefTrackerMixinEnabled()
+    {
+        JSC::initialize();
+        return Options::enableStrongRefTracker();
+    }
+
+    // Returns the backtrace captured at construction by the embedded
+    // StackTraceProvider, or an empty span if REFTRACKER is disabled or the
+    // flag was off when this Strong was constructed.
+    std::span<void* const> refTrackerFrames() const
+    {
+#if ENABLE(REFTRACKER)
+        auto frames = m_stackTraceProvider.frames();
+        return { frames.data(), frames.size() };
+#else
+        return { };
+#endif
+    }
+
 private:
     static HandleSlot hashTableDeletedValue() { return reinterpret_cast<HandleSlot>(-1); }
     static HandleSlot hashTableEmptyValue() { return reinterpret_cast<HandleSlot>(0); }
@@ -168,7 +188,7 @@ private:
         *slot() = value;
     }
 
-    REFTRACKER_MEMBERS(StrongRefTracker);
+    [[no_unique_address]] WTF::StackTraceProvider<Strong> m_stackTraceProvider;
 };
 
 template<class T> inline void swap(Strong<T>& a, Strong<T>& b)

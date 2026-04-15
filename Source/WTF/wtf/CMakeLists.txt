@@ -279,7 +279,6 @@ set(WTF_PUBLIC_HEADERS
     RefCountedWithInlineWeakPtr.h
     RefCounter.h
     RefPtr.h
-    RefTrackerMixin.h
     RefVector.h
     ReferenceWrapperVector.h
     ResourceUsage.h
@@ -371,6 +370,7 @@ set(WTF_PUBLIC_HEADERS
     TimingScope.h
     TinyLRUCache.h
     TinyPtrSet.h
+    TraceNativeHeap.h
     TrailingArray.h
     TranslatedProcess.h
     TriState.h
@@ -595,7 +595,6 @@ set(WTF_SOURCES
     RandomDevice.cpp
     ReadWriteLock.cpp
     RefCountDebugger.cpp
-    RefTrackerMixin.cpp
     RunLoop.cpp
     RuntimeApplicationChecks.cpp
     SHA1.cpp

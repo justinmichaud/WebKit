@@ -349,6 +349,7 @@ static NSString *dataURLFromImageData(JSValue *imageData, size_t *outWidth, NSSt
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-anon-enum-enum-conversion"
+#pragma clang diagnostic ignored "-Wenum-enum-conversion"
     constexpr CGBitmapInfo bitmapInfo = kCGBitmapByteOrderDefault | kCGImageAlphaPremultipliedLast;
 #pragma clang diagnostic pop
 

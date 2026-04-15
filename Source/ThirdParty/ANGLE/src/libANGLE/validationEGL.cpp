@@ -2483,7 +2483,7 @@ void ValidationContext::setError(EGLint error) const
     eglThread->setError(error, entryPoint, labeledObject, nullptr);
 }
 
-void ValidationContext::setError(EGLint error, const char *message...) const
+void ValidationContext::setError(EGLint error, const char *message, ...) const
 {
     ASSERT(message);
 

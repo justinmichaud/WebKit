@@ -910,7 +910,7 @@ template<typename T, std::size_t Extent = std::dynamic_extent>
 inline constexpr auto unsafeMakeSpan(T* ptr, size_t size)
 {
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
-    return std::span<T, Extent> { ptr, size };
+    return std::span<T, Extent>(ptr, size);
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 }
 
@@ -928,26 +928,26 @@ constexpr std::span<T, Extent == std::dynamic_extent ? std::dynamic_extent : (si
         static_assert(!((sizeof(U) * Extent) % sizeof(T)), "spanReinterpretCast will not change size in bytes from source");
 
     using ReturnType = std::span<T, Extent == std::dynamic_extent ? std::dynamic_extent : (sizeof(U) * Extent) / sizeof(T)>;
-    return ReturnType { reinterpret_cast<T*>(const_cast<std::remove_const_t<U>*>(span.data())), span.size_bytes() / sizeof(T) };
+    return ReturnType(reinterpret_cast<T*>(const_cast<std::remove_const_t<U>*>(span.data())), span.size_bytes() / sizeof(T));
 }
 #pragma GCC diagnostic pop
 
 template<typename U, typename T, std::size_t Extent>
 std::span<U, Extent> spanConstCast(std::span<T, Extent> span)
 {
-    return std::span<U, Extent> { const_cast<U*>(span.data()), span.size() };
+    return std::span<U, Extent>(const_cast<U*>(span.data()), span.size());
 }
 
 template<typename T, std::size_t Extent>
 std::span<const uint8_t, Extent == std::dynamic_extent ? std::dynamic_extent: Extent * sizeof(T)> asBytes(std::span<T, Extent> span)
 {
-    return std::span<const uint8_t, Extent == std::dynamic_extent ? std::dynamic_extent: Extent * sizeof(T)> { reinterpret_cast<const uint8_t*>(span.data()), span.size_bytes() };
+    return std::span<const uint8_t, Extent == std::dynamic_extent ? std::dynamic_extent: Extent * sizeof(T)>(reinterpret_cast<const uint8_t*>(span.data()), span.size_bytes());
 }
 
 template<typename T, std::size_t Extent>
 std::span<uint8_t, Extent == std::dynamic_extent ? std::dynamic_extent: Extent * sizeof(T)> asWritableBytes(std::span<T, Extent> span)
 {
-    return std::span<uint8_t, Extent == std::dynamic_extent ? std::dynamic_extent: Extent * sizeof(T)> { reinterpret_cast<uint8_t*>(span.data()), span.size_bytes() };
+    return std::span<uint8_t, Extent == std::dynamic_extent ? std::dynamic_extent: Extent * sizeof(T)>(reinterpret_cast<uint8_t*>(span.data()), span.size_bytes());
 }
 
 template<typename T>

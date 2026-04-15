@@ -133,5 +133,42 @@ template<> struct DefaultHash<StackShot> : StackShotHash { };
 
 template<> struct HashTraits<StackShot> : SimpleClassHashTraits<StackShot> { };
 
+// A tiny data-member wrapper that captures a StackShot at construction time
+// iff Owner::isRefTrackerMixinEnabled() returns true. Used to embed a
+// birth-site backtrace inside a tracked class without having that class
+// mention any of the ref-tracker machinery directly — the only thing the
+// owner declares is the `isRefTrackerMixinEnabled()` static member plus the
+// provider field itself.
+//
+// Copy/move re-capture, since a copied owner has a new birth site.
+// When REFTRACKER is disabled at compile time this is an empty struct; paired
+// with [[no_unique_address]] at the declaration site it has zero size.
+#if ENABLE(REFTRACKER)
+template<typename Owner>
+class StackTraceProvider {
+public:
+    ALWAYS_INLINE StackTraceProvider()
+    {
+        if (Owner::isRefTrackerMixinEnabled()) [[unlikely]]
+            m_shot = StackShot(32);
+    }
+    ALWAYS_INLINE StackTraceProvider(const StackTraceProvider&)
+        : StackTraceProvider() { }
+    ALWAYS_INLINE StackTraceProvider(StackTraceProvider&&)
+        : StackTraceProvider() { }
+    StackTraceProvider& operator=(const StackTraceProvider&) { return *this; }
+    StackTraceProvider& operator=(StackTraceProvider&&) { return *this; }
+
+    std::span<void*> frames() const LIFETIME_BOUND { return m_shot.span(); }
+    const StackShot& shot() const LIFETIME_BOUND { return m_shot; }
+
+private:
+    StackShot m_shot;
+};
+#else
+template<typename Owner>
+struct StackTraceProvider { };
+#endif
+
 } // namespace WTF
 

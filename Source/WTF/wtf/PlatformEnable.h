@@ -682,14 +682,14 @@
 #define ENABLE_COMPACT_ALLOCATION_FOR_PREFERABLY_COMPACT_TYPES 1
 #endif
 
-// See RefTrackerMixin.h
+// See wtf/StackShot.h (StackTraceProvider) and wtf/TraceNativeHeap.h.
 #if ASSERT_ENABLED
 #undef ENABLE_REFTRACKER
 #define ENABLE_REFTRACKER 1
 #endif
 
 #if !defined(ENABLE_REFTRACKER)
-#define ENABLE_REFTRACKER 0
+#define ENABLE_REFTRACKER 1
 #endif
 
 #if !defined(ENABLE_CFPREFS_DIRECT_MODE)
