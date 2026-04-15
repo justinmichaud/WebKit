@@ -138,6 +138,7 @@
 		0F1E3A67153A21E2000F9456 /* DFGSilentRegisterSavePlan.h in Headers */ = {isa = PBXBuildFile; fileRef = 0F1E3A65153A21DF000F9456 /* DFGSilentRegisterSavePlan.h */; };
 		0F1FB38F1E173A6700A9BE50 /* SynchronousStopTheWorldMutatorScheduler.h in Headers */ = {isa = PBXBuildFile; fileRef = 0F1FB38B1E173A6200A9BE50 /* SynchronousStopTheWorldMutatorScheduler.h */; };
 		2F7CACE3000000000000001A /* TandemHeapAnalyzer.h in Headers */ = {isa = PBXBuildFile; fileRef = 2F7CACE3000000000000000A /* TandemHeapAnalyzer.h */; };
+		2F7CACE4000000000000001A /* NamespaceCellDispatcher.h in Headers */ = {isa = PBXBuildFile; fileRef = 2F7CACE4000000000000000A /* NamespaceCellDispatcher.h */; };
 		0F1FB3991E1F65FB00A9BE50 /* MutatorScheduler.h in Headers */ = {isa = PBXBuildFile; fileRef = 0F1FB3981E1F65F900A9BE50 /* MutatorScheduler.h */; };
 		0F1FE51C1922A3BC006987C5 /* AbortReason.h in Headers */ = {isa = PBXBuildFile; fileRef = 0F1FE51B1922A3BC006987C5 /* AbortReason.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		0F2017801DCADC3500EA5950 /* DFGFlowIndexing.h in Headers */ = {isa = PBXBuildFile; fileRef = 0F20177E1DCADC3000EA5950 /* DFGFlowIndexing.h */; };
@@ -2850,6 +2851,7 @@
 		0F1FB38B1E173A6200A9BE50 /* SynchronousStopTheWorldMutatorScheduler.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = SynchronousStopTheWorldMutatorScheduler.h; sourceTree = "<group>"; };
 		2F7CACE2000000000000000A /* TandemHeapAnalyzer.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = TandemHeapAnalyzer.cpp; sourceTree = "<group>"; };
 		2F7CACE3000000000000000A /* TandemHeapAnalyzer.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = TandemHeapAnalyzer.h; sourceTree = "<group>"; };
+		2F7CACE4000000000000000A /* NamespaceCellDispatcher.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = NamespaceCellDispatcher.h; sourceTree = "<group>"; };
 		0F1FB38C1E173A6200A9BE50 /* MutatorScheduler.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = MutatorScheduler.cpp; sourceTree = "<group>"; };
 		0F1FB3981E1F65F900A9BE50 /* MutatorScheduler.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = MutatorScheduler.h; sourceTree = "<group>"; };
 		0F1FE51B1922A3BC006987C5 /* AbortReason.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = AbortReason.h; sourceTree = "<group>"; };
@@ -7576,6 +7578,7 @@
 				0F1FB3981E1F65F900A9BE50 /* MutatorScheduler.h */,
 				0FA762021DB9242300B7A2FD /* MutatorState.cpp */,
 				0FA762031DB9242300B7A2FD /* MutatorState.h */,
+				2F7CACE4000000000000000A /* NamespaceCellDispatcher.h */,
 				E356987122841183008CDCCB /* PackedCellPtr.h */,
 				0F9DAA081FD1C3C80079C5B2 /* ParallelSourceAdapter.h */,
 				0F070A451D543A89006E7232 /* PreciseAllocation.cpp */,
@@ -12156,6 +12159,7 @@
 				A79D3ED9C5064DD0A8466A3A /* ModuleScopeData.h in Headers */,
 				0F1FB3991E1F65FB00A9BE50 /* MutatorScheduler.h in Headers */,
 				0FA762071DB9243300B7A2FD /* MutatorState.h in Headers */,
+				2F7CACE4000000000000001A /* NamespaceCellDispatcher.h in Headers */,
 				E3F52B2B2A8D9BB70080E92D /* NativeCallee.h in Headers */,
 				E36D2BB82A8D9E5C001CF154 /* NativeCalleeRegistry.h in Headers */,
 				BC02E9110E1839DB000F9297 /* NativeErrorConstructor.h in Headers */,

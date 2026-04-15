@@ -79,4 +79,6 @@ list(APPEND TestWebKit_SOURCES
     Helpers/mac/OffscreenWindow.mm
     Helpers/mac/PlatformUtilitiesMac.mm
     Helpers/mac/PlatformWebViewMac.mm
+
+    Tests/WebKit/WKWebView/mac/TraceNativeHeapDOM.mm
 )

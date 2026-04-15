@@ -362,6 +362,7 @@
 		DD3DC8A727A4BF8E007E5B61 /* FastMalloc.h in Headers */ = {isa = PBXBuildFile; fileRef = A8A472A2151A825A004123FF /* FastMalloc.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		DD3DC8A827A4BF8E007E5B61 /* TrailingArray.h in Headers */ = {isa = PBXBuildFile; fileRef = E3538D4D276220880075DA50 /* TrailingArray.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		1F7CACE1000000000000001A /* TraceNativeHeap.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F7CACE1000000000000000A /* TraceNativeHeap.h */; settings = {ATTRIBUTES = (Private, ); }; };
+		1F7CACE2000000000000001A /* CellDispatcher.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F7CACE2000000000000000A /* CellDispatcher.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		DD3DC8A927A4BF8E007E5B61 /* ConcurrentBuffer.h in Headers */ = {isa = PBXBuildFile; fileRef = 0FB467821FDE282B003FCB09 /* ConcurrentBuffer.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		DD3DC8AA27A4BF8E007E5B61 /* FunctionDispatcher.h in Headers */ = {isa = PBXBuildFile; fileRef = 1A1D8B9B173186CE00141DA4 /* FunctionDispatcher.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		DD3DC8AB27A4BF8E007E5B61 /* ThreadAssertions.h in Headers */ = {isa = PBXBuildFile; fileRef = 7B2739F12632A8940040F182 /* ThreadAssertions.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -2009,6 +2010,7 @@
 		E3538D4C276220880075DA50 /* EmbeddedFixedVector.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = EmbeddedFixedVector.h; sourceTree = "<group>"; };
 		E3538D4D276220880075DA50 /* TrailingArray.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = TrailingArray.h; sourceTree = "<group>"; };
 		1F7CACE1000000000000000A /* TraceNativeHeap.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = TraceNativeHeap.h; sourceTree = "<group>"; };
+		1F7CACE2000000000000000A /* CellDispatcher.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CellDispatcher.h; sourceTree = "<group>"; };
 		E35702502C9D4CEC009292DE /* simd128.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = simd128.h; sourceTree = "<group>"; };
 		E360C7642127B85B00C90F0E /* UnalignedAccess.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = UnalignedAccess.h; sourceTree = "<group>"; };
 		E3618AB82AD8C4B900DA7E43 /* ButterflyArray.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = ButterflyArray.h; sourceTree = "<group>"; };
@@ -2390,6 +2392,7 @@
 				41036C754D844912316DC00E /* CanBorrow.h */,
 				46209A27266D543A007F8F4A /* CancellableTask.h */,
 				1470EAF62BD6FB3F00E26254 /* CanMakeWeakPtr.h */,
+				1F7CACE2000000000000000A /* CellDispatcher.h */,
 				A8A4726A151A825A004123FF /* CheckedArithmetic.h */,
 				9BB91F512648EA4D00A56217 /* CheckedPtr.h */,
 				9BF00134267C4CCF00DCFB3F /* CheckedRef.h */,
@@ -3532,6 +3535,7 @@
 				7310722B5EF464F16AAE91D7 /* CanBorrow.h in Headers */,
 				DD3DC99B27A4BF8E007E5B61 /* CancellableTask.h in Headers */,
 				1470EAF72BD6FB3F00E26254 /* CanMakeWeakPtr.h in Headers */,
+				1F7CACE2000000000000001A /* CellDispatcher.h in Headers */,
 				DDF306DA27C08654006A526F /* CFBundleSPI.h in Headers */,
 				63F9BED42898D96400371416 /* CFPrivSPI.h in Headers */,
 				DDF306D927C08654006A526F /* CFRunLoopSPI.h in Headers */,

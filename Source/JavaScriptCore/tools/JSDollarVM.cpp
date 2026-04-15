@@ -2126,6 +2126,7 @@ static JSC_DECLARE_HOST_FUNCTION(functionLLintTrue);
 static JSC_DECLARE_HOST_FUNCTION(functionBaselineJITTrue);
 static JSC_DECLARE_HOST_FUNCTION(functionNoInline);
 static JSC_DECLARE_HOST_FUNCTION(functionTriggerMemoryPressure);
+static JSC_DECLARE_HOST_FUNCTION(functionFindLiveStrongCount);
 static JSC_DECLARE_HOST_FUNCTION(functionGC);
 static JSC_DECLARE_HOST_FUNCTION(functionEdenGC);
 static JSC_DECLARE_HOST_FUNCTION(functionGCSweepAsynchronously);
@@ -2627,6 +2628,26 @@ JSC_DEFINE_HOST_FUNCTION(functionTriggerMemoryPressure, (JSGlobalObject* globalO
     }
 #endif
     return JSValue::encode(jsUndefined());
+}
+
+// Returns the number of live JSC::Strong instances reachable from the VM via
+// the reflection-based native-heap walker. Triggers a synchronous full GC
+// before walking so the count reflects only live objects.
+// Returns -1 if ENABLE(REFTRACKER) is off or the build lacks <meta>.
+// Usage: $vm.findLiveStrongCount()
+JSC_DEFINE_HOST_FUNCTION(functionFindLiveStrongCount, (JSGlobalObject* globalObject, CallFrame*))
+{
+    DollarVMAssertScope assertScope;
+#if ENABLE(REFTRACKER) && __has_include(<meta>)
+    if (!Options::enableStrongRefTracker())
+        return JSValue::encode(jsNumber(-1));
+    unsigned count = 0;
+    JSC::findAllOnNativeHeap<^^JSC::Strong>(globalObject->vm(), globalObject->vm(),
+        [&count](auto&) { ++count; });
+    return JSValue::encode(jsNumber(count));
+#else
+    return JSValue::encode(jsNumber(-1));
+#endif
 }
 
 // Runs the edenGC synchronously.
@@ -4374,6 +4395,7 @@ void JSDollarVM::finishCreation(VM& vm)
     addFunction(vm, "noInline"_s, functionNoInline, 1);
 
     addFunction(vm, "triggerMemoryPressure"_s, functionTriggerMemoryPressure, 0);
+    addFunction(vm, "findLiveStrongCount"_s, functionFindLiveStrongCount, 0);
     addFunction(vm, "gc"_s, functionGC, 0);
     addFunction(vm, "gcSweepAsynchronously"_s, functionGCSweepAsynchronously, 0);
     addFunction(vm, "edenGC"_s, functionEdenGC, 0);

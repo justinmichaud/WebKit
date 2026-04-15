@@ -828,6 +828,7 @@ set(JavaScriptCore_PRIVATE_FRAMEWORK_HEADERS
     heap/LocalAllocator.h
     heap/LocalAllocatorInlines.h
     heap/MachineStackMarker.h
+    heap/NamespaceCellDispatcher.h
     heap/MarkStack.h
     heap/MarkedBlock.h
     heap/MarkedBlockInlines.h

@@ -44,6 +44,7 @@ set(WTF_PUBLIC_HEADERS
     CanBorrow.h
     CanMakeWeakPtr.h
     CancellableTask.h
+    CellDispatcher.h
     CheckedArithmetic.h
     CheckedPtr.h
     CheckedRef.h

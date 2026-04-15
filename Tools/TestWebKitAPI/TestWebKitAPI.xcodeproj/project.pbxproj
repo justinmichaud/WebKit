@@ -1048,6 +1048,7 @@
 				WebKit/WKWebView/mac/StringTruncator.mm,
 				WebKit/WKWebView/mac/StringWidth.mm,
 				WebKit/WKWebView/mac/SubresourceErrorCrash.mm,
+				WebKit/WKWebView/mac/TraceNativeHeapDOM.mm,
 				WebKit/WKWebView/mac/TypingStyleCrash.mm,
 				WebKit/WKWebView/mac/ViewportSizeForViewportUnits.mm,
 				WebKit/WKWebView/mac/WebScriptObjectDescription.mm,

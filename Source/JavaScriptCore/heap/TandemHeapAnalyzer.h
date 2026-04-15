@@ -25,11 +25,14 @@
 #include "HeapAnalyzer.h"
 #include "HeapProfiler.h"
 #include "JSCell.h"
+#include "NamespaceCellDispatcher.h"
 #include "PreventCollectionScope.h"
 #include "VM.h"
+#include <wtf/CellDispatcher.h>
 #include <wtf/HashSet.h>
 #include <wtf/Lock.h>
 #include <wtf/TraceNativeHeap.h>
+#include <wtf/Vector.h>
 
 namespace JSC {
 
@@ -104,15 +107,24 @@ void findAllOnNativeHeap(VM& vm, Root& root, Callback&& callback)
 
     // The analyzer records every live JSCell into `seen`; the user callback
     // is for C++ types only (matched by the reflection walker), so the
-    // analyzer does not call into it. The JSCell-subclass side will later
-    // gain its own classInfo-based match; for now the seen-set population
-    // is what the native walker depends on.
+    // analyzer does not call into it. The JSCell-subclass side now has its
+    // own classInfo-based match via the per-call NamespaceCellDispatcher.
     TandemHeapAnalyzer analyzer {
         seen,
         seenLock,
         /* cellCallback */ nullptr,
         /* userData */ nullptr
     };
+
+    // Build the per-call dispatcher chain. JSC's own dispatcher is
+    // constructed fresh here because it's templated on the concrete walker
+    // type, so the trampoline it installs is statically typed. Future
+    // upper-layer dispatchers (WebCore, WebKit) will be registered into
+    // vm.cellDispatchers() and appended here.
+    using WalkerT = WTF::NativeHeapFinder<TargetTemplate, verbose, DecayedCallback>;
+    JSC::NamespaceCellDispatcher<^^JSC, WalkerT> jscDispatcher;
+    Vector<WTF::CellDispatcher*, 4> dispatchers;
+    dispatchers.append(&jscDispatcher);
 
     {
         PreventCollectionScope preventCollectionScope(vm.heap);
@@ -123,8 +135,11 @@ void findAllOnNativeHeap(VM& vm, Root& root, Callback&& callback)
         // Phase 2: native reflection walk, under the same PreventCollectionScope
         // so nothing can trigger a collection mid-walk. `seen` already contains
         // every live JSCell from the mark phase; when the reflection walker
-        // encounters a JSCell* field the seen-check cuts recursion immediately.
-        WTF::traceNativeHeap<TargetTemplate, verbose>(root, WTF::move(cb), seen);
+        // encounters a JSCell* the dispatcher chain routes it through its
+        // concrete subclass so reflection walks every inherited base subobject.
+        WTF::traceNativeHeap<TargetTemplate, verbose>(
+            root, WTF::move(cb), seen,
+            std::span<WTF::CellDispatcher* const>(dispatchers.span()));
     }
 }
 

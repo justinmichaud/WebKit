@@ -21,6 +21,15 @@
 
 #if ENABLE(REFTRACKER)
 
+// Complete JSC::JSCell's forward declaration (TraceNativeHeap.h only forward-
+// declares it). This minimal definition makes `FakeCell : JSC::JSCell`
+// well-formed and satisfies the walker's `static_cast<JSC::JSCell*>` requires-
+// clause, triggering the cell-dispatch path for any derived class.
+// Must be at file scope so FakeCell (defined inside the test function) can
+// inherit from it.
+namespace JSC { class JSCell { public: virtual ~JSCell() = default; }; }
+
+#include <wtf/CellDispatcher.h>
 #include <wtf/Deque.h>
 #include <wtf/DoublyLinkedList.h>
 #include <wtf/HashMap.h>
@@ -124,6 +133,14 @@ struct Graph {
     Graph() = default;
 };
 
+// Callback for DispatchesJSCellSubclass. Must live at namespace scope —
+// C++ prohibits template member functions inside local (function-body) classes.
+struct DispatchCB {
+    Vector<int>& out;
+    template<typename T>
+    void operator()(T& t) { out.append(t.value); }
+};
+
 } // anonymous namespace
 
 TEST(WTF_TraceNativeHeap, FindsEveryReachableTargetSpecialization)
@@ -220,6 +237,38 @@ TEST(WTF_TraceNativeHeap, FindsTrackedBoxAndReadsStackTrace)
         EXPECT_GT(n, 0u);
 }
 
+// Verify that fields declared on base classes are walked, not just fields on
+// the concrete type. This pins the `bases_of` fix in visitNativeChildren: a
+// walker that only reflects on nonstatic_data_members_of(^^T) (own members)
+// would miss every inherited field and this test would report size 1 instead
+// of 3.
+TEST(WTF_TraceNativeHeap, WalksBaseClassFields)
+{
+    struct GrandParent {
+        Target<struct GrandParentTag> grandParentTarget { 1 };
+    };
+    struct Parent : GrandParent {
+        Target<struct ParentTag> parentTarget { 2 };
+    };
+    struct Child : Parent {
+        Target<struct ChildTag> childTarget { 3 };
+    };
+
+    Child obj;
+
+    Vector<int> found;
+    WTF::traceNativeHeap<^^Target>(obj, [&](auto& t) {
+        found.append(t.value);
+    });
+
+    std::sort(found.begin(), found.end());
+
+    // All three hierarchy levels must contribute exactly one Target each.
+    Vector<int> expected { 1, 2, 3 };
+    EXPECT_EQ(found.size(), expected.size());
+    EXPECT_EQ(found, expected);
+}
+
 TEST(WTF_TraceNativeHeap, CycleDetection)
 {
     struct Node {
@@ -235,6 +284,71 @@ TEST(WTF_TraceNativeHeap, CycleDetection)
         ++count;
     });
     EXPECT_EQ(count, 1);
+}
+
+// Verify that JSCell subclasses are routed through the CellDispatcher chain
+// and that the walker descends into the concrete subclass layout (including
+// inherited base-class fields) rather than stopping at the static pointer type.
+//
+// Setup: `FakeCell` (the pointer type stored in Graph) carries one Target.
+//        `FakeDerived : FakeCell` adds a second Target. The Graph holds a
+//        `FakeCell*` that actually points to a `FakeDerived`.
+//
+//   Without dispatcher: walker uses static type FakeCell, finds only
+//     cellPayload (10).
+//   With dispatcher:    tryDispatch routes the void* to FakeDerived;
+//     base-class traversal then covers both the FakeCell subobject and
+//     FakeDerived's own members, so both Targets (10 and 20) are found.
+TEST(WTF_TraceNativeHeap, DispatchesJSCellSubclass)
+{
+    struct FakeCell : JSC::JSCell {
+        Target<struct FakeCellTag> cellPayload { 10 };
+    };
+    struct FakeDerived : FakeCell {
+        Target<struct FakeDerivedTag> derivedPayload { 20 };
+    };
+
+    // Walker type: DispatchCB is the callback. Spelling it out here lets the
+    // local Dispatcher struct downcast NativeHeapFinderBase& to this type.
+    using Walker = WTF::NativeHeapFinder<^^Target, false, DispatchCB>;
+
+    // Dispatcher: always routes the incoming void* as FakeDerived.
+    // A real dispatcher would compare classInfo(); here there is only one
+    // concrete cell type so we unconditionally dispatch.
+    struct Dispatcher final : WTF::CellDispatcher {
+        bool tryDispatch(void* ptr, WTF::NativeHeapFinderBase& v) override
+        {
+            static_cast<Walker&>(v).template enqueueCellDispatched<FakeDerived>(ptr);
+            return true;
+        }
+    };
+
+    FakeDerived cell;                // actual heap object
+    struct Graph { FakeCell* ptr; }; // static pointer type hides the derived layout
+    Graph g { &cell };
+
+    // --- Walk WITH the dispatcher -------------------------------------------
+    Dispatcher disp;
+    WTF::CellDispatcher* dispPtr = &disp;
+    UncheckedKeyHashSet<const void*> seen;
+    Vector<int> found;
+    WTF::traceNativeHeap<^^Target>(g, DispatchCB { found }, seen,
+        std::span<WTF::CellDispatcher* const>(&dispPtr, 1));
+
+    std::sort(found.begin(), found.end());
+    // The dispatcher revealed the concrete type; base-class traversal found
+    // the inherited cellPayload and the own derivedPayload.
+    Vector<int> expected { 10, 20 };
+    EXPECT_EQ(found.size(), expected.size());
+    EXPECT_EQ(found, expected);
+
+    // --- Walk WITHOUT dispatcher: only static-type fields are visible --------
+    Vector<int> foundWithout;
+    WTF::traceNativeHeap<^^Target>(g, [&](auto& t) {
+        foundWithout.append(t.value);
+    });
+    EXPECT_EQ(foundWithout.size(), 1u);
+    EXPECT_EQ(foundWithout[0], 10);
 }
 
 } // namespace TestWebKitAPI

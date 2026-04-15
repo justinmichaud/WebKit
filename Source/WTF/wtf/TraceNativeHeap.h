@@ -33,8 +33,14 @@
 
 #include <meta>
 #include <ranges>
+#include <span>
 #include <string_view>
 #include <type_traits>
+#include <wtf/CellDispatcher.h>
+
+// Forward-declared so the walker header can gate JSCell-subclass dispatch
+// without pulling in any JSC headers. WTF must remain JSC-free.
+namespace JSC { class JSCell; }
 
 namespace WTF {
 
@@ -69,10 +75,14 @@ namespace WTF {
 
 namespace TraceNativeHeapDetail {
 
+// Intentionally uses t.begin()/t.end() rather than std::ranges::begin/end so
+// that containers whose iterators lack postfix ++ (e.g. WTF::Deque) are still
+// treated as iterable. The range-based for loop only needs prefix ++, which
+// those iterators do provide.
 template<typename T>
 concept HasBeginEnd = requires(T& t) {
-    std::ranges::begin(t);
-    std::ranges::end(t);
+    t.begin();
+    t.end();
 };
 
 struct PathFrame {
@@ -125,7 +135,7 @@ template<typename Visitor, typename T>
 ALWAYS_INLINE void visitNativeChildren(T& node, Visitor& v);
 
 template<auto TargetTemplate, bool verbose, typename Callback>
-class NativeHeapFinder {
+class NativeHeapFinder : public NativeHeapFinderBase {
 public:
     using Self = NativeHeapFinder;
     static constexpr bool verboseMode = verbose;
@@ -135,9 +145,23 @@ public:
     {
     }
 
+    NativeHeapFinder(Callback&& cb, std::span<CellDispatcher* const> dispatchers)
+        : m_callback(std::forward<Callback>(cb))
+        , m_cellDispatchers(dispatchers)
+    {
+    }
+
     NativeHeapFinder(Callback&& cb, UncheckedKeyHashSet<const void*>&& seen)
         : m_callback(std::forward<Callback>(cb))
         , m_seen(WTF::move(seen))
+    {
+    }
+
+    NativeHeapFinder(Callback&& cb, UncheckedKeyHashSet<const void*>&& seen,
+                     std::span<CellDispatcher* const> dispatchers)
+        : m_callback(std::forward<Callback>(cb))
+        , m_seen(WTF::move(seen))
+        , m_cellDispatchers(dispatchers)
     {
     }
 
@@ -151,9 +175,64 @@ public:
         auto* addr = const_cast<void*>(static_cast<const volatile void*>(std::addressof(node)));
         if constexpr (verbose)
             m_path.log("enqueue", addr);
-        if (!m_seen.add(addr).isNewEntry)
-            return;
+
+        // If `T` is a JSCell subclass, route through the dispatcher chain
+        // first so the walker re-enters with the dynamic concrete subclass
+        // rather than walking only `T`'s inherited fields. Gate on a concept
+        // that SFINAEs cleanly when JSCell is only forward-declared — the
+        // `static_cast<JSC::JSCell*>(static_cast<T*>(nullptr))` expression
+        // is well-formed iff T (complete) publicly derives from JSCell.
+        if constexpr (requires { static_cast<JSC::JSCell*>(static_cast<Bare*>(nullptr)); }) {
+            // Dedup cell dispatch via a separate set: phase-1 of the tandem
+            // walk pre-populates m_seen with every live cell, so routing
+            // through m_seen here would always early-return and cells would
+            // never be walked. m_cellDispatched gates the dispatcher path
+            // independently, preventing re-dispatch of the same cell while
+            // leaving m_seen free to guard all downstream C++ fields.
+            if (!m_cellDispatched.add(addr).isNewEntry)
+                return;
+            for (auto* dispatcher : m_cellDispatchers) {
+                if (dispatcher->tryDispatch(addr, *this))
+                    return;
+            }
+            // No dispatcher matched — fall back to the static-type trampoline.
+        } else {
+            if (!m_seen.add(addr).isNewEntry)
+                return;
+        }
         m_worklist.append(WorkItem { addr, &trampoline<Bare> });
+    }
+
+    // For inline (non-pointer) class-type fields. Unlike enqueue(), this path
+    // does NOT consult m_seen — inline subobjects cannot form pointer cycles,
+    // and the first field of a struct shares its address with the struct
+    // itself, so a seen-set check would incorrectly suppress it.
+    template<typename T>
+    ALWAYS_INLINE void enqueueInline(T& node)
+    {
+        using Bare = std::remove_cvref_t<T>;
+        auto* addr = const_cast<void*>(static_cast<const volatile void*>(std::addressof(node)));
+        if constexpr (verbose)
+            m_path.log("enqueueInline", addr);
+        if constexpr (requires { static_cast<JSC::JSCell*>(static_cast<Bare*>(nullptr)); }) {
+            if (!m_cellDispatched.add(addr).isNewEntry)
+                return;
+            for (auto* dispatcher : m_cellDispatchers) {
+                if (dispatcher->tryDispatch(addr, *this))
+                    return;
+            }
+        }
+        m_worklist.append(WorkItem { addr, &trampoline<Bare> });
+    }
+
+    // Called from a CellDispatcher after it has determined the concrete
+    // JSCell subclass `T`. Appends (ptr, trampoline<T>) to the worklist
+    // directly; dedup was already handled by `enqueue`'s m_cellDispatched
+    // gate before the dispatcher chain was consulted.
+    template<typename T>
+    ALWAYS_INLINE void enqueueCellDispatched(void* ptr)
+    {
+        m_worklist.append(WorkItem { ptr, &trampoline<T> });
     }
 
     void drain()
@@ -227,7 +306,9 @@ private:
 
     Callback m_callback;
     UncheckedKeyHashSet<const void*> m_seen;
+    UncheckedKeyHashSet<const void*> m_cellDispatched;
     Vector<WorkItem> m_worklist;
+    std::span<CellDispatcher* const> m_cellDispatchers;
     [[no_unique_address]] TraceNativeHeapDetail::PathStack<verbose> m_path;
 };
 
@@ -248,7 +329,7 @@ ALWAYS_INLINE void visitFieldValue(FieldType& field, Visitor& v)
             }
         }
     } else if constexpr (std::is_class_v<Bare> || std::is_union_v<Bare>) {
-        v.enqueue(field);
+        v.enqueueInline(field);
     }
     // else: leaf (fundamental / enum / array of fundamental / member ptr)
 }
@@ -272,6 +353,28 @@ ALWAYS_INLINE void visitNativeChildren(T& node, Visitor& v)
             TraceNativeHeapDetail::visitFieldValue(elem, v);
     } else if constexpr ((std::is_class_v<T> || std::is_union_v<T>)
                          && std::meta::is_complete_type(^^T)) {
+        // 1. Walk inherited subobjects in declaration order. Single inheritance
+        //    means &base == &derived, so we recurse directly rather than going
+        //    through enqueue (which would hit the seen-set and skip).
+        //    Private bases are filtered out because `static_cast<BaseT&>` is
+        //    rejected by the compiler for inaccessible bases. Representative
+        //    casualties: WTF::StringImpl privately inherits StringImplShape;
+        //    WTF::VectorBuffer privately inherits VectorBufferBase;
+        //    std::optional privately inherits its move-assign helper. Public
+        //    bases are the overwhelming majority and cover every base that
+        //    transitively holds tracked state.
+        template for (constexpr auto baseInfo :
+                      std::define_static_array(
+                          std::meta::bases_of(^^T,
+                              std::meta::access_context::unchecked()))) {
+            if constexpr (std::meta::is_public(baseInfo)) {
+                using BaseT = typename [: std::meta::type_of(baseInfo) :];
+                if constexpr (std::is_class_v<BaseT> && std::meta::is_complete_type(^^BaseT)) {
+                    visitNativeChildren<Visitor, BaseT>(static_cast<BaseT&>(node), v);
+                }
+            }
+        }
+        // 2. Then walk this class's own non-static members.
         template for (constexpr auto member :
                       std::define_static_array(
                           std::meta::nonstatic_data_members_of(^^T,
@@ -313,6 +416,21 @@ void traceNativeHeap(Root& root, Callback&& callback,
     NativeHeapFinder<TargetTemplate, verbose, std::decay_t<Callback>> visitor {
         std::forward<Callback>(callback),
         WTF::move(externalSeen)
+    };
+    visitor.template enqueue<Root>(root);
+    visitor.drain();
+    externalSeen = WTF::move(visitor.seen());
+}
+
+template<auto TargetTemplate, bool verbose = false, typename Root, typename Callback>
+void traceNativeHeap(Root& root, Callback&& callback,
+                     UncheckedKeyHashSet<const void*>& externalSeen,
+                     std::span<CellDispatcher* const> dispatchers)
+{
+    NativeHeapFinder<TargetTemplate, verbose, std::decay_t<Callback>> visitor {
+        std::forward<Callback>(callback),
+        WTF::move(externalSeen),
+        dispatchers
     };
     visitor.template enqueue<Root>(root);
     visitor.drain();
