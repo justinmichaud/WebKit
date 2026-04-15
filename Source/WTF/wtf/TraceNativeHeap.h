@@ -79,10 +79,19 @@ namespace TraceNativeHeapDetail {
 // that containers whose iterators lack postfix ++ (e.g. WTF::Deque) are still
 // treated as iterable. The range-based for loop only needs prefix ++, which
 // those iterators do provide.
+//
+// The `*t.begin()` requirement rejects types whose iterators have no
+// operator* (e.g. JSScope, whose ScopeChainIterator only has operator->).
+// `sizeof(*t.begin())` rejects containers whose element type is incomplete
+// (e.g. FixedVector<IncompleteType>): sizeof on an incomplete type is
+// ill-formed, so the requires expression evaluates to false, and the walker
+// treats the container as an opaque leaf rather than trying to iterate it.
 template<typename T>
 concept HasBeginEnd = requires(T& t) {
     t.begin();
     t.end();
+    *t.begin();
+    sizeof(*t.begin());
 };
 
 struct PathFrame {
@@ -322,7 +331,14 @@ ALWAYS_INLINE void visitFieldValue(FieldType& field, Visitor& v)
     using Bare = std::remove_cvref_t<FieldType>;
     if constexpr (std::is_pointer_v<Bare>) {
         using Pointee = std::remove_cvref_t<std::remove_pointer_t<Bare>>;
-        if constexpr (!std::is_void_v<Pointee> && !std::is_function_v<Pointee>) {
+        // Skip void*, function pointers, and pointers to incomplete types.
+        // Incomplete types cannot be dereferenced (no known size/layout),
+        // and instantiating trampoline<IncompleteType> would fail because the
+        // trampoline body dereferences the pointer. is_complete_type is
+        // evaluated at template-instantiation time, so forward-declared types
+        // that are never defined in this TU correctly evaluate to false.
+        if constexpr (!std::is_void_v<Pointee> && !std::is_function_v<Pointee>
+                      && std::meta::is_complete_type(^^Pointee)) {
             if (field) {
                 v.logDeref("deref raw pointer to", field);
                 v.enqueue(*field);
@@ -384,8 +400,12 @@ ALWAYS_INLINE void visitNativeChildren(T& node, Visitor& v)
             // and `identifier_of` isn't a constant expression for them).
             if constexpr (!std::meta::is_bit_field(member)
                           && std::meta::has_identifier(member)) {
+                // identifier_of works for data-member reflections but not for
+                // type reflections in this clang P2996 fork, so typeName is
+                // left empty. The member name and address are sufficient for
+                // crash-path debugging.
                 v.pushPathFrame({
-                    std::meta::display_string_of(^^T),
+                    "",
                     std::meta::identifier_of(member),
                     std::addressof(node.[:member:])
                 });

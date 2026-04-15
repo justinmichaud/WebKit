@@ -41,6 +41,7 @@
 #include "HeapHelperPool.h"
 #include "HeapIterationScope.h"
 #include "HeapProfiler.h"
+#include "TandemHeapAnalyzer.h"
 #include "HeapSnapshot.h"
 #include "HeapSubspaceTypes.h"
 #include "HeapVerifier.h"
@@ -1288,6 +1289,15 @@ void Heap::collectNow(Synchronousness synchronousness, GCRequest request)
         m_objectSpace.assertNoUnswept();
         
         sweepAllLogicallyEmptyWeakBlocks();
+
+#if ENABLE(REFTRACKER) && __has_include(<meta>)
+        // Stress-test the native heap walker after every synchronous GC.
+        // The activeHeapAnalyzer() guard prevents recursion: findAllOnNativeHeap
+        // installs a HeapAnalyzer before calling collectNow, so the re-entrant
+        // call sees a non-null analyzer and skips the walk.
+        if (!vm().activeHeapAnalyzer())
+            JSC::findAllOnNativeHeap<^^JSC::Strong>(vm(), vm(), [](auto&) { });
+#endif
         return;
     } }
     RELEASE_ASSERT_NOT_REACHED();
