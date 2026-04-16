@@ -29,8 +29,8 @@ void TandemHeapAnalyzer::recordCell(JSCell* cell)
     if (!cell)
         return;
     Locker locker { m_lock };
-    auto addResult = m_seen.add(static_cast<const void*>(cell));
-    if (!addResult.isNewEntry)
+    auto [it, inserted] = m_seen.insert(static_cast<const void*>(cell));
+    if (!inserted)
         return;
     if (m_cellCallback)
         m_cellCallback(m_userData, cell);

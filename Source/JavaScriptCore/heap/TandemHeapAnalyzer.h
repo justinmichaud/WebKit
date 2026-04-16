@@ -28,6 +28,7 @@
 #include "NamespaceCellDispatcher.h"
 #include "PreventCollectionScope.h"
 #include "VM.h"
+#include <unordered_set>
 #include <wtf/CellDispatcher.h>
 #include <wtf/HashSet.h>
 #include <wtf/Lock.h>
@@ -55,7 +56,7 @@ class TandemHeapAnalyzer final : public HeapAnalyzer {
 public:
     using CellCallback = void(*)(void* userData, JSCell*);
 
-    TandemHeapAnalyzer(UncheckedKeyHashSet<const void*>& seen, Lock& lock,
+    TandemHeapAnalyzer(std::unordered_set<const void*>& seen, Lock& lock,
                        CellCallback cellCallback, void* userData)
         : m_seen(seen)
         , m_lock(lock)
@@ -77,7 +78,7 @@ public:
 private:
     void recordCell(JSCell*);
 
-    UncheckedKeyHashSet<const void*>& m_seen;
+    std::unordered_set<const void*>& m_seen;
     Lock& m_lock;
     CellCallback m_cellCallback;
     void* m_userData;
@@ -99,7 +100,7 @@ void findAllOnNativeHeap(VM& vm, Root& root, Callback&& callback)
     HeapProfiler& profiler = vm.ensureHeapProfiler();
     RELEASE_ASSERT(!profiler.activeHeapAnalyzer());
 
-    UncheckedKeyHashSet<const void*> seen;
+    std::unordered_set<const void*> seen;
     Lock seenLock;
 
     using DecayedCallback = std::decay_t<Callback>;

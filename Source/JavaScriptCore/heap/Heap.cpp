@@ -85,7 +85,9 @@
 #include "SynchronousStopTheWorldMutatorScheduler.h"
 #include "TypeProfiler.h"
 #include "TypeProfilerLog.h"
+#include "JSLock.h"
 #include "VM.h"
+#include <wtf/MainThread.h>
 #include "VerifierSlotVisitorInlines.h"
 #include "WasmCallee.h"
 #include "WeakMapImplInlines.h"
@@ -1290,14 +1292,11 @@ void Heap::collectNow(Synchronousness synchronousness, GCRequest request)
         
         sweepAllLogicallyEmptyWeakBlocks();
 
-#if ENABLE(REFTRACKER) && __has_include(<meta>)
-        // Stress-test the native heap walker after every synchronous GC.
-        // The activeHeapAnalyzer() guard prevents recursion: findAllOnNativeHeap
-        // installs a HeapAnalyzer before calling collectNow, so the re-entrant
-        // call sees a non-null analyzer and skips the walk.
-        if (!vm().activeHeapAnalyzer())
-            JSC::findAllOnNativeHeap<^^JSC::Strong>(vm(), vm(), [](auto&) { });
+#if !ENABLE(REFTRACKER) || !__has_include(<meta>)
+#error
 #endif
+        // Note: the full tandem GC + native heap walk runs from
+        // stopIfNecessarySlow() via the timer scheduled in finalize().
         return;
     } }
     RELEASE_ASSERT_NOT_REACHED();
@@ -2225,7 +2224,7 @@ NEVER_INLINE bool Heap::handleNeedFinalize(unsigned oldState)
 {
     RELEASE_ASSERT(oldState & hasAccessBit);
     RELEASE_ASSERT(!(oldState & stoppedBit));
-    
+
     if (!(oldState & needFinalizeBit))
         return false;
     if (m_worldState.compareExchangeWeak(oldState, oldState & ~needFinalizeBit)) {
@@ -2321,6 +2320,30 @@ void Heap::finalize()
         MonotonicTime after = MonotonicTime::now();
         dataLog((after - before).milliseconds(), "ms]\n");
     }
+
+#if ENABLE(REFTRACKER) && __has_include(<meta>)
+    if (!vm().activeHeapAnalyzer() && !m_needsRefTrackerWalk) {
+        m_needsRefTrackerWalk = true;
+        Ref protectedVM { vm() };
+        callOnMainThread([protectedVM = WTF::move(protectedVM)] {
+            VM& vm = protectedVM.get();
+            if (!vm.heap.m_needsRefTrackerWalk || !vm.heap.isSafeToCollect() || vm.heap.isDeferred())
+                return;
+            vm.heap.m_needsRefTrackerWalk = false;
+            JSLockHolder locker(vm);
+            JSC::findAllOnNativeHeap<^^JSC::Strong>(vm, vm,
+                [](auto& strong) {
+                    dataLogLn("Live Strong at ", RawPointer(std::addressof(strong)), ":");
+                    auto frames = strong.refTrackerFrames();
+                    if (!frames.empty())
+                        dataLogLn(WTF::StackTracePrinter { frames });
+                    else
+                        dataLogLn("  (no stack trace - REFTRACKER flag was off at construction)");
+                    dataLogLn();
+                });
+        });
+    }
+#endif
 }
 
 Heap::Ticket Heap::requestCollection(GCRequest request)

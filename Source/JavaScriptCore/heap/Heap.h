@@ -643,6 +643,7 @@ private:
     friend class RunningScope;
     friend class SlotVisitor;
     friend class SpaceTimeMutatorScheduler;
+    friend class StopIfNecessaryTimer;
     friend class StochasticSpaceTimeMutatorScheduler;
     friend class SweepingScope;
     friend class IncrementalSweeper;
@@ -971,6 +972,9 @@ private:
     bool m_threadShouldStop { false };
     bool m_mutatorDidRun { true };
     bool m_didDeferGCWork { false };
+#if ENABLE(REFTRACKER)
+    bool m_needsRefTrackerWalk { false };
+#endif
     bool m_shouldStopCollectingContinuously { false };
     bool m_isCompilerThreadsSuspended { false };
 

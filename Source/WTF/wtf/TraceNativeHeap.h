@@ -21,9 +21,14 @@
 
 #include <wtf/Compiler.h>
 #include <wtf/DataLog.h>
+#include <wtf/Deque.h>
 #include <wtf/HashSet.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/Vector.h>
+
+#if CPU(ARM64E)
+#include <ptrauth.h>
+#endif
 
 // The walker depends on C++26 reflection (<meta>). Apple clang parses WTF
 // headers during the framework module verifier phase and does not ship
@@ -35,7 +40,9 @@
 #include <ranges>
 #include <span>
 #include <string_view>
+#include <deque>
 #include <type_traits>
+#include <unordered_set>
 #include <wtf/CellDispatcher.h>
 
 // Forward-declared so the walker header can gate JSCell-subclass dispatch
@@ -160,16 +167,16 @@ public:
     {
     }
 
-    NativeHeapFinder(Callback&& cb, UncheckedKeyHashSet<const void*>&& seen)
+    NativeHeapFinder(Callback&& cb, std::unordered_set<const void*>&& seen)
         : m_callback(std::forward<Callback>(cb))
-        , m_seen(WTF::move(seen))
+        , m_seen(std::move(seen))
     {
     }
 
-    NativeHeapFinder(Callback&& cb, UncheckedKeyHashSet<const void*>&& seen,
+    NativeHeapFinder(Callback&& cb, std::unordered_set<const void*>&& seen,
                      std::span<CellDispatcher* const> dispatchers)
         : m_callback(std::forward<Callback>(cb))
-        , m_seen(WTF::move(seen))
+        , m_seen(std::move(seen))
         , m_cellDispatchers(dispatchers)
     {
     }
@@ -198,7 +205,7 @@ public:
             // never be walked. m_cellDispatched gates the dispatcher path
             // independently, preventing re-dispatch of the same cell while
             // leaving m_seen free to guard all downstream C++ fields.
-            if (!m_cellDispatched.add(addr).isNewEntry)
+            if (!m_cellDispatched.insert(addr).second)
                 return;
             for (auto* dispatcher : m_cellDispatchers) {
                 if (dispatcher->tryDispatch(addr, *this))
@@ -206,53 +213,75 @@ public:
             }
             // No dispatcher matched — fall back to the static-type trampoline.
         } else {
-            if (!m_seen.add(addr).isNewEntry)
+            if (!m_seen.insert(addr).second)
                 return;
         }
-        m_worklist.append(WorkItem { addr, &trampoline<Bare> });
+        m_worklist.push_back(WorkItem { addr, &trampoline<Bare> });
     }
 
-    // For inline (non-pointer) class-type fields. Unlike enqueue(), this path
-    // does NOT consult m_seen — inline subobjects cannot form pointer cycles,
-    // and the first field of a struct shares its address with the struct
-    // itself, so a seen-set check would incorrectly suppress it.
+    // For inline (non-pointer) class-type fields. Visits the subobject
+    // directly (synchronous recursion) instead of deferring through the
+    // worklist. This is safe because inline C++ members cannot form cycles
+    // (a struct cannot contain itself by value), so recursion always
+    // terminates. Depth is bounded by the struct nesting depth (~10-15
+    // levels in WebKit).
     template<typename T>
-    ALWAYS_INLINE void enqueueInline(T& node)
+    ALWAYS_INLINE void visitInline(T& node)
     {
         using Bare = std::remove_cvref_t<T>;
         auto* addr = const_cast<void*>(static_cast<const volatile void*>(std::addressof(node)));
         if constexpr (verbose)
-            m_path.log("enqueueInline", addr);
+            m_path.log("visitInline", addr);
         if constexpr (requires { static_cast<JSC::JSCell*>(static_cast<Bare*>(nullptr)); }) {
-            if (!m_cellDispatched.add(addr).isNewEntry)
+            if (!m_cellDispatched.insert(addr).second)
                 return;
             for (auto* dispatcher : m_cellDispatchers) {
                 if (dispatcher->tryDispatch(addr, *this))
                     return;
             }
         }
-        m_worklist.append(WorkItem { addr, &trampoline<Bare> });
+        // If this address was already visited via a pointer dereference,
+        // skip it — the pointer-based visit already walked this object.
+        if (m_seen.count(addr))
+            return;
+        this->template doVisit<Bare>(*static_cast<Bare*>(addr));
     }
 
     // Called from a CellDispatcher after it has determined the concrete
     // JSCell subclass `T`. Appends (ptr, trampoline<T>) to the worklist
     // directly; dedup was already handled by `enqueue`'s m_cellDispatched
     // gate before the dispatcher chain was consulted.
+    // The m_seen check prevents worklist explosion: without it, walking
+    // every live JSCell's members generates millions of worklist entries
+    // and overflows the Vector backing store.
     template<typename T>
     ALWAYS_INLINE void enqueueCellDispatched(void* ptr)
     {
-        m_worklist.append(WorkItem { ptr, &trampoline<T> });
+        if (!m_seen.insert(ptr).second)
+            return;
+        m_worklist.push_back(WorkItem { ptr, &trampoline<T> });
     }
 
     void drain()
     {
-        while (!m_worklist.isEmpty()) {
-            auto item = m_worklist.takeLast();
+        drainFrom(0);
+    }
+
+    // Drain only items pushed after `mark`. This allows container iteration
+    // to fully process one element's subtree before moving to the next,
+    // keeping the worklist bounded by graph depth rather than container size.
+    void drainFrom(size_t mark)
+    {
+        while (m_worklist.size() > mark) {
+            auto item = m_worklist.back();
+            m_worklist.pop_back();
             item.fn(item.ptr, *this);
         }
     }
 
-    UncheckedKeyHashSet<const void*>& seen() LIFETIME_BOUND { return m_seen; }
+    size_t worklistMark() const { return m_worklist.size(); }
+
+    std::unordered_set<const void*>& seen() LIFETIME_BOUND { return m_seen; }
 
     // Path-stack accessors — no-op when verbose is false.
     ALWAYS_INLINE void pushPathFrame(TraceNativeHeapDetail::PathFrame f)
@@ -314,9 +343,9 @@ private:
     };
 
     Callback m_callback;
-    UncheckedKeyHashSet<const void*> m_seen;
-    UncheckedKeyHashSet<const void*> m_cellDispatched;
-    Vector<WorkItem> m_worklist;
+    std::unordered_set<const void*> m_seen;
+    std::unordered_set<const void*> m_cellDispatched;
+    std::deque<WorkItem> m_worklist;
     std::span<CellDispatcher* const> m_cellDispatchers;
     [[no_unique_address]] TraceNativeHeapDetail::PathStack<verbose> m_path;
 };
@@ -340,12 +369,21 @@ ALWAYS_INLINE void visitFieldValue(FieldType& field, Visitor& v)
         if constexpr (!std::is_void_v<Pointee> && !std::is_function_v<Pointee>
                       && std::meta::is_complete_type(^^Pointee)) {
             if (field) {
-                v.logDeref("deref raw pointer to", field);
-                v.enqueue(*field);
+                auto* raw = field;
+#if CPU(ARM64E)
+                raw = ptrauth_strip(raw, ptrauth_key_process_dependent_data);
+#endif
+                // Skip tagged/misaligned pointers. CompactPointerTuple and
+                // similar classes pack metadata into the low bits of pointer
+                // fields; dereferencing those would crash.
+                if (reinterpret_cast<uintptr_t>(raw) % alignof(Pointee) == 0) {
+                    v.logDeref("deref raw pointer to", raw);
+                    v.enqueue(*raw);
+                }
             }
         }
     } else if constexpr (std::is_class_v<Bare> || std::is_union_v<Bare>) {
-        v.enqueueInline(field);
+        v.visitInline(field);
     }
     // else: leaf (fundamental / enum / array of fundamental / member ptr)
 }
@@ -365,8 +403,11 @@ template<typename Visitor, typename T>
 ALWAYS_INLINE void visitNativeChildren(T& node, Visitor& v)
 {
     if constexpr (TraceNativeHeapDetail::HasBeginEnd<T>) {
-        for (auto&& elem : node)
+        for (auto&& elem : node) {
+            auto mark = v.worklistMark();
             TraceNativeHeapDetail::visitFieldValue(elem, v);
+            v.drainFrom(mark);
+        }
     } else if constexpr ((std::is_class_v<T> || std::is_union_v<T>)
                          && std::meta::is_complete_type(^^T)) {
         // 1. Walk inherited subobjects in declaration order. Single inheritance
@@ -431,30 +472,30 @@ void traceNativeHeap(Root& root, Callback&& callback)
 
 template<auto TargetTemplate, bool verbose = false, typename Root, typename Callback>
 void traceNativeHeap(Root& root, Callback&& callback,
-                     UncheckedKeyHashSet<const void*>& externalSeen)
+                     std::unordered_set<const void*>& externalSeen)
 {
     NativeHeapFinder<TargetTemplate, verbose, std::decay_t<Callback>> visitor {
         std::forward<Callback>(callback),
-        WTF::move(externalSeen)
+        std::move(externalSeen)
     };
     visitor.template enqueue<Root>(root);
     visitor.drain();
-    externalSeen = WTF::move(visitor.seen());
+    externalSeen = std::move(visitor.seen());
 }
 
 template<auto TargetTemplate, bool verbose = false, typename Root, typename Callback>
 void traceNativeHeap(Root& root, Callback&& callback,
-                     UncheckedKeyHashSet<const void*>& externalSeen,
+                     std::unordered_set<const void*>& externalSeen,
                      std::span<CellDispatcher* const> dispatchers)
 {
     NativeHeapFinder<TargetTemplate, verbose, std::decay_t<Callback>> visitor {
         std::forward<Callback>(callback),
-        WTF::move(externalSeen),
+        std::move(externalSeen),
         dispatchers
     };
     visitor.template enqueue<Root>(root);
     visitor.drain();
-    externalSeen = WTF::move(visitor.seen());
+    externalSeen = std::move(visitor.seen());
 }
 
 } // namespace WTF

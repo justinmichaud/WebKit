@@ -29,6 +29,7 @@
 // inherit from it.
 namespace JSC { class JSCell { public: virtual ~JSCell() = default; }; }
 
+#include <unordered_set>
 #include <wtf/CellDispatcher.h>
 #include <wtf/Deque.h>
 #include <wtf/DoublyLinkedList.h>
@@ -330,7 +331,7 @@ TEST(WTF_TraceNativeHeap, DispatchesJSCellSubclass)
     // --- Walk WITH the dispatcher -------------------------------------------
     Dispatcher disp;
     WTF::CellDispatcher* dispPtr = &disp;
-    UncheckedKeyHashSet<const void*> seen;
+    std::unordered_set<const void*> seen;
     Vector<int> found;
     WTF::traceNativeHeap<^^Target>(g, DispatchCB { found }, seen,
         std::span<WTF::CellDispatcher* const>(&dispPtr, 1));
