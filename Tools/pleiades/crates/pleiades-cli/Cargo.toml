@@ -1,0 +1,18 @@
+[package]
+name = "pleiades-cli"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+pleiades-core = { path = "../pleiades-core" }
+serde = { workspace = true }
+bincode = { workspace = true }
+clap = { version = "4", features = ["derive", "env"] }
+addr2line = { version = "0.24", features = ["std"] }
+object = "0.36"
+memmap2 = "0.9"
+gimli = "0.31"
+rustc-demangle = "0.1"
+cpp_demangle = "0.4"
+fxprof-processed-profile = "0.8"
+serde_json = "1"

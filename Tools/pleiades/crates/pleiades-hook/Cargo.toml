@@ -1,0 +1,18 @@
+[package]
+name = "pleiades-hook"
+version.workspace = true
+edition.workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+pleiades-core = { path = "../pleiades-core" }
+libc = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+boxcar = { workspace = true }
+ctor = "0.4"
+
+[build-dependencies]
+cc = "1"

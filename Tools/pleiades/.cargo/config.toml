@@ -1,0 +1,3 @@
+# ARM64E: the hook is built with the built-in arm64e-apple-darwin target
+# using nightly Rust + -Z build-std. This recompiles std for arm64e so
+# dyld accepts the dylib when injecting into arm64e processes.
