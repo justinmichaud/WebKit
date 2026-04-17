@@ -85,6 +85,8 @@
 #include "SynchronousStopTheWorldMutatorScheduler.h"
 #include "TypeProfiler.h"
 #include "TypeProfilerLog.h"
+#include "BytecodeIntrinsicRegistry.h"
+#include "JSGlobalObject.h"
 #include "JSLock.h"
 #include "VM.h"
 #include <wtf/MainThread.h>
@@ -2331,8 +2333,10 @@ void Heap::finalize()
                 return;
             vm.heap.m_needsRefTrackerWalk = false;
             JSLockHolder locker(vm);
+            unsigned count = 0;
             JSC::findAllOnNativeHeap<^^JSC::Strong>(vm, vm,
-                [](auto& strong) {
+                [&count](auto& strong) {
+                    ++count;
                     dataLogLn("Live Strong at ", RawPointer(std::addressof(strong)), ":");
                     auto frames = strong.refTrackerFrames();
                     if (!frames.empty())
@@ -2341,6 +2345,7 @@ void Heap::finalize()
                         dataLogLn("  (no stack trace - REFTRACKER flag was off at construction)");
                     dataLogLn();
                 });
+            dataLogLn("REFTRACKER: walk complete, found ", count, " Strong handles");
         });
     }
 #endif

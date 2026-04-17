@@ -172,6 +172,7 @@ public:
         auto frames = m_stackTraceProvider.frames();
         return { frames.data(), frames.size() };
 #else
+#error
         return { };
 #endif
     }

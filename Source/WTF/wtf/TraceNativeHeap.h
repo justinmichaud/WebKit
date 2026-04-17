@@ -240,11 +240,19 @@ public:
                     return;
             }
         }
-        // If this address was already visited via a pointer dereference,
-        // skip it — the pointer-based visit already walked this object.
-        if (m_seen.count(addr))
+        // Guard against re-visiting the same (address, type) pair on the
+        // current inline call stack. Pointer chains can lead back to an
+        // object we're currently visiting (e.g. VM → ptr → ... → VM).
+        // Store the pair directly to avoid XOR false collisions (two distinct
+        // (addr, type) pairs can XOR to the same value). Erase on return so
+        // sibling subtrees aren't blocked.
+        auto key = std::make_pair(
+            reinterpret_cast<uintptr_t>(addr),
+            reinterpret_cast<uintptr_t>(&trampoline<Bare>));
+        if (!m_inlineVisiting.insert(key).second)
             return;
         this->template doVisit<Bare>(*static_cast<Bare*>(addr));
+        m_inlineVisiting.erase(key);
     }
 
     // Called from a CellDispatcher after it has determined the concrete
@@ -342,10 +350,20 @@ private:
         void (*fn)(void*, Self&);
     };
 
+    struct PairHash {
+        size_t operator()(std::pair<uintptr_t, uintptr_t> p) const
+        {
+            size_t h = std::hash<uintptr_t>{}(p.first);
+            h ^= std::hash<uintptr_t>{}(p.second) + 0x9e3779b9u + (h << 6) + (h >> 2);
+            return h;
+        }
+    };
+
     Callback m_callback;
     std::unordered_set<const void*> m_seen;
     std::unordered_set<const void*> m_cellDispatched;
     std::deque<WorkItem> m_worklist;
+    std::unordered_set<std::pair<uintptr_t, uintptr_t>, PairHash> m_inlineVisiting;
     std::span<CellDispatcher* const> m_cellDispatchers;
     [[no_unique_address]] TraceNativeHeapDetail::PathStack<verbose> m_path;
 };
