@@ -61,6 +61,11 @@ def update_symlink_with_path(symlink_path: Path, target_str: str):
     except FileNotFoundError:
         current_target = None
         symlink_exists = False
+    except OSError:
+        # Not a symlink (e.g. a regular file exists at this path); remove it.
+        os.remove(symlink_path)
+        current_target = None
+        symlink_exists = False
 
     if symlink_exists and current_target != target_str:
         os.remove(symlink_path)

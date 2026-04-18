@@ -220,6 +220,16 @@ struct ScratchBuffer {
     size_t* addressOfActiveLength() { return &u.m_activeLength; };
     void* dataBuffer() { return m_buffer; }
 
+#if ENABLE(REFTRACKER)
+    static constexpr bool refTrackerVisitTag = true;
+    template<typename Visitor>
+    static void refTrackerVisit(const ScratchBuffer&, Visitor&)
+    {
+        // The union holds 'size_t m_activeLength' or 'double pad' — no pointers.
+        // m_buffer is a flexible array of scratch data; not object-graph traversable.
+    }
+#endif
+
     union {
         size_t m_activeLength;
         double pad; // Make sure m_buffer is double aligned.
@@ -1384,6 +1394,12 @@ extern "C" void SYSV_ABI sanitizeStackForVMImpl(VM*);
 #endif
 
 JS_EXPORT_PRIVATE void sanitizeStackForVM(VM&);
+
+#if ENABLE(REFTRACKER)
+// ADL overload for RefTracker detection (see TraceNativeHeap.h for rationale).
+// ScratchBuffer is a top-level struct in namespace JSC (not nested in VM).
+inline constexpr bool refTrackerHasVisitTag(ScratchBuffer*) noexcept { return true; }
+#endif
 
 } // namespace JSC
 

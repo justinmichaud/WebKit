@@ -26,7 +26,6 @@
 #include "HeapProfiler.h"
 #include "JSCell.h"
 #include "NamespaceCellDispatcher.h"
-#include "PreventCollectionScope.h"
 #include "VM.h"
 #include <unordered_set>
 #include <wtf/CellDispatcher.h>
@@ -127,21 +126,25 @@ void findAllOnNativeHeap(VM& vm, Root& root, Callback&& callback)
     Vector<WTF::CellDispatcher*, 4> dispatchers;
     dispatchers.append(&jscDispatcher);
 
-    {
-        PreventCollectionScope preventCollectionScope(vm.heap);
-        profiler.setActiveHeapAnalyzer(&analyzer);
-        vm.heap.collectNow(JSC::Sync, JSC::CollectionScope::Full);
-        profiler.setActiveHeapAnalyzer(nullptr);
+    // Phase 1: run a synchronous full GC with the analyzer installed.
+    // The caller already holds the API lock (JSLockHolder), which prevents
+    // any other thread from starting a collection or mutating the heap.
+    // We do NOT use PreventCollectionScope here: it calls preventCollection()
+    // which internally calls waitForCollector() → stopIfNecessarySlow() →
+    // collectInMutatorThread(), and on the second call that sequence can drop
+    // hasAccessBit (via a WebCore finalizer callback releasing the VM lock),
+    // causing the RELEASE_ASSERT in relinquishConn() to fire.
+    profiler.setActiveHeapAnalyzer(&analyzer);
+    vm.heap.collectNow(JSC::Sync, JSC::CollectionScope::Full);
+    profiler.setActiveHeapAnalyzer(nullptr);
 
-        // Phase 2: native reflection walk, under the same PreventCollectionScope
-        // so nothing can trigger a collection mid-walk. `seen` already contains
-        // every live JSCell from the mark phase; when the reflection walker
-        // encounters a JSCell* the dispatcher chain routes it through its
-        // concrete subclass so reflection walks every inherited base subobject.
-        WTF::traceNativeHeap<TargetTemplate, verbose>(
-            root, WTF::move(cb), seen,
-            std::span<WTF::CellDispatcher* const>(dispatchers.span()));
-    }
+    // Phase 2: native reflection walk. We still hold the API lock so no
+    // concurrent collection can start. `seen` contains every live JSCell
+    // from the mark phase; when the reflection walker encounters a JSCell*
+    // the dispatcher chain routes it through its concrete subclass.
+    WTF::traceNativeHeap<TargetTemplate, verbose>(
+        root, WTF::move(cb), seen,
+        std::span<WTF::CellDispatcher* const>(dispatchers.span()));
 }
 
 } // namespace JSC

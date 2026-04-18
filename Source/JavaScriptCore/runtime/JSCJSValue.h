@@ -113,6 +113,16 @@ union EncodedValueDescriptor {
         int32_t tag;
     } asBits;
 #endif
+
+#if ENABLE(REFTRACKER)
+    static constexpr bool refTrackerVisitTag = true;
+    template<typename Visitor>
+    static void refTrackerVisit(const EncodedValueDescriptor&, Visitor&) { }
+    // The discriminant (NaN-box tag) lives in the outer JSValue wrapper.
+    // JSValue::refTrackerVisit correctly gates on isCell() before following
+    // ptr. This no-op hook prevents blind reflection on this union, which
+    // would follow ptr unconditionally and crash on float/integer payloads.
+#endif
 };
 
 #define TagOffset (offsetof(EncodedValueDescriptor, asBits.tag))
@@ -377,6 +387,21 @@ public:
     JSCell* asCell() const;
 
     Structure* structureOrNull() const;
+
+#if ENABLE(REFTRACKER)
+    // RefTracker customization point (see WTF::traceNativeHeap documentation).
+    // JSValue stores its payload in a union (EncodedValueDescriptor) whose
+    // JSCell* member is only valid when the NaN-box tag indicates a cell.
+    // Without this hook the reflection walker would follow the raw union
+    // pointer unconditionally, crashing on float/integer payloads.
+    static constexpr bool refTrackerVisitTag = true;
+    template<typename Visitor>
+    static void refTrackerVisit(const JSValue& self, Visitor& v)
+    {
+        if (self.isCell())
+            v.enqueue(*self.asCell());
+    }
+#endif
 
     JS_EXPORT_PRIVATE void dump(PrintStream&) const;
     void dumpInContext(PrintStream&, DumpContext*) const;
@@ -1409,5 +1434,11 @@ inline int32_t JSValue::bigInt32AsInt32() const
     return static_cast<int32_t>(u.asInt64 >> 16);
 }
 #endif // USE(BIGINT32)
+
+#if ENABLE(REFTRACKER)
+// ADL overloads for RefTracker detection (see TraceNativeHeap.h for rationale).
+inline constexpr bool refTrackerHasVisitTag(EncodedValueDescriptor*) noexcept { return true; }
+inline constexpr bool refTrackerHasVisitTag(JSValue*) noexcept { return true; }
+#endif
 
 } // namespace JSC

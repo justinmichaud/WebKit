@@ -118,7 +118,22 @@ public:
     // used on a copy of the IndexingHeader.
     size_t preCapacity(Structure*);
     size_t indexingPayloadSizeInBytes(Structure*);
-    
+
+#if ENABLE(REFTRACKER)
+    static constexpr bool refTrackerVisitTag = true;
+    template<typename Visitor>
+    static void refTrackerVisit(const IndexingHeader&, Visitor&)
+    {
+        // The union 'u' has two branches:
+        //   lengths    { publicLength, vectorLength } — no pointers
+        //   typedArray { ArrayBuffer* buffer }        — live pointer
+        // The active branch is determined by the containing object's indexing
+        // type (stored in the Structure), which is not accessible from here.
+        // The ArrayBuffer is reachable via the owning JSArrayBufferView's
+        // own visitChildren during the GC phase of the tandem walk.
+    }
+#endif
+
 private:
     friend class LLIntOffsetsExtractor;
 
@@ -136,6 +151,11 @@ private:
         } typedArray;
     } u;
 };
+
+#if ENABLE(REFTRACKER)
+// ADL overload for RefTracker detection (see TraceNativeHeap.h for rationale).
+inline constexpr bool refTrackerHasVisitTag(IndexingHeader*) noexcept { return true; }
+#endif
 
 } // namespace JSC
 

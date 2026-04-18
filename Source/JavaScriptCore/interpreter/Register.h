@@ -97,6 +97,18 @@ namespace JSC {
             return r;
         }
 
+#if ENABLE(REFTRACKER)
+    static constexpr bool refTrackerVisitTag = true;
+    template<typename Visitor>
+    static void refTrackerVisit(const Register&, Visitor&)
+    {
+        // Register is a stack-machine slot used by the interpreter. Its union
+        // may hold a JSValue, CallFrame*, CodeBlock*, or raw integer at runtime.
+        // The active branch is contextual; any live JSCells are reachable via
+        // the GC phase of the tandem walk. No traversal needed here.
+    }
+#endif
+
     private:
         union {
             EncodedJSValue value;
@@ -282,6 +294,13 @@ namespace JSC {
     }
 
 } // namespace JSC
+
+#if ENABLE(REFTRACKER)
+namespace JSC {
+// ADL overload for RefTracker detection (see TraceNativeHeap.h for rationale).
+inline constexpr bool refTrackerHasVisitTag(Register*) noexcept { return true; }
+} // namespace JSC
+#endif
 
 namespace WTF {
 

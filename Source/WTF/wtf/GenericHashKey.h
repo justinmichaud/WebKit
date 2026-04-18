@@ -35,10 +35,12 @@ template<typename Key, typename HashArg = DefaultHash<Key>>
 class GenericHashKey final {
     WTF_DEPRECATED_MAKE_FAST_ALLOCATED(GenericHashKey);
 
+public:
+    // Public so that template instantiations of mpark::variant<..., EmptyKey, DeletedKey>
+    // remain accessible during SFINAE checks (Bloomberg p2996 clang fails SFINAE when
+    // private nested types appear as template arguments to variant/recursive_union).
     struct EmptyKey { };
     struct DeletedKey { };
-
-public:
     constexpr GenericHashKey(Key&& key)
         : m_value(InPlaceTypeT<Key>(), WTF::move(key))
     {
@@ -80,6 +82,19 @@ public:
         return HashArg::equal(key(), other.key());
     }
 
+    // RefTracker hook. GenericHashKey wraps Variant<Key, EmptyKey, DeletedKey> where
+    // EmptyKey/DeletedKey are private types. Adding the tag here avoids Bloomberg
+    // p2996 clang SFINAE failures that occur when those private types appear as
+    // template arguments to the variant's SFINAE detection helper.
+    static constexpr bool refTrackerVisitTag = true;
+    template<typename WalkerVisitor>
+    static void refTrackerVisit(const GenericHashKey& self, WalkerVisitor& v)
+    {
+        // Only visit the active member if it holds a real Key (not empty/deleted sentinel).
+        if (std::holds_alternative<Key>(self.m_value))
+            v.visitInline(const_cast<Key&>(std::get<Key>(self.m_value)));
+    }
+
 private:
     Variant<Key, EmptyKey, DeletedKey> m_value;
 };
@@ -90,6 +105,12 @@ template<typename K, typename H> struct HashTraits<GenericHashKey<K, H>> : Gener
     static void constructDeletedValue(GenericHashKey<K, H>& slot) { slot = GenericHashKey<K, H> { HashTableDeletedValue }; }
     static bool isDeletedValue(const GenericHashKey<K, H>& value) { return value.isHashTableDeletedValue(); }
 };
+
+#if ENABLE(REFTRACKER)
+// ADL overload for RefTracker detection (see TraceNativeHeap.h for rationale).
+template<typename K, typename H>
+constexpr bool refTrackerHasVisitTag(GenericHashKey<K, H>*) noexcept { return true; }
+#endif
 
 }
 

@@ -79,6 +79,85 @@ namespace WTF {
 // survives a crash on a dangling pointer. When false, the path stack, log
 // calls, and string-capture machinery all collapse to nothing via
 // `if constexpr`.
+//
+// ── Customization points ─────────────────────────────────────────────────────
+//
+// Any type (class, struct, or union) may opt into custom traversal by
+// providing one or more of the hooks below.  All hooks are opt-in; types that
+// do not declare them get the default reflection-based walk.
+//
+// 1. Full custom traversal — refTrackerVisit
+// ─────────────────────────────────────────
+//   static constexpr bool refTrackerVisitTag = true;   ← REQUIRED sentinel
+//   template<typename Visitor>
+//   static void refTrackerVisit(const T& self, Visitor& v);
+//
+//   IMPORTANT: Requires BOTH the `static constexpr bool refTrackerVisitTag = true;`
+//   sentinel and a static method `refTrackerVisit(const T&, Visitor&)`.
+//   Bloomberg's p2996 clang has three bugs: (1) ALL function-call requires-expressions
+//   evaluate to FALSE; (2) `requires { typename T::tag; }` evaluates to FALSE in
+//   reflection contexts; (3) `std::void_t<typename T::TypeAlias>` partial-specialisation
+//   SFINAE also fails in those contexts.  The ADL `refTrackerHasVisitTag` function
+//   (unqualified call via `using` in visitNativeChildren) is immune to all three bugs.
+//   The actual call BareT::refTrackerVisit(node, v) is outside the detection path
+//   and is unaffected by these bugs.
+//
+//   The walker calls this instead of its own reflection walk for any type that
+//   declares it.  Use it when the default walk is unsafe or incomplete:
+//
+//   • JSValue — must consult its NaN-box tag before following the embedded
+//     JSCell* so that float/int payloads are never treated as pointers:
+//
+//       template<typename Visitor>
+//       static void refTrackerVisit(const JSValue& self, Visitor& v) {
+//           if (self.isCell()) v.enqueue(*self.asCell());
+//       }
+//
+//   • Tagged-pointer wrappers — strip the tag bits before dereferencing:
+//
+//       template<typename Visitor>
+//       static void refTrackerVisit(const MyWrapper& self, Visitor& v) {
+//           if (auto* p = self.untaggedPointer()) v.enqueue(*p);
+//       }
+//
+//   • Variants / discriminated wrappers — dispatch to the active alternative.
+//
+//   The Visitor interface (for use inside refTrackerVisit):
+//     v.enqueue(T& obj)      — schedule obj for walking (pointer targets)
+//     v.visitInline(T& obj)  — walk obj immediately (inline subobjects)
+//
+// 2. Discriminated union active-member index — refTrackerActiveMemberIndex
+// ────────────────────────────────────────────────────────────────────────
+//   static constexpr bool refTrackerActiveMemberTag = true;   ← REQUIRED sentinel
+//   static size_t refTrackerActiveMemberIndex(const T& u);
+//
+//   Declared as a static member of a union type T.  Returns the 0-based index
+//   (in declaration order, matching nonstatic_data_members_of) of the union
+//   member that is currently active.  The walker visits only that member.
+//   Unions that declare neither this method nor refTrackerVisit are treated as
+//   opaque leaves.
+//
+//   IMPORTANT: BOTH the `static constexpr bool refTrackerActiveMemberTag = true;`
+//   sentinel AND the static method are required.  Bloomberg p2996 clang has bugs
+//   that make function-call requires-expressions, typename requires-expressions,
+//   and std::void_t<typename T::TypeAlias> SFINAE all fail in reflection contexts.
+//   The ADL `refTrackerHasActiveMemberTag` function (unqualified call via `using`
+//   in visitNativeChildren) is immune to all three bugs.
+//
+//   Example — a two-field tagged union:
+//
+//     union MyUnion {
+//         int  asInt;
+//         float* asPtr;
+//         static constexpr bool refTrackerActiveMemberTag = true;
+//         static size_t refTrackerActiveMemberIndex(const MyUnion& u) {
+//             return u.tag ? 1 : 0; // tag stored elsewhere in the containing struct
+//         }                         // … or encode it inside the union itself
+//     };
+//
+//   Note: if the discriminant lives outside the union (e.g. JSValue's NaN-box
+//   tag), use refTrackerVisit on the *containing* type instead, because the
+//   union itself does not have access to the discriminant.
 
 namespace TraceNativeHeapDetail {
 
@@ -100,6 +179,48 @@ concept HasBeginEnd = requires(T& t) {
     *t.begin();
     sizeof(*t.begin());
 };
+
+// Detection helpers for refTrackerVisit and refTrackerActiveMemberIndex hooks.
+//
+// Bloomberg p2996 clang has bugs that prevent ALL of the following from working
+// inside template functions that use `template for` / P2996 reflection:
+//   Bug 1: `requires { fn(args); }` always evaluates to false.
+//   Bug 2: `requires { typename T::SomeTag; }` evaluates to false.
+//   Bug 3: ALL partial-specialisation SFINAE (`std::void_t<...>`) fails — both
+//           type-member and value-member forms — when the template is instantiated
+//           transitively from a `template for` loop.
+//
+// The only approach immune to all three bugs:  call a constexpr function
+// directly in `if constexpr (fn(...))` using ADL.  The function returns
+// `false` by default (fallback template below); each tagged type adds an
+// overload in its own namespace that returns `true`.  ADL finds the overload
+// at instantiation time; no SFINAE is involved.
+//
+// CRITICAL: The call MUST be unqualified for ADL to apply. In visitNativeChildren
+// (WTF namespace), we use `using TraceNativeHeapDetail::refTrackerHasVisitTag;`
+// to bring the fallback into scope, then call `refTrackerHasVisitTag(p)` unqualified.
+// DO NOT write `TraceNativeHeapDetail::refTrackerHasVisitTag(p)` — that is a
+// qualified call and ADL does not apply, so overloads in other namespaces are missed.
+//
+// Usage pattern in each tagged type's namespace (OUTSIDE the class):
+//   #if ENABLE(REFTRACKER)
+//   inline constexpr bool refTrackerHasVisitTag(MyType*) noexcept { return true; }
+//   #endif
+//
+// For class templates, use a function template overload:
+//   template<typename... Ts>
+//   constexpr bool refTrackerHasVisitTag(MyTemplate<Ts...>*) noexcept { return true; }
+//
+// Types also keep `static constexpr bool refTrackerVisitTag = true;` inside
+// the class for documentation and for non-Bloomberg builds that do not need
+// the ADL workaround.
+
+// Default fallbacks (return false for any type not explicitly opted in):
+template<typename T>
+constexpr bool refTrackerHasVisitTag(T*) noexcept { return false; }
+
+template<typename T>
+constexpr bool refTrackerHasActiveMemberTag(T*) noexcept { return false; }
 
 struct PathFrame {
     std::string_view typeName;
@@ -371,7 +492,8 @@ private:
 namespace TraceNativeHeapDetail {
 
 // Handle one field value: leaf for fundamentals/enums/function pointers,
-// enqueue for class types and dereferenced non-void/non-function raw pointers.
+// enqueue for class/union types and dereferenced non-void/non-function raw
+// pointers.
 template<typename Visitor, typename FieldType>
 ALWAYS_INLINE void visitFieldValue(FieldType& field, Visitor& v)
 {
@@ -401,6 +523,13 @@ ALWAYS_INLINE void visitFieldValue(FieldType& field, Visitor& v)
             }
         }
     } else if constexpr (std::is_class_v<Bare> || std::is_union_v<Bare>) {
+        // Both class/struct and union fields route through visitInline.
+        // visitNativeChildren handles each case:
+        //   • class/struct: default reflection walk over members
+        //   • union: refTrackerVisit hook or refTrackerActiveMemberIndex dispatch
+        // Types that need custom traversal (e.g. JSValue, tagged pointer
+        // wrappers) declare a refTrackerVisit member — see the file-level
+        // comment for the full customization-point documentation.
         v.visitInline(field);
     }
     // else: leaf (fundamental / enum / array of fundamental / member ptr)
@@ -417,16 +546,42 @@ ALWAYS_INLINE void visitFieldValue(FieldType& field, Visitor& v)
 // false and we skip the member expansion: we cannot enumerate members of an
 // incomplete type, so we treat the object as a leaf. The seen-set entry is
 // still recorded by `enqueue`, which prevents re-entry.
+//
+// Customization points — see the file-level comment for full documentation:
+//   refTrackerVisit(v)                  — full custom traversal for any type
+//   refTrackerActiveMemberIndex(node)   — active-branch selector for unions
 template<typename Visitor, typename T>
 ALWAYS_INLINE void visitNativeChildren(T& node, Visitor& v)
 {
+    // ── Customization point 1: refTrackerVisit ────────────────────────────
+    // If the type declares a static `refTrackerVisit(const T&, Visitor&)`,
+    // delegate entirely to it and skip the default reflection walk.  Handles:
+    //   • Types with externally-discriminated unions (e.g. JSValue → NaN-box)
+    //   • Tagged-pointer wrappers (strip tag bits before enqueue)
+    //   • Any type that needs non-trivial traversal logic
+    //
+    // NOTE: Detection uses ADL-based constexpr function calls, immune to all three
+    // Bloomberg p2996 clang bugs. The `using` declarations below bring the fallback
+    // functions from TraceNativeHeapDetail into the unqualified lookup set; each
+    // tagged type adds a more-specific overload in its own namespace that ADL finds
+    // at instantiation time. The call MUST be unqualified for ADL to apply — a
+    // qualified call like TraceNativeHeapDetail::refTrackerHasVisitTag(...) would
+    // bypass ADL entirely. See TraceNativeHeapDetail for the full story.
+    using TraceNativeHeapDetail::refTrackerHasVisitTag;
+    using TraceNativeHeapDetail::refTrackerHasActiveMemberTag;
+    using BareT = std::remove_cv_t<T>;
+    if constexpr (refTrackerHasVisitTag(static_cast<BareT*>(nullptr))) {
+        BareT::refTrackerVisit(node, v);
+        return;
+    }
+
     if constexpr (TraceNativeHeapDetail::HasBeginEnd<T>) {
         for (auto&& elem : node) {
             auto mark = v.worklistMark();
             TraceNativeHeapDetail::visitFieldValue(elem, v);
             v.drainFrom(mark);
         }
-    } else if constexpr ((std::is_class_v<T> || std::is_union_v<T>)
+    } else if constexpr (std::is_class_v<T>
                          && std::meta::is_complete_type(^^T)) {
         // 1. Walk inherited subobjects in declaration order. Single inheritance
         //    means &base == &derived, so we recurse directly rather than going
@@ -472,8 +627,66 @@ ALWAYS_INLINE void visitNativeChildren(T& node, Visitor& v)
                 v.popPathFrame();
             }
         };
+    } else if constexpr (std::is_union_v<T>
+                         && std::meta::is_complete_type(^^T)) {
+        // ── Customization point 2: refTrackerActiveMemberIndex ────────────
+        // For self-contained discriminated unions: the union type declares
+        //   static size_t refTrackerActiveMemberIndex(const T&);
+        // returning the 0-based index (declaration order, matching
+        // nonstatic_data_members_of) of the currently-active member.  The
+        // walker visits only that one member.
+        //
+        // If the discriminant lives outside the union (e.g. JSValue's NaN-box
+        // tag), use refTrackerVisit on the *containing* type instead.
+        //
+        // Unions that declare neither hook are opaque leaves — safe because
+        // the containing type's refTrackerVisit (if any) already handled the
+        // semantically-meaningful pointer(s).
+        // Detection via ADL sentinel (see refTrackerHasActiveMemberTag above).
+        // Types with refTrackerActiveMemberIndex must also declare an ADL overload:
+        //   inline constexpr bool refTrackerHasActiveMemberTag(MyUnion*) noexcept { return true; }
+        if constexpr (refTrackerHasActiveMemberTag(static_cast<BareT*>(nullptr))) {
+            size_t activeIdx = T::refTrackerActiveMemberIndex(node);
+            size_t idx = 0;
+            template for (constexpr auto member :
+                          std::define_static_array(
+                              std::meta::nonstatic_data_members_of(^^T,
+                                  std::meta::access_context::unchecked()))) {
+                if constexpr (!std::meta::is_bit_field(member)
+                              && std::meta::has_identifier(member)) {
+                    if (idx == activeIdx) {
+                        v.pushPathFrame({
+                            "",
+                            std::meta::identifier_of(member),
+                            std::addressof(node.[:member:])
+                        });
+                        TraceNativeHeapDetail::visitFieldValue(node.[:member:], v);
+                        v.popPathFrame();
+                    }
+                    ++idx;
+                }
+            }
+        } else {
+            // No hook found — treat as an opaque leaf and skip.
+            //
+            // Ideally we would static_assert here to force every union to
+            // declare either refTrackerActiveMemberIndex or a containing-class
+            // refTrackerVisit.  However, Bloomberg p2996 clang has a known bug
+            // where ADL-based sentinel detection (refTrackerHasVisitTag /
+            // refTrackerHasActiveMemberTag) fails to resolve namespace-scope
+            // overloads when the template is instantiated transitively from
+            // inside a `template for` loop compiled with -freflection-latest.
+            // In that build context ALL unqualified calls resolve only to the
+            // TraceNativeHeapDetail fallback (returns false), so tagged types
+            // appear un-tagged and the assert would fire spuriously.
+            //
+            // Silently skipping is safe: every union that actually holds a
+            // tracked Strong<> should have a containing-class refTrackerVisit
+            // that handles it before the walker ever descends into the union.
+            (void)node;
+        }
     }
-    // else: fundamental / enum / incomplete class — no children
+    // else: fundamental / enum / incomplete type — no children
 }
 
 // --- Public entry points ---------------------------------------------------

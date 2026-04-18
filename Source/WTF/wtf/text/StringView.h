@@ -619,10 +619,10 @@ inline char32_t StringView::codePointAt(unsigned index) const
         return span8()[index];
     auto characters = span16();
     if (U16_IS_SINGLE(characters[index]))
-        return characters[index];
+        return static_cast<char32_t>(characters[index]);
     if (index + 1 < length() && U16_IS_LEAD(characters[index]) && U16_IS_TRAIL(characters[index + 1]))
         return U16_GET_SUPPLEMENTARY(characters[index], characters[index + 1]);
-    return characters[index];
+    return static_cast<char32_t>(characters[index]);
 }
 
 inline char32_t StringView::codePointBefore(unsigned index) const
@@ -630,7 +630,9 @@ inline char32_t StringView::codePointBefore(unsigned index) const
     ASSERT(index > 0 && index <= length());
     unsigned offset = index;
     char32_t codePoint;
+    IGNORE_WARNINGS_BEGIN("character-conversion")
     U16_PREV(*this, 0, offset, codePoint);
+    IGNORE_WARNINGS_END
     return codePoint;
 }
 
@@ -1099,7 +1101,9 @@ inline char32_t StringView::CodePoints::Iterator::operator*() const
         return *static_cast<const Latin1Character*>(m_current);
     char32_t codePoint;
     size_t length = static_cast<const char16_t*>(m_end) - static_cast<const char16_t*>(m_current);
+    IGNORE_WARNINGS_BEGIN("character-conversion")
     U16_GET(static_cast<const char16_t*>(m_current), 0, 0, length, codePoint);
+    IGNORE_WARNINGS_END
     return codePoint;
 }
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_END

@@ -57,6 +57,14 @@ public:
 
         static constexpr ptrdiff_t offsetOfValue() { return 0; }
         static constexpr ptrdiff_t offsetOfOwner() { return Global::offsetOfOwner() - Global::offsetOfValue(); }
+
+#if ENABLE(REFTRACKER)
+        static constexpr bool refTrackerVisitTag = true;
+        template<typename Visitor>
+        static void refTrackerVisit(const Value&, Visitor&) { }
+        // Active branch depends on Global::m_type, not accessible from Value.
+        // Use Global::refTrackerVisit for correct dispatch.
+#endif
     };
     static_assert(sizeof(Value) == 16, "Update IPInt if this changes");
 
@@ -96,6 +104,28 @@ public:
 
     Value* valuePointer() { return &m_value; }
 
+#if ENABLE(REFTRACKER)
+    static constexpr bool refTrackerVisitTag = true;
+    template<typename Visitor>
+    static void refTrackerVisit(const Global& self, Visitor& v)
+    {
+        v.visitInline(self.m_typeDefinition);
+        if (self.m_owner)
+            v.enqueue(*self.m_owner);
+        if (self.m_type == Types::V128) {
+            // m_value.m_vector is v128_t — no pointers.
+        } else if (isRefType(self.m_type)) {
+            // m_value.m_externref is a WriteBarrierBase<Unknown> wrapping a JSCell*.
+            v.visitInline(self.m_value.m_externref);
+        } else {
+            // m_value.m_primitive is uint64_t — no pointers.
+        }
+        // m_value.m_pointer (portable/imported-mutable binding) points into
+        // another Global's Value field (not the Global head), so following it
+        // cannot reach the start address of any target object. Omitted.
+    }
+#endif
+
 private:
     Global(Wasm::Type type, Wasm::Mutability mutability, uint64_t initialValue)
         : m_type(type)
@@ -122,6 +152,12 @@ private:
     JSWebAssemblyGlobal* m_owner { nullptr };
     Value m_value;
 };
+
+#if ENABLE(REFTRACKER)
+// ADL overloads for RefTracker detection (see TraceNativeHeap.h for rationale).
+inline constexpr bool refTrackerHasVisitTag(Global::Value*) noexcept { return true; }
+inline constexpr bool refTrackerHasVisitTag(Global*) noexcept { return true; }
+#endif
 
 } } // namespace JSC::Wasm
 

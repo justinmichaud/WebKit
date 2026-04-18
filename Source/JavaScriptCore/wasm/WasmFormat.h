@@ -648,6 +648,17 @@ struct GlobalInformation {
         uint64_t initialBitsOrImportNumber;
         v128_t initialVector { };
     } initialBits;
+
+#if ENABLE(REFTRACKER)
+    static constexpr bool refTrackerVisitTag = true;
+    template<typename Visitor>
+    static void refTrackerVisit(const GlobalInformation&, Visitor&)
+    {
+        // All members are scalars (mutability, type index, initializationType,
+        // bindingMode) or the initialBits union (uint64_t / v128_t). Neither
+        // branch of initialBits contains pointers; nothing to traverse.
+    }
+#endif
 };
 
 struct FunctionData {
@@ -992,6 +1003,11 @@ struct WasmOrJSImportableFunctionCallLinkInfo final : public WasmOrJSImportableF
 void validateWasmValue(uint64_t wasmValue, Type expectedType);
 #else
 ALWAYS_INLINE void validateWasmValue(uint64_t, Type) { }
+#endif
+
+#if ENABLE(REFTRACKER)
+// ADL overload for RefTracker detection (see TraceNativeHeap.h for rationale).
+inline constexpr bool refTrackerHasVisitTag(GlobalInformation*) noexcept { return true; }
 #endif
 
 } } // namespace JSC::Wasm

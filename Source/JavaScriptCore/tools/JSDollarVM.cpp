@@ -2646,6 +2646,8 @@ JSC_DEFINE_HOST_FUNCTION(functionFindLiveStrongCount, (JSGlobalObject* globalObj
         [&count](auto&) { ++count; });
     return JSValue::encode(jsNumber(count));
 #else
+#error
+    UNUSED_PARAM(globalObject);
     return JSValue::encode(jsNumber(-1));
 #endif
 }

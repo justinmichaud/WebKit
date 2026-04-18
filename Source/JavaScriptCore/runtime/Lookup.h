@@ -209,6 +209,14 @@ struct HashTableValue {
             intptr_t value2;
             DECLARE_TYPE()
         } bits;
+
+#if ENABLE(REFTRACKER)
+        static constexpr bool refTrackerVisitTag = true;
+        template<typename Visitor>
+        static void refTrackerVisit(const ValueStorage&, Visitor&) { }
+        // ValueStorage holds function pointers, intptr_t offsets, and scalar values.
+        // No JSCell pointers in any branch; nothing to traverse.
+#endif
     } m_values;
 
     unsigned attributes() const { return m_attributes; }
@@ -564,6 +572,11 @@ inline void reifyStaticProperties(VM& vm, const ClassInfo* classInfo, const Arra
         reifyStaticProperty(vm, classInfo, key, value, thisObj);
     }
 }
+
+#if ENABLE(REFTRACKER)
+// ADL overload for RefTracker detection (see TraceNativeHeap.h for rationale).
+inline constexpr bool refTrackerHasVisitTag(HashTableValue::ValueStorage*) noexcept { return true; }
+#endif
 
 } // namespace JSC
 

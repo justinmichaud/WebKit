@@ -117,6 +117,20 @@ public:
     NameSection* nameSection() const { return m_nameSection.get(); }
     void dump(PrintStream&) const;
 
+#if ENABLE(REFTRACKER)
+    static constexpr bool refTrackerVisitTag = true;
+    template<typename Visitor>
+    static void refTrackerVisit(const IndexOrName& self, Visitor& v)
+    {
+        // m_indexName is a union of { Index (size_t) | const Name* }.
+        // Name = Vector<char8_t>. The active branch is tagged in the high bits
+        // of the value (JSVALUE64) or via m_kind (JSVALUE32_64).
+        if (self.isName())
+            v.visitInline(*self.m_indexName.name);
+        v.visitInline(self.m_nameSection);
+    }
+#endif
+
 private:
     union {
         Index index;
@@ -138,5 +152,10 @@ private:
 };
 
 String makeString(const IndexOrName&);
+
+#if ENABLE(REFTRACKER)
+// ADL overload for RefTracker detection (see TraceNativeHeap.h for rationale).
+inline constexpr bool refTrackerHasVisitTag(IndexOrName*) noexcept { return true; }
+#endif
 
 } } // namespace JSC::Wasm

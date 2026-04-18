@@ -75,7 +75,8 @@ public:
         return OBJECT_OFFSETOF(TypeInfoBlob, u.fields.indexingModeIncludingHistory);
     }
 
-private:
+    // Data is public so that the ADL overload `refTrackerHasActiveMemberTag(Data*)`
+    // can be declared in the JSC namespace without triggering a private-access error.
     union Data {
         struct {
             IndexingType indexingModeIncludingHistory;
@@ -86,9 +87,25 @@ private:
         uint32_t word;
 
         Data() { word = 0xbbadbeef; }
+
+#if ENABLE(REFTRACKER)
+        // refTrackerActiveMemberTag: value-member sentinel detected via ADL
+        // (Bloomberg p2996 clang fails SFINAE in template for contexts).
+        static constexpr bool refTrackerActiveMemberTag = true;
+        static size_t refTrackerActiveMemberIndex(const Data&) { return 0; }
+        // Always selects 'fields' (index 0). Neither 'fields' nor 'word'
+        // contains pointers, so visiting either is safe. 'fields' is preferred
+        // because its sub-members have names useful for verbose path logging.
+#endif
     };
 
+private:
     Data u;
 };
+
+#if ENABLE(REFTRACKER)
+// ADL overload for RefTracker active-member detection (see TraceNativeHeap.h for rationale).
+inline constexpr bool refTrackerHasActiveMemberTag(TypeInfoBlob::Data*) noexcept { return true; }
+#endif
 
 } // namespace JSC

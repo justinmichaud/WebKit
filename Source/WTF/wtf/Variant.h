@@ -1673,7 +1673,14 @@ namespace mpark {
     union recursive_union;
 
     template <Trait DestructibleTrait, std::size_t Index>
-    union recursive_union<DestructibleTrait, Index> {};
+    union recursive_union<DestructibleTrait, Index> {
+      // RefTracker sentinel: recursive_union is an internal mpark detail walked
+      // only via base::refTrackerVisit; this tag suppresses the compile-time
+      // static_assert that fires when the walker instantiates this type.
+      static constexpr bool refTrackerVisitTag = true;
+      template<typename WalkerVisitor>
+      static void refTrackerVisit(const recursive_union&, WalkerVisitor&) { }
+    };
 
 #define MPARK_VARIANT_RECURSIVE_UNION(destructible_trait, destructor)      \
   template <std::size_t Index, typename T, typename... Ts>                 \
@@ -1699,6 +1706,15 @@ namespace mpark {
                                                                            \
     recursive_union &operator=(const recursive_union &) = default;         \
     recursive_union &operator=(recursive_union &&) = default;              \
+                                                                           \
+    /* RefTracker sentinel: this internal union is always accessed via  */ \
+    /* base::refTrackerVisit which walks the active alt by index.       */ \
+    /* This tag stops the compile-time static_assert in visitNativeChildren \
+       that fires when the template instantiation graph reaches this type */ \
+    /* even though the runtime path never actually visits it directly.  */ \
+    static constexpr bool refTrackerVisitTag = true;                      \
+    template<typename WalkerVisitor>                                       \
+    static void refTrackerVisit(const recursive_union<destructible_trait, Index, T, Ts...>&, WalkerVisitor&) { } \
                                                                            \
     private:                                                               \
     char dummy_;                                                           \
@@ -1744,6 +1760,24 @@ namespace mpark {
 
       inline constexpr std::size_t index() const noexcept {
         return valueless_by_exception() ? variant_npos : index_;
+      }
+
+      // RefTracker hook. Detection uses a value-member sentinel (refTrackerVisitTag)
+      // because Bloomberg p2996 clang fails ALL function-call requires-expressions
+      // and also fails std::void_t<typename T::TypeAlias> SFINAE in reflection contexts.
+      // MUST be in the public section.
+      static constexpr bool refTrackerVisitTag = true;
+      template<typename WalkerVisitor>
+      static void refTrackerVisit(const base& self, WalkerVisitor& v)
+      {
+          if (self.valueless_by_exception()) return;
+          visitation::alt::visit_alt_at(
+              self.index(),
+              [&v](const auto& alt_obj) {
+                  using AltT = std::remove_const_t<std::remove_reference_t<decltype(alt_obj.value)>>;
+                  v.visitInline(const_cast<AltT&>(alt_obj.value));
+              },
+              self);
       }
 
       protected:
@@ -2279,6 +2313,19 @@ namespace mpark {
     template <typename T>
     struct is_in_place_type<in_place_type_t<T>> : std::true_type {};
 
+#if ENABLE(REFTRACKER)
+  // ADL overloads for RefTracker detection (see TraceNativeHeap.h for rationale).
+  // Bloomberg p2996 clang fails SFINAE in template for contexts; unqualified ADL
+  // function calls with `using TraceNativeHeapDetail::refTrackerHasVisitTag;` work.
+  // These overloads are found when visitNativeChildren instantiates for these types.
+  template<Trait DestructibleTrait, std::size_t Index>
+  constexpr bool refTrackerHasVisitTag(recursive_union<DestructibleTrait, Index>*) noexcept { return true; }
+  template<Trait DestructibleTrait, std::size_t Index, typename T, typename... Ts>
+  constexpr bool refTrackerHasVisitTag(recursive_union<DestructibleTrait, Index, T, Ts...>*) noexcept { return true; }
+  template<Trait DestructibleTrait, typename... Ts>
+  constexpr bool refTrackerHasVisitTag(base<DestructibleTrait, Ts...>*) noexcept { return true; }
+#endif
+
   }  // detail
 
   template <typename... Ts>
@@ -2463,6 +2510,24 @@ namespace mpark {
         lib::all<(std::is_nothrow_move_constructible<Ts>::value &&
                   lib::is_nothrow_swappable<Ts>::value)...>::value) {
       impl_.swap(that.impl_);
+    }
+
+    // RefTracker hook. Detection uses a value-member sentinel (refTrackerVisitTag)
+    // because Bloomberg p2996 clang fails ALL function-call requires-expressions
+    // and also fails std::void_t<typename T::TypeAlias> SFINAE in reflection contexts.
+    static constexpr bool refTrackerVisitTag = true;
+    template<typename WalkerVisitor>
+    static void refTrackerVisit(const variant& self, WalkerVisitor& v)
+    {
+        if (self.valueless_by_exception())
+            return;
+        detail::visitation::variant::visit_value_at(
+            self.index(),
+            [&v](const auto& alt) {
+                using AltT = std::remove_const_t<std::remove_reference_t<decltype(alt)>>;
+                v.visitInline(const_cast<AltT&>(alt));
+            },
+            self);
     }
 
     private:
@@ -2821,6 +2886,12 @@ namespace mpark {
 
 #undef DECLTYPE_AUTO
 #undef DECLTYPE_AUTO_RETURN
+
+#if ENABLE(REFTRACKER)
+  // ADL overload for variant (in mpark namespace, found by ADL on mpark::variant<Ts...>*).
+  template<typename... Ts>
+  constexpr bool refTrackerHasVisitTag(variant<Ts...>*) noexcept { return true; }
+#endif
 
 }  // namespace mpark
 

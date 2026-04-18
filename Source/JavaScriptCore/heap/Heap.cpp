@@ -2324,7 +2324,7 @@ void Heap::finalize()
     }
 
 #if ENABLE(REFTRACKER) && __has_include(<meta>)
-    if (!vm().activeHeapAnalyzer() && !m_needsRefTrackerWalk) {
+    if (Options::enableStrongRefTracker() && !vm().activeHeapAnalyzer() && !m_needsRefTrackerWalk) {
         m_needsRefTrackerWalk = true;
         Ref protectedVM { vm() };
         callOnMainThread([protectedVM = WTF::move(protectedVM)] {
