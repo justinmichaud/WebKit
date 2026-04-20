@@ -24,6 +24,7 @@
 #include <wtf/Deque.h>
 #include <wtf/HashSet.h>
 #include <wtf/StdLibExtras.h>
+#include <wtf/TraceNativeHeapLeaf.h>
 #include <wtf/Vector.h>
 
 #if CPU(ARM64E)
@@ -222,6 +223,7 @@ constexpr bool refTrackerHasVisitTag(T*) noexcept { return false; }
 template<typename T>
 constexpr bool refTrackerHasActiveMemberTag(T*) noexcept { return false; }
 
+
 struct PathFrame {
     std::string_view typeName;
     std::string_view memberName;  // empty for type frames
@@ -377,18 +379,64 @@ public:
     }
 
     // Called from a CellDispatcher after it has determined the concrete
-    // JSCell subclass `T`. Appends (ptr, trampoline<T>) to the worklist
-    // directly; dedup was already handled by `enqueue`'s m_cellDispatched
-    // gate before the dispatcher chain was consulted.
-    // The m_seen check prevents worklist explosion: without it, walking
-    // every live JSCell's members generates millions of worklist entries
-    // and overflows the Vector backing store.
+    // JSCell subclass `T`. Marks ptr in m_cellDispatched (preventing re-dispatch
+    // from enqueue) and appends (ptr, trampoline<T>) to the worklist so the
+    // cell's C++ member layout can be walked by the reflection engine.
+    //
+    // Dedup is NOT done here via m_seen: in the tandem-walk use-case m_seen
+    // is pre-populated with every live JSCell from the GC phase, so checking
+    // it here would always early-return and cells would never be walked.
+    // Instead, m_cellDispatched is the dedup gate for dispatched cells.  We
+    // insert here (on a successful dispatch) rather than in dispatchCell or
+    // enqueue so that cells which are NOT matched by any dispatcher are left
+    // out of m_cellDispatched.  That preserves enqueue()'s static-type fallback:
+    // when such a cell is later encountered via a typed C++ pointer, enqueue
+    // finds it absent from m_cellDispatched, tries the dispatchers (still no
+    // match), and falls through to the static-type trampoline — walking the cell
+    // with the correct concrete type that the C++ pointer provides.
     template<typename T>
     ALWAYS_INLINE void enqueueCellDispatched(void* ptr)
     {
-        if (!m_seen.insert(ptr).second)
-            return;
+        m_cellDispatched.insert(ptr);
         m_worklist.push_back(WorkItem { ptr, &trampoline<T> });
+    }
+
+    // Dispatch a single cell address through the dispatcher chain.
+    //
+    // Used by findAllOnNativeHeap to proactively visit every live JSCell from
+    // the GC-phase seen-set. JSCells may not be reachable via C++ member
+    // pointers from the root (e.g. when they're only referenced through
+    // JSValue NaN-boxes stored in C-style Butterfly arrays, or via GC edges
+    // with no C++ pointer counterpart). Without this, the C++ walk would
+    // never descend into such cells and their Strong<> members would be missed.
+    //
+    // Dedup strategy: check m_cellDispatched BEFORE attempting dispatch (to
+    // prevent double-dispatch of cells already handled by enqueueCellDispatched),
+    // but do NOT insert into m_cellDispatched if no dispatcher matches.
+    //
+    // Why not pre-insert? If we pre-insert every cell we attempt (matched or
+    // not), then cells NOT in the dispatcher table are permanently marked as
+    // "dispatched" even though they were never walked. When enqueue() later
+    // encounters one of those cells via a typed C++ pointer it would find the
+    // cell already in m_cellDispatched and skip it — silently discarding the
+    // static-type trampoline that would have walked the cell correctly.
+    //
+    // By inserting only in enqueueCellDispatched (on a successful match),
+    // unmatched cells remain absent from m_cellDispatched and enqueue()'s
+    // static-type fallback can still walk them when they appear via typed
+    // C++ pointers during the root walk.
+    void dispatchCell(const void* ptr)
+    {
+        // Already dispatched (enqueueCellDispatched marked it) — skip.
+        if (m_cellDispatched.count(ptr))
+            return;
+        void* mutablePtr = const_cast<void*>(ptr);
+        for (auto* dispatcher : m_cellDispatchers) {
+            if (dispatcher->tryDispatch(mutablePtr, *this))
+                return; // enqueueCellDispatched inserted into m_cellDispatched
+        }
+        // No dispatcher matched — leave m_cellDispatched clean so that
+        // enqueue() can still use the static-type fallback for this cell.
     }
 
     void drain()
@@ -492,22 +540,38 @@ private:
 namespace TraceNativeHeapDetail {
 
 // Handle one field value: leaf for fundamentals/enums/function pointers,
-// enqueue for class/union types and dereferenced non-void/non-function raw
-// pointers.
+// visitInline for inline class/union fields, and enqueue for raw pointers
+// whose pointee is a class or union type (fundamental/enum pointees are
+// treated as leaves to avoid following data-buffer pointers).
 template<typename Visitor, typename FieldType>
 ALWAYS_INLINE void visitFieldValue(FieldType& field, Visitor& v)
 {
     using Bare = std::remove_cvref_t<FieldType>;
     if constexpr (std::is_pointer_v<Bare>) {
         using Pointee = std::remove_cvref_t<std::remove_pointer_t<Bare>>;
-        // Skip void*, function pointers, and pointers to incomplete types.
-        // Incomplete types cannot be dereferenced (no known size/layout),
-        // and instantiating trampoline<IncompleteType> would fail because the
-        // trampoline body dereferences the pointer. is_complete_type is
-        // evaluated at template-instantiation time, so forward-declared types
-        // that are never defined in this TU correctly evaluate to false.
+        // Skip void*, function pointers, and pointers to fundamental/enum types.
+        //
+        // Fundamental-type pointers (char*, uint8_t*, int*, etc.) typically
+        // point into raw data buffers — string character arrays, WASM linear
+        // memory, JIT code buffers — not into object-graph nodes.  Following
+        // them causes the m_seen set to absorb millions of individual byte or
+        // word addresses, ballooning memory use until the process OOMs.
+        //
+        // Only class/struct and union pointees carry subobjects we care about
+        // (RefCounted C++ objects, containers, Strong<> wrappers, etc.).
+        // Enum pointers are likewise skipped: enum arrays are pure data.
+        //
+        // Incomplete class/union pointees are a hard error: the walker must be
+        // able to inspect every class/union pointer it encounters. If you see a
+        // compile error here, include the missing header in
+        // JSCNativeHeapWalkerImpl.cpp (or the equivalent fat-include TU for
+        // your project) so the type is complete at the point of instantiation.
         if constexpr (!std::is_void_v<Pointee> && !std::is_function_v<Pointee>
-                      && std::meta::is_complete_type(^^Pointee)) {
+                      && (std::is_class_v<Pointee> || std::is_union_v<Pointee>)) {
+            static_assert(std::meta::is_complete_type(^^Pointee),
+                "native-heap walker: raw pointer to incomplete class/union type — "
+                "include the header that defines this type in the fat-include TU "
+                "(e.g. JSCNativeHeapWalkerImpl.cpp) so the walker can inspect it");
             if (field) {
                 auto* raw = field;
 #if CPU(ARM64E)
@@ -523,14 +587,35 @@ ALWAYS_INLINE void visitFieldValue(FieldType& field, Visitor& v)
             }
         }
     } else if constexpr (std::is_class_v<Bare> || std::is_union_v<Bare>) {
-        // Both class/struct and union fields route through visitInline.
-        // visitNativeChildren handles each case:
-        //   • class/struct: default reflection walk over members
-        //   • union: refTrackerVisit hook or refTrackerActiveMemberIndex dispatch
-        // Types that need custom traversal (e.g. JSValue, tagged pointer
-        // wrappers) declare a refTrackerVisit member — see the file-level
-        // comment for the full customization-point documentation.
-        v.visitInline(field);
+        // std::unique_ptr<T> stores its raw pointer inside a private base
+        // class (__compressed_pair). The reflection walk only visits public
+        // bases, so the pointer is unreachable via the normal visitInline path.
+        // Detect unique_ptr by its primary template and call get() directly.
+        if constexpr (std::meta::has_template_arguments(^^Bare)
+                      && std::meta::template_of(^^Bare) == ^^std::unique_ptr) {
+            using Element = typename Bare::element_type;
+            // Incomplete element types are a hard error — same rationale as
+            // the raw-pointer branch above.  Add the missing header to the
+            // fat-include TU (e.g. JSCNativeHeapWalkerImpl.cpp).
+            if constexpr (!std::is_void_v<Element>
+                          && (std::is_class_v<Element> || std::is_union_v<Element>)) {
+                static_assert(std::meta::is_complete_type(^^Element),
+                    "native-heap walker: unique_ptr<X> with incomplete X — "
+                    "include the header that defines X in the fat-include TU "
+                    "(e.g. JSCNativeHeapWalkerImpl.cpp) so the walker can inspect it");
+                if (auto* ptr = field.get())
+                    v.enqueue(*ptr);
+            }
+        } else {
+            // Both class/struct and union fields route through visitInline.
+            // visitNativeChildren handles each case:
+            //   • class/struct: default reflection walk over members
+            //   • union: refTrackerVisit hook or refTrackerActiveMemberIndex dispatch
+            // Types that need custom traversal (e.g. JSValue, tagged pointer
+            // wrappers) declare a refTrackerVisit member — see the file-level
+            // comment for the full customization-point documentation.
+            v.visitInline(field);
+        }
     }
     // else: leaf (fundamental / enum / array of fundamental / member ptr)
 }
@@ -541,18 +626,45 @@ ALWAYS_INLINE void visitFieldValue(FieldType& field, Visitor& v)
 // iterators; else reflect over its non-static data members.
 // `T` is the bare type — reflect on it directly.
 //
-// When `T` is a class reached via a raw-pointer field whose pointee type is
-// only forward-declared in this TU, `std::meta::is_complete_type(^^T)` is
-// false and we skip the member expansion: we cannot enumerate members of an
-// incomplete type, so we treat the object as a leaf. The seen-set entry is
-// still recorded by `enqueue`, which prevents re-entry.
-//
 // Customization points — see the file-level comment for full documentation:
 //   refTrackerVisit(v)                  — full custom traversal for any type
 //   refTrackerActiveMemberIndex(node)   — active-branch selector for unions
 template<typename Visitor, typename T>
 ALWAYS_INLINE void visitNativeChildren(T& node, Visitor& v)
 {
+    // All branches are in a single if-constexpr / else-if-constexpr chain so
+    // that each taken branch suppresses compilation of all subsequent branches.
+    // This is critical: if the leaf branch were a bare `return` the compiler
+    // would still instantiate the base-class and member-walking code below,
+    // which would fire static_assert for incomplete pointee types held inside
+    // leaf wrappers like WriteBarrier<XConstructor>.
+    using BareT = std::remove_cv_t<T>;
+
+    // Bring ADL fallbacks into scope for the unqualified refTrackerHasVisitTag /
+    // refTrackerHasActiveMemberTag calls below (ADL finds per-type overloads).
+    using TraceNativeHeapDetail::refTrackerHasVisitTag;
+    using TraceNativeHeapDetail::refTrackerHasActiveMemberTag;
+
+    // ── Leaf fast-path ────────────────────────────────────────────────────
+    // Types that inherit from TraceNativeHeapLeaf are native-heap-walk leaves:
+    // the walker does not recurse into them.  This handles GC barrier wrappers
+    // (WriteBarrier<T>, WriteBarrierStructureID) whose raw GC-cell pointers
+    // must NOT be followed by the native-heap walk — GC cells are enumerated
+    // separately by the GC phase of findAllOnNativeHeap.
+    //
+    // Why base-class inheritance rather than the refTrackerVisitTag sentinel?
+    // Bloomberg's P2996 clang has two bugs that make static_data_members_of
+    // and parent_of unreliable for detecting the sentinel on template types:
+    //   1. static_data_members_of(^^T, unchecked) returns static members from
+    //      the types of T's instance fields, not just T's own direct statics.
+    //   2. parent_of() for those spurious entries returns the outer class T
+    //      rather than the actual declaring class.
+    // std::is_base_of_v is pure type-trait machinery — no ADL, no reflection —
+    // and is immune to both bugs.  See TraceNativeHeapLeaf.h for details.
+    if constexpr (std::is_base_of_v<TraceNativeHeapLeaf, BareT>) {
+        // Leaf — no recursion.
+        (void)node;
+
     // ── Customization point 1: refTrackerVisit ────────────────────────────
     // If the type declares a static `refTrackerVisit(const T&, Visitor&)`,
     // delegate entirely to it and skip the default reflection walk.  Handles:
@@ -561,21 +673,16 @@ ALWAYS_INLINE void visitNativeChildren(T& node, Visitor& v)
     //   • Any type that needs non-trivial traversal logic
     //
     // NOTE: Detection uses ADL-based constexpr function calls, immune to all three
-    // Bloomberg p2996 clang bugs. The `using` declarations below bring the fallback
+    // Bloomberg p2996 clang bugs. The `using` declarations above bring the fallback
     // functions from TraceNativeHeapDetail into the unqualified lookup set; each
     // tagged type adds a more-specific overload in its own namespace that ADL finds
     // at instantiation time. The call MUST be unqualified for ADL to apply — a
     // qualified call like TraceNativeHeapDetail::refTrackerHasVisitTag(...) would
     // bypass ADL entirely. See TraceNativeHeapDetail for the full story.
-    using TraceNativeHeapDetail::refTrackerHasVisitTag;
-    using TraceNativeHeapDetail::refTrackerHasActiveMemberTag;
-    using BareT = std::remove_cv_t<T>;
-    if constexpr (refTrackerHasVisitTag(static_cast<BareT*>(nullptr))) {
+    } else if constexpr (refTrackerHasVisitTag(static_cast<BareT*>(nullptr))) {
         BareT::refTrackerVisit(node, v);
-        return;
-    }
 
-    if constexpr (TraceNativeHeapDetail::HasBeginEnd<T>) {
+    } else if constexpr (TraceNativeHeapDetail::HasBeginEnd<T>) {
         for (auto&& elem : node) {
             auto mark = v.worklistMark();
             TraceNativeHeapDetail::visitFieldValue(elem, v);
@@ -583,6 +690,7 @@ ALWAYS_INLINE void visitNativeChildren(T& node, Visitor& v)
         }
     } else if constexpr (std::is_class_v<T>
                          && std::meta::is_complete_type(^^T)) {
+        // ─────────────────────────────────────────────────────────────────────
         // 1. Walk inherited subobjects in declaration order. Single inheritance
         //    means &base == &derived, so we recurse directly rather than going
         //    through enqueue (which would hit the seen-set and skip).

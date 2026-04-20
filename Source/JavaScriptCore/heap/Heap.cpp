@@ -42,6 +42,7 @@
 #include "HeapIterationScope.h"
 #include "HeapProfiler.h"
 #include "TandemHeapAnalyzer.h"
+#include "JSCNativeHeapWalkerImpl.h"
 #include "HeapSnapshot.h"
 #include "HeapSubspaceTypes.h"
 #include "HeapVerifier.h"
@@ -2333,18 +2334,8 @@ void Heap::finalize()
                 return;
             vm.heap.m_needsRefTrackerWalk = false;
             JSLockHolder locker(vm);
-            unsigned count = 0;
-            JSC::findAllOnNativeHeap<^^JSC::Strong>(vm, vm,
-                [&count](auto& strong) {
-                    ++count;
-                    dataLogLn("Live Strong at ", RawPointer(std::addressof(strong)), ":");
-                    auto frames = strong.refTrackerFrames();
-                    if (!frames.empty())
-                        dataLogLn(WTF::StackTracePrinter { frames });
-                    else
-                        dataLogLn("  (no stack trace - REFTRACKER flag was off at construction)");
-                    dataLogLn();
-                });
+            unsigned count = JSC::findLiveStrongCount(vm);
+            JSC::dumpAllStrongHandles(vm);
             dataLogLn("REFTRACKER: walk complete, found ", count, " Strong handles");
         });
     }

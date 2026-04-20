@@ -51,6 +51,9 @@
 #include <wtf/Platform.h>
 #include <wtf/SaturatedArithmetic.h>
 #include <wtf/TZoneMalloc.h>
+#if ENABLE(REFTRACKER)
+#include <wtf/TraceNativeHeapLeaf.h>
+#endif
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
@@ -84,7 +87,11 @@ struct LocalTimeOffsetCache {
     uint64_t epoch { 0 };
 };
 
-class DateCache {
+class DateCache
+#if ENABLE(REFTRACKER)
+    : public WTF::TraceNativeHeapLeaf
+#endif
+{
     WTF_MAKE_TZONE_NON_HEAP_ALLOCATABLE(DateCache);
     WTF_MAKE_NONCOPYABLE(DateCache);
 public:

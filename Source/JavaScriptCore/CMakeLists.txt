@@ -851,6 +851,7 @@ set(JavaScriptCore_PRIVATE_FRAMEWORK_HEADERS
     heap/Subspace.h
     heap/SubspaceInlines.h
     heap/Synchronousness.h
+    heap/JSCNativeHeapWalkerImpl.h
     heap/TandemHeapAnalyzer.h
     heap/TinyBloomFilter.h
     heap/VerifierSlotVisitor.h

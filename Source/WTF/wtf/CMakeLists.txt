@@ -372,6 +372,7 @@ set(WTF_PUBLIC_HEADERS
     TinyLRUCache.h
     TinyPtrSet.h
     TraceNativeHeap.h
+    TraceNativeHeapLeaf.h
     TrailingArray.h
     TranslatedProcess.h
     TriState.h

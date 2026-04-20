@@ -362,6 +362,7 @@
 		DD3DC8A727A4BF8E007E5B61 /* FastMalloc.h in Headers */ = {isa = PBXBuildFile; fileRef = A8A472A2151A825A004123FF /* FastMalloc.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		DD3DC8A827A4BF8E007E5B61 /* TrailingArray.h in Headers */ = {isa = PBXBuildFile; fileRef = E3538D4D276220880075DA50 /* TrailingArray.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		1F7CACE1000000000000001A /* TraceNativeHeap.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F7CACE1000000000000000A /* TraceNativeHeap.h */; settings = {ATTRIBUTES = (Private, ); }; };
+		2B567E77F3FC4C77B2B139DA /* TraceNativeHeapLeaf.h in Headers */ = {isa = PBXBuildFile; fileRef = 024D7B79D54E41639F94ABEE /* TraceNativeHeapLeaf.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		1F7CACE2000000000000001A /* CellDispatcher.h in Headers */ = {isa = PBXBuildFile; fileRef = 1F7CACE2000000000000000A /* CellDispatcher.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		DD3DC8A927A4BF8E007E5B61 /* ConcurrentBuffer.h in Headers */ = {isa = PBXBuildFile; fileRef = 0FB467821FDE282B003FCB09 /* ConcurrentBuffer.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		DD3DC8AA27A4BF8E007E5B61 /* FunctionDispatcher.h in Headers */ = {isa = PBXBuildFile; fileRef = 1A1D8B9B173186CE00141DA4 /* FunctionDispatcher.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -2010,6 +2011,7 @@
 		E3538D4C276220880075DA50 /* EmbeddedFixedVector.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = EmbeddedFixedVector.h; sourceTree = "<group>"; };
 		E3538D4D276220880075DA50 /* TrailingArray.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = TrailingArray.h; sourceTree = "<group>"; };
 		1F7CACE1000000000000000A /* TraceNativeHeap.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = TraceNativeHeap.h; sourceTree = "<group>"; };
+		024D7B79D54E41639F94ABEE /* TraceNativeHeapLeaf.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = TraceNativeHeapLeaf.h; sourceTree = "<group>"; };
 		1F7CACE2000000000000000A /* CellDispatcher.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = CellDispatcher.h; sourceTree = "<group>"; };
 		E35702502C9D4CEC009292DE /* simd128.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = simd128.h; sourceTree = "<group>"; };
 		E360C7642127B85B00C90F0E /* UnalignedAccess.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = UnalignedAccess.h; sourceTree = "<group>"; };
@@ -2814,6 +2816,7 @@
 				553071C91C40427200384898 /* TinyLRUCache.h */,
 				0FED67B51B22D4D80066CE15 /* TinyPtrSet.h */,
 				1F7CACE1000000000000000A /* TraceNativeHeap.h */,
+				024D7B79D54E41639F94ABEE /* TraceNativeHeapLeaf.h */,
 				E3538D4D276220880075DA50 /* TrailingArray.h */,
 				521CC6B324A277C2004377D6 /* TranslatedProcess.cpp */,
 				2D1F2F462498F73300C63A83 /* TranslatedProcess.h */,
@@ -3986,6 +3989,7 @@
 				DD3DC98F27A4BF8E007E5B61 /* TinyPtrSet.h in Headers */,
 				DDF3073827C086CD006A526F /* TollFreeBridging.h in Headers */,
 				1F7CACE1000000000000001A /* TraceNativeHeap.h in Headers */,
+				2B567E77F3FC4C77B2B139DA /* TraceNativeHeapLeaf.h in Headers */,
 				DD3DC8A827A4BF8E007E5B61 /* TrailingArray.h in Headers */,
 				DD3DC97127A4BF8E007E5B61 /* TranslatedProcess.h in Headers */,
 				DD3DC87627A4BF8E007E5B61 /* TriState.h in Headers */,

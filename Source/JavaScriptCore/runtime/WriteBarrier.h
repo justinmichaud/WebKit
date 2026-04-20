@@ -32,6 +32,9 @@
 #include <wtf/RawPtrTraits.h>
 #include <wtf/RawValueTraits.h>
 #include <wtf/TZoneMalloc.h>
+#if ENABLE(REFTRACKER)
+#include <wtf/TraceNativeHeapLeaf.h>
+#endif
 
 namespace JSC {
 
@@ -78,7 +81,16 @@ template<class T> inline void validateCell(T)
 enum WriteBarrierEarlyInitTag { WriteBarrierEarlyInit };
 
 // We have a separate base class with no constructors for use in Unions.
-template <typename T, typename Traits> class WriteBarrierBase {
+// Inheriting TraceNativeHeapLeaf marks the entire WriteBarrier family as
+// native-heap-walk leaves: the walker stops here and does not follow the
+// raw GC-cell pointer.  GC objects are enumerated separately by the GC
+// phase of findAllOnNativeHeap.  The empty base occupies no space (EBO)
+// and does not affect union compatibility (remains trivially constructible).
+template <typename T, typename Traits> class WriteBarrierBase
+#if ENABLE(REFTRACKER)
+    : public WTF::TraceNativeHeapLeaf
+#endif
+{
     using StorageType = typename Traits::StorageType;
 
 public:
@@ -152,13 +164,28 @@ public:
 
     T* unvalidatedGet() const { return Traits::unwrap(cell()); }
 
+#if ENABLE(REFTRACKER)
+    // Native-heap walker: WriteBarrier is a leaf from the native-heap
+    // perspective.  It stores a raw pointer to a GC-managed cell; following
+    // it on the native heap would require every reachable cell type to be
+    // complete in the instantiation TU.  The GC phase of findAllOnNativeHeap
+    // dispatches those cells through NamespaceCellDispatcher instead.
+    static constexpr bool refTrackerVisitTag = true;
+    template<typename Visitor>
+    static void refTrackerVisit(const WriteBarrierBase&, Visitor&) { }
+#endif
+
 private:
     StorageType cell() const { return m_cell; }
 
     StorageType m_cell;
 };
 
-template <> class WriteBarrierBase<Unknown, RawValueTraits<Unknown>> {
+template <> class WriteBarrierBase<Unknown, RawValueTraits<Unknown>>
+#if ENABLE(REFTRACKER)
+    : public WTF::TraceNativeHeapLeaf
+#endif
+{
 public:
     void set(VM&, const JSCell* owner, JSValue);
     void setWithoutWriteBarrier(JSValue value)
@@ -193,8 +220,14 @@ public:
     int32_t* payloadPointer() { return &std::bit_cast<EncodedValueDescriptor*>(&m_value)->asBits.payload; }
     
     explicit operator bool() const { return !!get(); }
-    bool operator!() const { return !get(); } 
-    
+    bool operator!() const { return !get(); }
+
+#if ENABLE(REFTRACKER)
+    static constexpr bool refTrackerVisitTag = true;
+    template<typename Visitor>
+    static void refTrackerVisit(const WriteBarrierBase&, Visitor&) { }
+#endif
+
 private:
     EncodedJSValue m_value;
 };
@@ -203,6 +236,16 @@ template <typename T, typename Traits = WriteBarrierTraitsSelect<T>>
 class WriteBarrier : public WriteBarrierBase<T, Traits> {
     WTF_MAKE_TZONE_ALLOCATED_TEMPLATE(WriteBarrier);
 public:
+#if ENABLE(REFTRACKER)
+    // Native-heap walker: WriteBarrier is a leaf — see WriteBarrierBase for
+    // the rationale.  The tag must be a direct (non-inherited) member so that
+    // hasRefTrackerVisitTagByReflection<WriteBarrier<T>>() finds it via
+    // static_data_members_of (which does not return inherited members).
+    static constexpr bool refTrackerVisitTag = true;
+    template<typename Visitor>
+    static void refTrackerVisit(const WriteBarrier&, Visitor&) { }
+#endif
+
     WriteBarrier()
     {
         this->setWithoutWriteBarrier(nullptr);
@@ -245,6 +288,12 @@ template <>
 class WriteBarrier<Unknown, RawValueTraits<Unknown>> : public WriteBarrierBase<Unknown, RawValueTraits<Unknown>> {
     WTF_MAKE_TZONE_ALLOCATED_TEMPLATE(WriteBarrier);
 public:
+#if ENABLE(REFTRACKER)
+    static constexpr bool refTrackerVisitTag = true;
+    template<typename Visitor>
+    static void refTrackerVisit(const WriteBarrier&, Visitor&) { }
+#endif
+
     WriteBarrier()
     {
         this->setWithoutWriteBarrier(JSValue());
@@ -281,7 +330,11 @@ inline bool operator==(const WriteBarrierBase<U, TraitsU>& lhs, const WriteBarri
     return lhs.get() == rhs.get();
 }
 
-class WriteBarrierStructureID {
+class WriteBarrierStructureID
+#if ENABLE(REFTRACKER)
+    : public WTF::TraceNativeHeapLeaf
+#endif
+{
 public:
     constexpr WriteBarrierStructureID() = default;
 
@@ -382,9 +435,32 @@ public:
 
     StructureID value() const { return m_structureID; }
 
+#if ENABLE(REFTRACKER)
+    static constexpr bool refTrackerVisitTag = true;
+    template<typename Visitor>
+    static void refTrackerVisit(const WriteBarrierStructureID&, Visitor&) { }
+#endif
+
 private:
     StructureID m_structureID;
 };
+
+#if ENABLE(REFTRACKER)
+// ADL overloads for the native-heap walker's refTrackerHasVisitTag detection.
+// See the comment in TraceNativeHeap.h for the full ADL protocol.
+// WriteBarrier types are leaves: they hold GC-managed cell pointers and are
+// dispatched separately by the GC phase of findAllOnNativeHeap.
+//
+// Both WriteBarrier<T> and WriteBarrierBase<T> overloads are needed:
+//   - WriteBarrier<T>*     — the concrete type stored in JSGlobalObject fields
+//   - WriteBarrierBase<T>* — the base class, visited if the derived hook fires
+//     first (and to handle any direct WriteBarrierBase uses)
+template<typename T, typename Traits>
+constexpr bool refTrackerHasVisitTag(WriteBarrier<T, Traits>*) noexcept { return true; }
+template<typename T, typename Traits>
+constexpr bool refTrackerHasVisitTag(WriteBarrierBase<T, Traits>*) noexcept { return true; }
+inline constexpr bool refTrackerHasVisitTag(WriteBarrierStructureID*) noexcept { return true; }
+#endif
 
 } // namespace JSC
 

@@ -75,6 +75,19 @@ public:
 
     unsigned NODELETE protectedGlobalObjectCount();
 
+    // Returns the number of live Strong handle slots (i.e. nodes in m_strongList).
+    // Each Strong<T> that has been initialized with a non-null handle contributes one
+    // node.  Default-constructed Strong<T>s (null m_slot) are NOT counted because they
+    // never allocate a handle slot.  This is the HandleSet's own ground-truth count and
+    // can be compared against the reflection walker's findLiveStrongCount to diagnose gaps.
+    unsigned strongHandleCount()
+    {
+        unsigned count = 0;
+        for (Node& node : m_strongList)
+            (void)node, count++;
+        return count;
+    }
+
     template<typename Functor> void forEachStrongHandle(const Functor&, const HashCountedSet<JSCell*>& skipSet);
 
 private:

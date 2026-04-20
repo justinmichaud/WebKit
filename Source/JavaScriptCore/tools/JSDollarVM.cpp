@@ -43,6 +43,7 @@
 #include "HeapProfiler.h"
 #include "HeapSnapshotBuilder.h"
 #if ENABLE(REFTRACKER)
+#include "JSCNativeHeapWalkerImpl.h"
 #include "TandemHeapAnalyzer.h"
 #include <wtf/StackTrace.h>
 #endif
@@ -2127,6 +2128,7 @@ static JSC_DECLARE_HOST_FUNCTION(functionBaselineJITTrue);
 static JSC_DECLARE_HOST_FUNCTION(functionNoInline);
 static JSC_DECLARE_HOST_FUNCTION(functionTriggerMemoryPressure);
 static JSC_DECLARE_HOST_FUNCTION(functionFindLiveStrongCount);
+static JSC_DECLARE_HOST_FUNCTION(functionHandleSetStrongCount);
 static JSC_DECLARE_HOST_FUNCTION(functionGC);
 static JSC_DECLARE_HOST_FUNCTION(functionEdenGC);
 static JSC_DECLARE_HOST_FUNCTION(functionGCSweepAsynchronously);
@@ -2614,18 +2616,8 @@ JSC_DEFINE_HOST_FUNCTION(functionTriggerMemoryPressure, (JSGlobalObject* globalO
     WTF::MemoryPressureHandler::singleton().endSimulatedMemoryPressure();
     WTF::MemoryPressureHandler::singleton().endSimulatedMemoryWarning();
 #if ENABLE(REFTRACKER) && __has_include(<meta>)
-    if (Options::enableStrongRefTracker()) {
-        JSC::findAllOnNativeHeap<^^JSC::Strong>(globalObject->vm(), globalObject->vm(),
-            [](auto& strong) {
-                dataLogLn("Live Strong at ", RawPointer(std::addressof(strong)), ":");
-                auto frames = strong.refTrackerFrames();
-                if (!frames.empty())
-                    dataLogLn(WTF::StackTracePrinter { frames });
-                else
-                    dataLogLn("  (no stack trace - REFTRACKER flag was off at construction)");
-                dataLogLn();
-            });
-    }
+    if (Options::enableStrongRefTracker())
+        JSC::dumpAllStrongHandles(globalObject->vm());
 #endif
     return JSValue::encode(jsUndefined());
 }
@@ -2641,15 +2633,86 @@ JSC_DEFINE_HOST_FUNCTION(functionFindLiveStrongCount, (JSGlobalObject* globalObj
 #if ENABLE(REFTRACKER) && __has_include(<meta>)
     if (!Options::enableStrongRefTracker())
         return JSValue::encode(jsNumber(-1));
-    unsigned count = 0;
-    JSC::findAllOnNativeHeap<^^JSC::Strong>(globalObject->vm(), globalObject->vm(),
-        [&count](auto&) { ++count; });
-    return JSValue::encode(jsNumber(count));
+    return JSValue::encode(jsNumber(JSC::findLiveStrongCount(globalObject->vm())));
 #else
 #error
     UNUSED_PARAM(globalObject);
     return JSValue::encode(jsNumber(-1));
 #endif
+}
+
+// Diagnostic: walk from the GlobalObject root (not VM root) to count Strong<>.
+// Helps isolate whether the dispatcher is the bottleneck or JSGlobalObject's
+// C++ subtree is being traversed at all.
+// Usage: $vm.findStrongInGlobalObject()
+static JSC_DECLARE_HOST_FUNCTION(functionFindStrongInGlobalObject);
+JSC_DEFINE_HOST_FUNCTION(functionFindStrongInGlobalObject, (JSGlobalObject* globalObject, CallFrame*))
+{
+    DollarVMAssertScope assertScope;
+#if ENABLE(REFTRACKER) && __has_include(<meta>)
+    return JSValue::encode(jsNumber(JSC::countStrongInGlobalObject(*globalObject)));
+#else
+#error
+    UNUSED_PARAM(globalObject);
+    return JSValue::encode(jsNumber(-1));
+#endif
+}
+
+// Diagnostic: walk directly from the inspector controller to count Strong<>.
+// If this finds 1 but findStrongInGlobalObject doesn't find it, the issue
+// is that the walker can't reach the inspector controller from JSGlobalObject.
+// Usage: $vm.findStrongInInspectorController()
+static JSC_DECLARE_HOST_FUNCTION(functionFindStrongInInspectorController);
+JSC_DEFINE_HOST_FUNCTION(functionFindStrongInInspectorController, (JSGlobalObject* globalObject, CallFrame*))
+{
+    DollarVMAssertScope assertScope;
+#if ENABLE(REFTRACKER) && __has_include(<meta>)
+    return JSValue::encode(jsNumber(JSC::countStrongInInspectorController(*globalObject)));
+#else
+#error
+    UNUSED_PARAM(globalObject);
+    return JSValue::encode(jsNumber(-1));
+#endif
+}
+
+// Returns the number of live Strong handle nodes in the HandleSet.
+// Unlike findLiveStrongCount (which walks the C++ object graph), this count
+// comes directly from HandleSet::m_strongList and is the ground-truth number
+// of Strong<T> handles that have been initialized with a real (non-null) slot.
+// Default-constructed Strong<T> objects are NOT counted here because they never
+// allocate a slot.
+// Usage: $vm.handleSetStrongCount()
+JSC_DEFINE_HOST_FUNCTION(functionHandleSetStrongCount, (JSGlobalObject* globalObject, CallFrame*))
+{
+    DollarVMAssertScope assertScope;
+    VM& vm = globalObject->vm();
+    vm.heap.collectNow(JSC::Sync, JSC::CollectionScope::Full);
+    return JSValue::encode(jsNumber(vm.heap.handleSet()->strongHandleCount()));
+}
+
+// Prints the ClassInfo name of every cell held in HandleSet's m_strongList.
+// Useful for identifying which Strong<> holds a live cell value.
+// Usage: $vm.dumpHandleSetStrongs()
+static JSC_DECLARE_HOST_FUNCTION(functionDumpHandleSetStrongs);
+JSC_DEFINE_HOST_FUNCTION(functionDumpHandleSetStrongs, (JSGlobalObject* globalObject, CallFrame*))
+{
+    DollarVMAssertScope assertScope;
+    VM& vm = globalObject->vm();
+    vm.heap.collectNow(JSC::Sync, JSC::CollectionScope::Full);
+    unsigned count = 0;
+    auto& handleSet = *vm.heap.handleSet();
+    // Iterate m_strongList via forEachStrongHandle with an empty skipSet
+    HashCountedSet<JSCell*> skipSet;
+    handleSet.forEachStrongHandle([&count](JSCell* cell) {
+        dataLog("HandleSet Strong[", count, "]: ");
+        if (cell && cell->classInfo())
+            dataLogLn(cell->classInfo()->className);
+        else
+            dataLogLn("(null or no classInfo)");
+        ++count;
+    }, skipSet);
+    dataLogLn("HandleSet total cell-holding Strongs: ", count);
+    return JSValue::encode(jsUndefined());
 }
 
 // Runs the edenGC synchronously.
@@ -4398,6 +4461,10 @@ void JSDollarVM::finishCreation(VM& vm)
 
     addFunction(vm, "triggerMemoryPressure"_s, functionTriggerMemoryPressure, 0);
     addFunction(vm, "findLiveStrongCount"_s, functionFindLiveStrongCount, 0);
+    addFunction(vm, "handleSetStrongCount"_s, functionHandleSetStrongCount, 0);
+    addFunction(vm, "findStrongInGlobalObject"_s, functionFindStrongInGlobalObject, 0);
+    addFunction(vm, "findStrongInInspectorController"_s, functionFindStrongInInspectorController, 0);
+    addFunction(vm, "dumpHandleSetStrongs"_s, functionDumpHandleSetStrongs, 0);
     addFunction(vm, "gc"_s, functionGC, 0);
     addFunction(vm, "gcSweepAsynchronously"_s, functionGCSweepAsynchronously, 0);
     addFunction(vm, "edenGC"_s, functionEdenGC, 0);

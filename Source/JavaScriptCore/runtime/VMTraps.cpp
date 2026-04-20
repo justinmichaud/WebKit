@@ -196,155 +196,148 @@ void VMTraps::invalidateCodeBlocksOnStack(Locker<Lock>&, CallFrame* topCallFrame
     }
 }
 
-class VMTraps::SignalSender final : public ThreadSafeRefCounted<VMTraps::SignalSender> {
-public:
-    SignalSender(const AbstractLocker&, VM& vm)
-        : m_vm(vm)
-        , m_lock(vm.traps().m_trapSignalingLock)
-        , m_condition(vm.traps().m_condition)
-    {
-        activateSignalHandlersFor(Signal::AccessFault);
-    }
+VMTraps::SignalSender::SignalSender(const AbstractLocker&, VM& vm)
+    : m_vm(vm)
+    , m_lock(vm.traps().m_trapSignalingLock)
+    , m_condition(vm.traps().m_condition)
+{
+    activateSignalHandlersFor(Signal::AccessFault);
+}
 
-    static void initializeSignals()
-    {
-        static std::once_flag once;
-        std::call_once(once, [] {
-            addSignalHandler(Signal::AccessFault, [] (Signal signal, SigInfo&, PlatformRegisters& registers) -> SignalAction {
-                RELEASE_ASSERT(signal == Signal::AccessFault);
-                auto signalContext = SignalContext::tryCreate(registers);
-                if (!signalContext)
-                    return SignalAction::NotHandled;
+void VMTraps::SignalSender::initializeSignals()
+{
+    static std::once_flag once;
+    std::call_once(once, [] {
+        addSignalHandler(Signal::AccessFault, [] (Signal signal, SigInfo&, PlatformRegisters& registers) -> SignalAction {
+            RELEASE_ASSERT(signal == Signal::AccessFault);
+            auto signalContext = SignalContext::tryCreate(registers);
+            if (!signalContext)
+                return SignalAction::NotHandled;
 
-                void* trapPC = signalContext->trapPC.untaggedPtr();
-                if (!isJITPC(trapPC))
-                    return SignalAction::NotHandled;
+            void* trapPC = signalContext->trapPC.untaggedPtr();
+            if (!isJITPC(trapPC))
+                return SignalAction::NotHandled;
 
-                CodeBlock* currentCodeBlock = DFG::codeBlockForVMTrapPC(trapPC);
-                if (!currentCodeBlock) {
-                    // Either we trapped for some other reason, e.g. Wasm OOB, or we didn't properly monitor the PC. Regardless, we can't do much now...
-                    return SignalAction::NotHandled;
+            CodeBlock* currentCodeBlock = DFG::codeBlockForVMTrapPC(trapPC);
+            if (!currentCodeBlock) {
+                // Either we trapped for some other reason, e.g. Wasm OOB, or we didn't properly monitor the PC. Regardless, we can't do much now...
+                return SignalAction::NotHandled;
+            }
+            ASSERT(currentCodeBlock->hasInstalledVMTrapsBreakpoints());
+            VM& vm = currentCodeBlock->vm();
+
+            // This signal handler is triggered by the mutator thread due to the installed halt instructions
+            // in JIT code (which we already confirmed above). Hence, the current thread (the mutator)
+            // cannot be in C++ code, and therefore, cannot be already holding the codeBlockSet lock.
+            // The only time the codeBlockSet lock could be in contention is if the Sampling Profiler thread
+            // is holding it. In that case, we'll simply wait till the Sampling Profiler is done with it.
+            // There are no lock ordering issues w.r.t. the Sampling Profiler on this code path.
+            //
+            // Note that it is not ok to return SignalAction::NotHandled here if we see contention. Doing
+            // so will cause the fault to be handled by the default handler, which will crash. It is also not
+            // productive to return SignalAction::Handled on contention. Doing so will simply trigger this
+            // fault handler over and over again. We might as well wait for the Sampling Profiler to release
+            // the lock, which is what we do here.
+            Locker codeBlockSetLocker { vm.heap.codeBlockSet().getLock() };
+
+            bool sawCurrentCodeBlock = false;
+            vm.heap.forEachCodeBlockIgnoringJITPlans(codeBlockSetLocker, [&] (CodeBlock* codeBlock) {
+                // We want to jettison all code blocks that have vm traps breakpoints, otherwise we could hit them later.
+                if (codeBlock->hasInstalledVMTrapsBreakpoints()) {
+                    if (currentCodeBlock == codeBlock)
+                        sawCurrentCodeBlock = true;
+
+                    codeBlock->jettison(Profiler::JettisonDueToVMTraps);
                 }
-                ASSERT(currentCodeBlock->hasInstalledVMTrapsBreakpoints());
-                VM& vm = currentCodeBlock->vm();
-
-                // This signal handler is triggered by the mutator thread due to the installed halt instructions
-                // in JIT code (which we already confirmed above). Hence, the current thread (the mutator)
-                // cannot be in C++ code, and therefore, cannot be already holding the codeBlockSet lock.
-                // The only time the codeBlockSet lock could be in contention is if the Sampling Profiler thread
-                // is holding it. In that case, we'll simply wait till the Sampling Profiler is done with it.
-                // There are no lock ordering issues w.r.t. the Sampling Profiler on this code path.
-                //
-                // Note that it is not ok to return SignalAction::NotHandled here if we see contention. Doing
-                // so will cause the fault to be handled by the default handler, which will crash. It is also not
-                // productive to return SignalAction::Handled on contention. Doing so will simply trigger this
-                // fault handler over and over again. We might as well wait for the Sampling Profiler to release
-                // the lock, which is what we do here.
-                Locker codeBlockSetLocker { vm.heap.codeBlockSet().getLock() };
-
-                bool sawCurrentCodeBlock = false;
-                vm.heap.forEachCodeBlockIgnoringJITPlans(codeBlockSetLocker, [&] (CodeBlock* codeBlock) {
-                    // We want to jettison all code blocks that have vm traps breakpoints, otherwise we could hit them later.
-                    if (codeBlock->hasInstalledVMTrapsBreakpoints()) {
-                        if (currentCodeBlock == codeBlock)
-                            sawCurrentCodeBlock = true;
-
-                        codeBlock->jettison(Profiler::JettisonDueToVMTraps);
-                    }
-                });
-                RELEASE_ASSERT(sawCurrentCodeBlock);
-                
-                return SignalAction::Handled; // We've successfully jettisoned the codeBlocks.
             });
+            RELEASE_ASSERT(sawCurrentCodeBlock);
+
+            return SignalAction::Handled; // We've successfully jettisoned the codeBlocks.
+        });
+    });
+}
+
+VMTraps& VMTraps::SignalSender::traps()
+{
+    return m_vm.traps();
+}
+
+void VMTraps::SignalSender::notify(AbstractLocker&)
+{
+    if (m_scheduled)
+        return;
+    m_scheduled = true;
+    VMTraps::queue().dispatch([protectedThis = Ref { *this }] {
+        protectedThis->work();
+    });
+}
+
+bool VMTraps::SignalSender::isStopped(AbstractLocker&)
+{
+    return !m_scheduled;
+}
+
+void VMTraps::SignalSender::work()
+{
+    VM& vm = m_vm;
+
+    auto workDone = [&](AbstractLocker&) {
+        m_scheduled = false;
+        m_condition->notifyAll(); // let work queue service next SignalSender if needed.
+    };
+
+    {
+        Locker locker { *m_lock };
+        ASSERT(m_scheduled);
+        if (traps().m_isShuttingDown)
+            return workDone(locker);
+
+        if (!traps().needHandling(VMTraps::AsyncEvents))
+            return workDone(locker);
+
+        // We know that no trap could have been processed and re-added because we are holding the lock.
+        if (vmIsInactive(m_vm))
+            return workDone(locker);
+    }
+
+    auto optionalOwnerThread = vm.ownerThread();
+    if (optionalOwnerThread) {
+        auto expectedUID = optionalOwnerThread.value()->uid();
+        ThreadSuspendLocker locker;
+        sendMessage(locker, *optionalOwnerThread.value().get(), [&] (PlatformRegisters& registers) -> void {
+            auto signalContext = SignalContext::tryCreate(registers);
+            if (!signalContext)
+                return;
+
+            // We can't mess with a thread unless it's the one we suspended.
+            // Use ownerThreadUID() instead of ownerThread() to avoid creating a temporary
+            // RefPtr<Thread> copy, which would acquire the Thread control block WordLock.
+            // If the suspended thread was frozen mid-unlock of that same WordLock,
+            // calling ownerThread() here would deadlock.
+            auto currentUID = vm.ownerThreadUID();
+            if (!currentUID || *currentUID != expectedUID)
+                return;
+
+            Thread& thread = *optionalOwnerThread->get();
+            vm.traps().tryInstallTrapBreakpoints(*signalContext, thread.stack());
         });
     }
 
-    VMTraps& NODELETE traps() { return m_vm.traps(); }
+    if (vm.traps().hasTrapBit(NeedTermination))
+        vm.syncWaiter()->condition().notifyOne();
 
-
-    void notify(AbstractLocker&)
     {
-        if (m_scheduled)
-            return;
-        m_scheduled = true;
-        VMTraps::queue().dispatch([protectedThis = Ref { *this }] {
-            protectedThis->work();
-        });
+        Locker locker { *m_lock };
+        ASSERT(m_scheduled);
+        if (traps().m_isShuttingDown)
+            return workDone(locker);
+        ASSERT(m_scheduled);
     }
 
-    bool NODELETE isStopped(AbstractLocker&)
-    {
-        return !m_scheduled;
-    }
-
-private:
-    void work()
-    {
-        VM& vm = m_vm;
-
-        auto workDone = [&](AbstractLocker&) {
-            m_scheduled = false;
-            m_condition->notifyAll(); // let work queue service next SignalSender if needed.
-        };
-
-        {
-            Locker locker { *m_lock };
-            ASSERT(m_scheduled);
-            if (traps().m_isShuttingDown)
-                return workDone(locker);
-
-            if (!traps().needHandling(VMTraps::AsyncEvents))
-                return workDone(locker);
-
-            // We know that no trap could have been processed and re-added because we are holding the lock.
-            if (vmIsInactive(m_vm))
-                return workDone(locker);
-        }
-
-        auto optionalOwnerThread = vm.ownerThread();
-        if (optionalOwnerThread) {
-            auto expectedUID = optionalOwnerThread.value()->uid();
-            ThreadSuspendLocker locker;
-            sendMessage(locker, *optionalOwnerThread.value().get(), [&] (PlatformRegisters& registers) -> void {
-                auto signalContext = SignalContext::tryCreate(registers);
-                if (!signalContext)
-                    return;
-
-                // We can't mess with a thread unless it's the one we suspended.
-                // Use ownerThreadUID() instead of ownerThread() to avoid creating a temporary
-                // RefPtr<Thread> copy, which would acquire the Thread control block WordLock.
-                // If the suspended thread was frozen mid-unlock of that same WordLock,
-                // calling ownerThread() here would deadlock.
-                auto currentUID = vm.ownerThreadUID();
-                if (!currentUID || *currentUID != expectedUID)
-                    return;
-
-                Thread& thread = *optionalOwnerThread->get();
-                vm.traps().tryInstallTrapBreakpoints(*signalContext, thread.stack());
-            });
-        }
-
-        if (vm.traps().hasTrapBit(NeedTermination))
-            vm.syncWaiter()->condition().notifyOne();
-
-        {
-            Locker locker { *m_lock };
-            ASSERT(m_scheduled);
-            if (traps().m_isShuttingDown)
-                return workDone(locker);
-            ASSERT(m_scheduled);
-        }
-
-        VMTraps::queue().dispatchAfter(1_ms, [protectedThis = Ref { *this }] {
-            protectedThis->work();
-        });
-    }
-
-    VM& m_vm;
-    Box<Lock> m_lock;
-    Box<Condition> m_condition;
-    bool m_scheduled { false };
-};
+    VMTraps::queue().dispatchAfter(1_ms, [protectedThis = Ref { *this }] {
+        protectedThis->work();
+    });
+}
 
 #endif // ENABLE(SIGNAL_BASED_VM_TRAPS)
 

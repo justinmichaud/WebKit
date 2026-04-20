@@ -138,13 +138,41 @@ void findAllOnNativeHeap(VM& vm, Root& root, Callback&& callback)
     vm.heap.collectNow(JSC::Sync, JSC::CollectionScope::Full);
     profiler.setActiveHeapAnalyzer(nullptr);
 
-    // Phase 2: native reflection walk. We still hold the API lock so no
-    // concurrent collection can start. `seen` contains every live JSCell
-    // from the mark phase; when the reflection walker encounters a JSCell*
-    // the dispatcher chain routes it through its concrete subclass.
-    WTF::traceNativeHeap<TargetTemplate, verbose>(
-        root, WTF::move(cb), seen,
-        std::span<WTF::CellDispatcher* const>(dispatchers.span()));
+    // Phase 2: native reflection walk.
+    //
+    // Build the walker explicitly so we can prime it with all live JSCells
+    // before we walk from the root. `seen` (moved into the walker) pre-
+    // populates m_seen with every live JSCell address so that JSCell*
+    // fields encountered during the C++ walk are recognised as already-seen
+    // and are not re-added to the worklist as plain objects.
+    WalkerT walker {
+        WTF::move(cb),
+        std::move(seen),
+        std::span<WTF::CellDispatcher* const>(dispatchers.span())
+    };
+
+    // Proactively dispatch every live JSCell through the dispatcher chain.
+    //
+    // Many JSCells (e.g. JSDOMWindow, any JSGlobalObject) are only reachable
+    // in the GC graph — they are not reachable via typed C++ member pointers
+    // from `root`. Without this loop, the C++ walk from `root` would never
+    // descend into those cells, and any Strong<> (or other tracked type)
+    // embedded in their C++ layouts would be silently missed.
+    //
+    // dispatchCell checks m_cellDispatched, so each cell is dispatched at
+    // most once. Cells whose concrete type is unknown to the dispatcher table
+    // are silently skipped. We iterate a snapshot of the seen-set; dispatchCell
+    // only modifies m_cellDispatched and m_worklist, never m_seen, so the
+    // iteration is safe.
+    for (const void* cellPtr : walker.seen())
+        walker.dispatchCell(cellPtr);
+
+    // Also walk from the root to pick up non-JSCell C++ objects (e.g.
+    // BytecodeIntrinsicRegistry) that are reachable via typed C++ member
+    // pointers but are not themselves JSCells and therefore not in the
+    // GC-phase seen-set.
+    walker.template enqueue<Root>(root);
+    walker.drain();
 }
 
 } // namespace JSC

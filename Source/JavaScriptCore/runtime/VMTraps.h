@@ -36,6 +36,9 @@
 #include <wtf/RefPtr.h>
 #include <wtf/StackBounds.h>
 #include <wtf/WorkQueue.h>
+#if ENABLE(REFTRACKER)
+#include <wtf/TraceNativeHeapLeaf.h>
+#endif
 
 namespace JSC {
 
@@ -305,7 +308,25 @@ private:
     JS_EXPORT_PRIVATE void undoDeferTerminationSlow(DeferAction);
 
 #if ENABLE(SIGNAL_BASED_VM_TRAPS)
-    class SignalSender;
+    class SignalSender final
+        : public ThreadSafeRefCounted<SignalSender>
+#if ENABLE(REFTRACKER)
+        , public WTF::TraceNativeHeapLeaf
+#endif
+    {
+    public:
+        SignalSender(const AbstractLocker&, VM&);
+        static void initializeSignals();
+        VMTraps& NODELETE traps();
+        void notify(AbstractLocker&);
+        bool NODELETE isStopped(AbstractLocker&);
+    private:
+        void work();
+        VM& m_vm;
+        Box<Lock> m_lock;
+        Box<Condition> m_condition;
+        bool m_scheduled { false };
+    };
     friend class SignalSender;
 
     void invalidateCodeBlocksOnStack();

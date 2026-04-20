@@ -28,6 +28,9 @@
 #include <cstddef>
 #include <wtf/HashTraits.h>
 #include <wtf/NeverDestroyed.h>
+#if ENABLE(REFTRACKER)
+#include <wtf/TraceNativeHeapLeaf.h>
+#endif
 
 #if USE(CF)
 #include <CoreFoundation/CoreFoundation.h>
@@ -111,7 +114,11 @@ template<typename T> [[nodiscard]] constexpr RetainPtr<RetainPtrType<T>> adoptNS
  * @note RetainPtr is compatible with ARC (Automatic Reference Counting) and will automatically use the
  * appropriate retain/release semantics based on the compilation mode.
  */
-template<typename T> class RetainPtr {
+template<typename T> class RetainPtr
+#if ENABLE(REFTRACKER)
+    : public TraceNativeHeapLeaf
+#endif
+{
 public:
     using ValueType = std::remove_pointer_t<T>;
     using PtrType = ValueType*;

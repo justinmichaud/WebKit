@@ -32,6 +32,12 @@
 #include "JSObject.h"
 #include "JSString.h"
 #include "StructureInlines.h"
+// Include the full definitions of types that JSGlobalObject forward-declares
+// so that the reflection walker can follow pointers into their subtrees.
+// Without these, std::meta::is_complete_type returns false and the pointer
+// is treated as a leaf, causing all Strong<> instances in the inspector
+// subtree to be missed.
+#include "inspector/JSGlobalObjectInspectorController.h"
 #include <meta>
 #include <vector>
 #include <wtf/CellDispatcher.h>
@@ -128,27 +134,54 @@ public:
         if (!classInfo)
             return false;
         auto& visitor = static_cast<Walker&>(baseVisitor);
-        bool matched = false;
+
+        // Find the most-specific known JSCell subtype for this cell.
+        //
+        // We use isSubClassOf() rather than exact equality so that
+        // application-layer subclasses (e.g. jsc's GlobalObject, which
+        // publicly derives from JSGlobalObject) match the nearest known base
+        // type in our seed list.  Among all matching seed types we pick the
+        // MOST SPECIFIC one — the T whose T::info() is deepest in the
+        // inheritance chain (i.e. T::info()->isSubClassOf(bestInfo) is true).
+        //
+        // Dispatching with the most specific known type maximises the set of
+        // C++ member fields that reflection can enumerate, which in turn
+        // maximises the number of Strong<> handles the walker can find.
+        using DispatchFn = void(*)(JSC::JSCell*, Walker&);
+        const ClassInfo* bestInfo = nullptr;
+        DispatchFn bestFn = nullptr;
+
         template for (constexpr auto typeInfo :
                       std::define_static_array(
                           NamespaceCellDispatcherDetail::collectCellSubclasses(NamespaceInfo))) {
-            if (!matched) {
-                using T = typename [: typeInfo :];
-                // SFINAE out cells that don't declare DECLARE_INFO (T::info()),
-                // without iterating members_of(T) — that can fail at constant
-                // eval time on complex CRTP cell types in the current P2996
-                // fork. `requires` plus T::info() is well-formed only for
-                // proper cell subclasses.
-                if constexpr (requires { { T::info() } -> std::convertible_to<const ClassInfo*>; }) {
-                    if (classInfo == T::info()) {
-                        matched = true;
-                        visitor.template enqueueCellDispatched<T>(
-                            static_cast<void*>(static_cast<T*>(cell)));
+            using T = typename [: typeInfo :];
+            // SFINAE out cells that don't declare DECLARE_INFO (T::info()),
+            // without iterating members_of(T) — that can fail at constant
+            // eval time on complex CRTP cell types in the current P2996
+            // fork. `requires` plus T::info() is well-formed only for
+            // proper cell subclasses.
+            if constexpr (requires { { T::info() } -> std::convertible_to<const ClassInfo*>; }) {
+                if (classInfo->isSubClassOf(T::info())) {
+                    // T matches; keep it only if it is strictly more specific
+                    // than the current best (T::info() appears in T::info()'s
+                    // own parentClass chain before bestInfo does, meaning T is
+                    // deeper / more derived).
+                    if (bestInfo == nullptr || T::info()->isSubClassOf(bestInfo)) {
+                        bestInfo = T::info();
+                        bestFn = [](JSC::JSCell* c, Walker& v) {
+                            v.template enqueueCellDispatched<T>(
+                                static_cast<void*>(static_cast<T*>(c)));
+                        };
                     }
                 }
             }
         }
-        return matched;
+
+        if (bestFn) {
+            bestFn(cell, visitor);
+            return true;
+        }
+        return false;
     }
 };
 
