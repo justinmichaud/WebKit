@@ -414,12 +414,12 @@ void GStreamerRegistryScanner::refresh()
     GST_DEBUG("%s registry scanner initialized", m_isMediaSource ? "MSE" : "Regular playback");
     for (auto& mimeType : m_decoderMimeTypeSet)
         GST_DEBUG("Decoder mime-type registered: %s", mimeType.utf8().data());
-    for (auto& [codec, isHardware] : m_decoderCodecMap)
-        GST_DEBUG("%s decoder codec pattern registered: %s", isHardware ? "Hardware" : "Software", codec.utf8().data());
+    for (auto& [codec, result] : m_decoderCodecMap)
+        GST_DEBUG("%s decoder codec pattern registered: %s", result.isUsingHardware ? "Hardware" : "Software", codec.utf8().data());
     for (auto& mimeType : m_encoderMimeTypeSet)
         GST_DEBUG("Encoder mime-type registered: %s", mimeType.utf8().data());
-    for (auto& [codec, isHardware] : m_encoderCodecMap)
-        GST_DEBUG("%s encoder codec pattern registered: %s", isHardware ? "Hardware" : "Software", codec.utf8().data());
+    for (auto& [codec, result] : m_encoderCodecMap)
+        GST_DEBUG("%s encoder codec pattern registered: %s", result.isUsingHardware ? "Hardware" : "Software", codec.utf8().data());
 #endif
 }
 
@@ -472,12 +472,13 @@ void GStreamerRegistryScanner::initializeDecoders(const GStreamerRegistryScanner
 {
     m_decoderCodecMap.clear();
     m_decoderMimeTypeSet.clear();
+
+    bool audioMpegSupported = false;
     if (auto result = factories.hasElementForMediaType(ElementFactories::Type::AudioDecoder, "audio/mpeg, mpegversion=(int)4"_s)) {
+        audioMpegSupported = true;
         m_decoderMimeTypeSet.add("audio/aac"_s);
         m_decoderMimeTypeSet.add("audio/mp4"_s);
         m_decoderMimeTypeSet.add("audio/x-m4a"_s);
-        m_decoderMimeTypeSet.add("audio/mpeg"_s);
-        m_decoderMimeTypeSet.add("audio/x-mpeg"_s);
         m_decoderCodecMap.add("mpeg"_s, result);
         // AAC has accumulated lots of extensions over the years.
         // Unfortunately, decoders don't generally provide an API for querying support level, and support is not necessarily
@@ -489,7 +490,6 @@ void GStreamerRegistryScanner::initializeDecoders(const GStreamerRegistryScanner
         // Syntax: "mp4a." oti [ "." aud-oti ]
         // oti is the ObjectTypeIndication from MPEG-4 Systems (ISO 14996-1).
         // For oti=40 (MPEG-4 Audio), aud-oti represents the AOT.
-        m_decoderCodecMap.add("mp4a.67"_s, result); // MPEG-2 AAC LC
         m_decoderCodecMap.add("mp4a.40.2"_s, result); // MPEG-4 AAC LC
         m_decoderCodecMap.add("mp4a.40.02"_s, result); // MPEG-4 AAC LC
         m_decoderCodecMap.add("mp4a.40.5"_s, result); // MPEG-4 HE-AAC v1 (AAC LC + SBR)
@@ -501,6 +501,32 @@ void GStreamerRegistryScanner::initializeDecoders(const GStreamerRegistryScanner
         bool canPlayUsac = value && (!g_strcmp0(value, "true") || !g_strcmp0(value, "1"));
         if (canPlayUsac)
             m_decoderCodecMap.add("mp4a.40.42"_s, result); // MPEG-4 Extended HE-AAC and xHE-AAC (USAC AOT)
+    }
+
+    if (auto result = factories.hasElementForMediaType(ElementFactories::Type::AudioDecoder, "audio/mpeg, mpegversion=(int)2"_s)) {
+        audioMpegSupported = true;
+        m_decoderMimeTypeSet.add("audio/mp2"_s);
+        m_decoderCodecMap.add("mp4a.67"_s, result); // MPEG-2 AAC LC
+    }
+
+    if (auto result = factories.hasElementForMediaType(ElementFactories::Type::AudioDecoder, "audio/mpeg, mpegversion=(int)1, layer=(int)[1, 3]"_s)) {
+        audioMpegSupported = true;
+        m_decoderMimeTypeSet.add("audio/mp1"_s);
+        m_decoderMimeTypeSet.add("audio/mp3"_s);
+        m_decoderMimeTypeSet.add("audio/x-mp3"_s);
+        m_decoderCodecMap.add("audio/mp3"_s, result);
+        m_decoderCodecMap.add("mp3"_s, result);
+        m_decoderCodecMap.add("mp4a.6b"_s, result); // Audio ISO/IEC 11172-3 (MPEG-1 Part 3 Audio)
+        m_decoderCodecMap.add("mp4a.6B"_s, result); // Audio ISO/IEC 11172-3 (MPEG-1 Part 3 Audio)
+        // MPEG-2 Part 3 Audio just defines minor extensions of MP3 adding support for more channels and bitrates.
+        // GStreamer still considers it mpegversion=1, leaving mpegversion=2 for AAC (MPEG-2 Part 7 Advanced Audio Coding).
+        m_decoderCodecMap.add("mp4a.69"_s, result); // Audio ISO/IEC 13818-3 (MPEG-2 Part 3 Audio)
+    }
+
+    audioMpegSupported |= isContainerTypeSupported(Configuration::Decoding, "audio/mp4"_s);
+    if (audioMpegSupported) {
+        m_decoderMimeTypeSet.add("audio/mpeg"_s);
+        m_decoderMimeTypeSet.add("audio/x-mpeg"_s);
     }
 
     auto opusSupported = factories.hasElementForMediaType(ElementFactories::Type::AudioDecoder, "audio/x-opus"_s);
@@ -586,9 +612,9 @@ void GStreamerRegistryScanner::initializeDecoders(const GStreamerRegistryScanner
     }
 
     Vector<GstCapsWebKitMapping> mseCompatibleMapping = {
-        { ElementFactories::Type::AudioDecoder, "audio/x-ac3"_s, { }, { "x-ac3"_s, "ac-3"_s, "ac3"_s } },
-        { ElementFactories::Type::AudioDecoder, "audio/x-eac3"_s, { "audio/x-ac3"_s }, { "x-eac3"_s, "ec3"_s, "ec-3"_s, "eac3"_s } },
-        { ElementFactories::Type::AudioDecoder, "audio/x-ac4"_s, { }, { "x-ac4"_s, "ac-4*"_s, "ac4"_s } },
+        { ElementFactories::Type::AudioDecoder, "audio/x-ac3"_s, { }, { "x-ac3"_s, "ac-3"_s, "ac3"_s, "mp4a.a5"_s, "mp4a.A5"_s } },
+        { ElementFactories::Type::AudioDecoder, "audio/x-eac3"_s, { "audio/x-ac3"_s }, { "x-eac3"_s, "ec3"_s, "ec-3"_s, "eac3"_s, "mp4a.a6"_s, "mp4a.A6"_s } },
+        { ElementFactories::Type::AudioDecoder, "audio/x-ac4"_s, { }, { "x-ac4"_s, "ac-4*"_s, "ac4"_s, "mp4a.AE"_s, "mp4a.ae"_s, "mp4a.Ae"_s, "mp4a.aE"_s } },
         { ElementFactories::Type::AudioDecoder, "audio/x-flac"_s, { "audio/x-flac"_s, "audio/flac"_s }, { "x-flac"_s, "flac"_s, "fLaC"_s } },
     };
     fillMimeTypeSetFromCapsMapping(factories, mseCompatibleMapping);
@@ -652,27 +678,6 @@ void GStreamerRegistryScanner::initializeDecoders(const GStreamerRegistryScanner
             m_decoderMimeTypeSet.add("video/ogg"_s);
             m_decoderCodecMap.add("theora"_s, result);
         }
-    }
-
-    bool audioMpegSupported = false;
-    if (auto result = factories.hasElementForMediaType(ElementFactories::Type::AudioDecoder, "audio/mpeg, mpegversion=(int)1, layer=(int)[1, 3]"_s)) {
-        audioMpegSupported = true;
-        m_decoderMimeTypeSet.add("audio/mp1"_s);
-        m_decoderMimeTypeSet.add("audio/mp3"_s);
-        m_decoderMimeTypeSet.add("audio/x-mp3"_s);
-        m_decoderCodecMap.add("audio/mp3"_s, result);
-        m_decoderCodecMap.add("mp3"_s, result);
-    }
-
-    if (factories.hasElementForMediaType(ElementFactories::Type::AudioDecoder, "audio/mpeg, mpegversion=(int)2"_s)) {
-        audioMpegSupported = true;
-        m_decoderMimeTypeSet.add("audio/mp2"_s);
-    }
-
-    audioMpegSupported |= isContainerTypeSupported(Configuration::Decoding, "audio/mp4"_s);
-    if (audioMpegSupported) {
-        m_decoderMimeTypeSet.add("audio/mpeg"_s);
-        m_decoderMimeTypeSet.add("audio/x-mpeg"_s);
     }
 
     if (matroskaSupported) {
