@@ -293,6 +293,7 @@ public:
     NativeHeapFinder(Callback&& cb, std::unordered_set<const void*>&& seen)
         : m_callback(std::forward<Callback>(cb))
         , m_seen(std::move(seen))
+        , m_seenIsLiveCellSet(true)
     {
     }
 
@@ -300,6 +301,7 @@ public:
                      std::span<CellDispatcher* const> dispatchers)
         : m_callback(std::forward<Callback>(cb))
         , m_seen(std::move(seen))
+        , m_seenIsLiveCellSet(true)
         , m_cellDispatchers(dispatchers)
     {
     }
@@ -322,6 +324,15 @@ public:
         // `static_cast<JSC::JSCell*>(static_cast<T*>(nullptr))` expression
         // is well-formed iff T (complete) publicly derives from JSCell.
         if constexpr (requires { static_cast<JSC::JSCell*>(static_cast<Bare*>(nullptr)); }) {
+            // In tandem mode m_seen is pre-populated with every live JSCell
+            // from the GC phase. Skip stale cell pointers — e.g. from
+            // JSValue profiling data in LazyValueProfileHolder — whose targets
+            // have been freed by the GC. Accessing freed memory would crash
+            // (classInfo() reads address 0 after the cell's first word is
+            // cleared on free). In non-tandem mode m_seenIsLiveCellSet is
+            // false so this check is skipped entirely.
+            if (m_seenIsLiveCellSet && !m_seen.count(addr))
+                return;
             // Dedup cell dispatch via a separate set: phase-1 of the tandem
             // walk pre-populates m_seen with every live cell, so routing
             // through m_seen here would always early-return and cells would
@@ -356,6 +367,8 @@ public:
         if constexpr (verbose)
             m_path.log("visitInline", addr);
         if constexpr (requires { static_cast<JSC::JSCell*>(static_cast<Bare*>(nullptr)); }) {
+            if (m_seenIsLiveCellSet && !m_seen.count(addr))
+                return;
             if (!m_cellDispatched.insert(addr).second)
                 return;
             for (auto* dispatcher : m_cellDispatchers) {
@@ -530,6 +543,11 @@ private:
 
     Callback m_callback;
     std::unordered_set<const void*> m_seen;
+    // True when m_seen was pre-populated from a GC-phase live-cell set (tandem
+    // mode). Used to skip stale JSCell pointers (e.g. from JSValue profiling
+    // data) that were alive when the profiling snapshot was taken but have
+    // since been freed by the GC. Accessing freed memory would crash.
+    bool m_seenIsLiveCellSet { false };
     std::unordered_set<const void*> m_cellDispatched;
     std::deque<WorkItem> m_worklist;
     std::unordered_set<std::pair<uintptr_t, uintptr_t>, PairHash> m_inlineVisiting;

@@ -2325,7 +2325,14 @@ void Heap::finalize()
     }
 
 #if ENABLE(REFTRACKER) && __has_include(<meta>)
-    if (Options::enableStrongRefTracker() && !vm().activeHeapAnalyzer() && !m_needsRefTrackerWalk) {
+    // Only trigger the walk for the main-thread VM. Worker VMs also call finalize(),
+    // but findAllOnNativeHeap must run on the main thread with the VM that owns it.
+    // Triggering it for Worker VMs would race: the callOnMainThread lambda would
+    // call collectNow(Sync, Full) on a Worker VM while the Worker thread also runs
+    // its own GC, causing "world already stopped" / "m_collectionScope already set"
+    // crashes in the Worker's GC state machine.
+    if (Options::enableStrongRefTracker() && vm().runLoop().isMain()
+        && !vm().activeHeapAnalyzer() && !m_needsRefTrackerWalk) {
         m_needsRefTrackerWalk = true;
         Ref protectedVM { vm() };
         callOnMainThread([protectedVM = WTF::move(protectedVM)] {
