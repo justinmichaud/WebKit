@@ -264,8 +264,17 @@ size_t MemoryPressureHandler::calculateFootprintForPolicyDecision(size_t footpri
     // Some devices accounts video memory into the process memory footprint (as file mappings - RSSFile).
     // In such cases, we need to subtract the video memory from the process memory footprint
     // to make the memory pressure policy decision based on the process memory footprint only.
-    if (s_videoMemoryInFootprint)
+    if (s_videoMemoryInFootprint) {
+        if (footprintVideo > footprint) {
+            // This means that s_videoMemoryInFootprint should not be set for this device
+            // or footprint and footprintVideo are coming from two different processes
+            // and shouldn't be compared with each other. Both cases are misconfigurations.
+            WTFLogAlways("Video memory footprint (%zu MB) is larger than total memory footprint (%zu MB). "
+                         "Check MemoryPressureHandler configuration\n", footprintVideo / MB, footprint / MB);
+            return footprint;
+        }
         footprint -= footprintVideo;
+    }
     return footprint;
 }
 
@@ -460,6 +469,16 @@ void MemoryPressureHandler::setConfiguration(const Configuration& configuration)
         m_configuration.strictThresholdFraction,
         m_configuration.killThresholdFraction ? *(m_configuration.killThresholdFraction) : -1.0,
         m_configuration.pollInterval.value());
+}
+
+void MemoryPressureHandler::disableGPUMemoryAccounting()
+{
+    // Reset the GPU memory file to stop accounting video memory for this process
+    s_GPUMemoryFile = String();
+    s_envBaseThresholdVideo = 0;
+    s_videoMemoryInFootprint = false;
+
+    RELEASE_LOG(MemoryPressure, "GPU memory accounting disabled (PID=%d)", getpid());
 }
 
 void MemoryPressureHandler::releaseMemory(Critical critical, Synchronous synchronous)

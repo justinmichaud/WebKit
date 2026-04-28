@@ -198,6 +198,7 @@ public:
 
     void setConfiguration(Configuration&&);
     void setConfiguration(const Configuration&);
+    void disableGPUMemoryAccounting();
 
     WTF_EXPORT_PRIVATE void releaseMemory(Critical, Synchronous = Synchronous::No);
 

@@ -219,6 +219,10 @@ void WebProcess::platformInitializeWebProcess(WebProcessCreationParameters& para
     if (parameters.memoryPressureHandlerConfiguration)
         MemoryPressureHandler::singleton().setConfiguration(WTFMove(*parameters.memoryPressureHandlerConfiguration));
 
+    // Service worker processes are not expected to use GPU - disable GPU memory accounting
+    if (parameters.isServiceWorkerProcess)
+        MemoryPressureHandler::singleton().disableGPUMemoryAccounting();
+
     if (!parameters.applicationID.isEmpty())
         WebCore::setApplicationID(parameters.applicationID);
 
