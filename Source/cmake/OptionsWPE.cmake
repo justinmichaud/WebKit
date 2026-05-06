@@ -1,7 +1,11 @@
 include(GNUInstallDirs)
 include(VersioningUtils)
 
-SET_PROJECT_VERSION(2 46 7)
+# Allow appending a suffix to the micro version from the build system (e.g. bitbake)
+# to distinguish builds with API additions: -DWPE_VERSION_MICRO_SUFFIX=1
+# Result: 2.46.7 + suffix 1 → micro becomes 71, so version is 2.46.71
+set(WPE_VERSION_MICRO_SUFFIX "" CACHE STRING "Suffix to append to PROJECT_VERSION_MICRO for WPE builds")
+SET_PROJECT_VERSION(2 46 "7${WPE_VERSION_MICRO_SUFFIX}")
 
 set(USER_AGENT_BRANDING "" CACHE STRING "Branding to add to user agent string")
 
