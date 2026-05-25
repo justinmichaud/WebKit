@@ -496,11 +496,12 @@ void MediaPlayerPrivateGStreamer::play()
         return;
     }
 
-    if (changePipelineState(GST_STATE_PLAYING) == ChangePipelineStateResult::Ok) {
+    auto res = changePipelineState(GST_STATE_PLAYING);
+    if (res == ChangePipelineStateResult::Ok || res == ChangePipelineStateResult::SavedUntilResume) {
         m_isEndReached = false;
         m_isDelayingLoad = false;
         m_preload = MediaPlayer::Preload::Auto;
-        GST_INFO_OBJECT(pipeline(), "Play");
+        GST_INFO_OBJECT(pipeline(), "Play%s", (res == ChangePipelineStateResult::Ok) ? "" : " (state change saved due to suspend)");
 #if ENABLE(MEDIA_TELEMETRY)
         MediaTelemetryReport::singleton().reportPlaybackState(MediaTelemetryReport::AVPipelineState::Play);
 #endif
@@ -1089,10 +1090,16 @@ MediaPlayerPrivateGStreamer::ChangePipelineStateResult MediaPlayerPrivateGStream
 {
     ASSERT(m_pipeline);
 
-    if (isPausedByViewport() && newState > GST_STATE_PAUSED) {
-        GST_DEBUG_OBJECT(pipeline(), "Saving state for when player becomes visible: %s", gst_element_state_get_name(newState));
-        m_stateToRestoreWhenVisible = newState;
-        return ChangePipelineStateResult::Ok;
+    if (isSuspended()) {
+        // Save requests to play until we resume.
+        if (newState > GST_STATE_PAUSED) {
+            GST_DEBUG_OBJECT(pipeline(), "Saving state for when player is resumed: %s", gst_element_state_get_name(newState));
+            m_stateToResume = newState;
+            return ChangePipelineStateResult::SavedUntilResume;
+        }
+
+        // Any other state changes are ok to execute right away.
+        m_stateToResume = GST_STATE_VOID_PENDING;
     }
 
     GstState currentState, pending;
@@ -1364,8 +1371,14 @@ MediaTime MediaPlayerPrivateGStreamer::platformDuration() const
 
 bool MediaPlayerPrivateGStreamer::isMuted() const
 {
-    GST_INFO_OBJECT(pipeline(), "Player is muted: %s", boolForPrinting(m_isMuted));
-    return m_isMuted;
+    bool isMuted = false;
+
+    auto streamVolume = GST_STREAM_VOLUME(m_pipeline.get());
+    if (streamVolume)
+        isMuted = gst_stream_volume_get_mute(streamVolume);
+
+    GST_INFO_OBJECT(pipeline(), "Player is muted: %s", boolForPrinting(isMuted));
+    return isMuted;
 }
 
 void MediaPlayerPrivateGStreamer::commitLoad()
@@ -1965,6 +1978,7 @@ void MediaPlayerPrivateGStreamer::setMuted(bool shouldMute)
     GST_INFO_OBJECT(pipeline(), "Setting muted state to %s", boolForPrinting(shouldMute));
     g_object_set(m_volumeElement.get(), "mute", static_cast<gboolean>(shouldMute), nullptr);
     configureMediaStreamAudioTracks();
+    managePlayerSuspend();
 }
 
 void MediaPlayerPrivateGStreamer::notifyPlayerOfMute()
@@ -3442,6 +3456,7 @@ void MediaPlayerPrivateGStreamer::createGSTPlayBin(const URL& url)
             player->videoSinkCapsChanged(videoSinkPad);
         }), this);
 
+    managePlayerSuspend();
 #if ENABLE(MEDIA_TELEMETRY)
     MediaTelemetryReport::singleton().reportDrmInfo(getDrm());
     MediaTelemetryReport::singleton().reportPlaybackState(MediaTelemetryReport::AVPipelineState::Create);
@@ -4265,44 +4280,56 @@ void MediaPlayerPrivateGStreamer::flushCurrentBuffer()
 
 void MediaPlayerPrivateGStreamer::setVisibleInViewport(bool isVisible)
 {
-    if (isMediaStreamPlayer())
+    GST_DEBUG_OBJECT(pipeline(), "Player is now %svisible in the viewport", isVisible ? "" : "not ");
+
+    if (isMediaStreamPlayer() || isVisible == m_isVisibleInViewport)
         return;
 
-    // Some layout tests (webgl) expect playback of invisible videos to not be suspended, so allow
-    // this using an environment variable, set from the webkitpy glib port sub-classes.
-    const char* allowPlaybackOfInvisibleVideos = g_getenv("WEBKIT_GST_ALLOW_PLAYBACK_OF_INVISIBLE_VIDEOS");
-    if (!isVisible && allowPlaybackOfInvisibleVideos && !strcmp(allowPlaybackOfInvisibleVideos, "1"))
-        return;
+    m_isVisibleInViewport = isVisible;
+    managePlayerSuspend();
+}
 
+void MediaPlayerPrivateGStreamer::managePlayerSuspend()
+{
     if (!m_pipeline)
         return;
 
     RefPtr player = m_player.get();
 
-    GST_INFO_OBJECT(m_pipeline.get(), "%s %s player %svisible in viewport", m_isMuted ? "Muted" : "Un-muted", (player && player->isVideoPlayer()) ? "video" : "audio", isVisible ? "" : "no longer ");
-    if ((player && !player->isVideoPlayer()) || !m_isMuted)
-        return;
+    // Some layout tests (webgl) expect playback of invisible videos to not be suspended, so allow
+    // this using an environment variable, set from the webkitpy glib port sub-classes.
+    const char* allowPlaybackOfInvisibleVideos = g_getenv("WEBKIT_GST_ALLOW_PLAYBACK_OF_INVISIBLE_VIDEOS");
+    bool muted = isMuted();
+    bool shouldBeSuspended = (player && player->isVideoPlayer()) && muted && !m_isVisibleInViewport && (!allowPlaybackOfInvisibleVideos || strcmp(allowPlaybackOfInvisibleVideos, "1"));
+    GST_INFO_OBJECT(m_pipeline.get(), "%s %s player %svisible in viewport", muted ? "Muted" : "Un-muted", (player && player->isVideoPlayer()) ? "video" : "audio", m_isVisibleInViewport ? "" : "not ");
 
-    if (!isVisible && !isPausedByViewport()) {
+    if (shouldBeSuspended && !isSuspended()) {
         GstState currentState, pendingState;
         gst_element_get_state(m_pipeline.get(), &currentState, &pendingState, 0);
         GstState targetState = (pendingState != GST_STATE_VOID_PENDING ? pendingState : currentState);
+        m_isSuspended = true;
         if (targetState == GST_STATE_NULL) {
-            GST_DEBUG_OBJECT(pipeline(), "Pipeline is already in NULL state, no point in suspending the player.");
+            GST_DEBUG_OBJECT(pipeline(), "Pipeline is already in NULL state, no point in pausing the player.");
             return;
         }
-        m_stateToRestoreWhenVisible = targetState;
+        m_stateToResume = targetState;
         GST_DEBUG_OBJECT(pipeline(), "Media element is muted and not visible in viewport, pausing it to save resources. Will resume afterwards to %s state.",
             gst_element_state_get_name(m_stateToRestoreWhenVisible));
         gst_element_set_state(m_pipeline.get(), GST_STATE_PAUSED);
         gst_element_get_state(m_pipeline.get(), &currentState, &pendingState, 0);
         GST_DEBUG_OBJECT(pipeline(), "Now pipeline is in %s state with %s pending", gst_element_state_get_name(currentState), gst_element_state_get_name(pendingState));
         m_isPipelinePlaying = false;
-    } else if (isVisible && isPausedByViewport()) {
-        GST_DEBUG_OBJECT(pipeline(), "Element in viewport again, resuming playback via state change to %s.",
-            gst_element_state_get_name(m_stateToRestoreWhenVisible));
-        changePipelineState(m_stateToRestoreWhenVisible);
-        m_stateToRestoreWhenVisible = GST_STATE_VOID_PENDING;
+    } else if (!shouldBeSuspended && isSuspended()) {
+        m_isSuspended = false;
+
+        if (m_stateToResume == GST_STATE_VOID_PENDING)
+            return;
+
+        GstState resumeState = m_stateToResume;
+        m_stateToResume = GST_STATE_VOID_PENDING;
+        GST_DEBUG_OBJECT(pipeline(), "Element is either unmuted or in viewport again, resuming playback via state change to %s.",
+            gst_element_state_get_name(resumeState));
+        changePipelineState(resumeState);
     }
 }
 
@@ -4316,7 +4343,7 @@ void MediaPlayerPrivateGStreamer::paint(GraphicsContext& context, const FloatRec
     if (context.paintingDisabled())
         return;
 
-    if (!m_pageIsVisible || isPausedByViewport())
+    if (!m_pageIsVisible || isSuspended())
         return;
 
     // Keep a reference to the sample to avoid keeping the sampleMutex locked, which would be prone
