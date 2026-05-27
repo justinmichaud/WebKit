@@ -53,11 +53,11 @@ void TiledBackingStore::setTrajectoryVector(const FloatPoint& trajectoryVector)
     m_pendingTrajectoryVector.normalize();
 }
 
-void TiledBackingStore::createTilesIfNeeded(const IntRect& unscaledVisibleRect, const IntRect& contentsRect)
+void TiledBackingStore::createTilesIfNeeded(const IntRect& unscaledVisibleRect, const IntRect& contentsRect, bool visibleAreaOnly)
 {
     IntRect scaledContentsRect = mapFromContents(contentsRect);
     IntRect visibleRect = mapFromContents(unscaledVisibleRect);
-    float coverAreaMultiplier = (MemoryPressureHandler::singleton().isUnderMemoryPressure() || MemoryPressureHandler::singleton().isUnderMemoryWarning()) ? 1.0f : 2.0f;
+    float coverAreaMultiplier = (MemoryPressureHandler::singleton().isUnderMemoryPressure() || MemoryPressureHandler::singleton().isUnderMemoryWarning() || visibleAreaOnly) ? 1.0f : 2.0f;
 
     bool didChange = m_trajectoryVector != m_pendingTrajectoryVector || m_visibleRect != visibleRect || m_rect != scaledContentsRect || m_coverAreaMultiplier != coverAreaMultiplier;
     if (didChange || m_pendingTileCreation)

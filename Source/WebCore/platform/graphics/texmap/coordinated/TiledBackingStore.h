@@ -43,7 +43,7 @@ public:
     TiledBackingStoreClient& client() { return m_client; }
 
     void setTrajectoryVector(const FloatPoint&);
-    void createTilesIfNeeded(const IntRect& unscaledVisibleRect, const IntRect& contentsRect);
+    void createTilesIfNeeded(const IntRect& unscaledVisibleRect, const IntRect& contentsRect, bool visibleAreaOnly);
 
     float contentsScale() { return m_contentsScale; }
 

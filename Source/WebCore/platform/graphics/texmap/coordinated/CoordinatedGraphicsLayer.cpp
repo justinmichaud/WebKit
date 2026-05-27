@@ -1229,7 +1229,11 @@ void CoordinatedGraphicsLayer::updateContentBuffers()
 
     if (m_pendingVisibleRectAdjustment) {
         m_pendingVisibleRectAdjustment = false;
-        layerState.mainBackingStore->createTilesIfNeeded(transformedVisibleRectIncludingFuture(), IntRect(0, 0, m_size.width(), m_size.height()));
+
+        // If the page is not using normal scolling, we can tile the visible area of the layers only, as the extra
+        // cover area won't be used. But keep the extra cover area for layers that are animated.
+        bool visibleAreaOnly = tileVisibleAreaOnly() && !is<CoordinatedAnimatedBackingStoreClient>(m_nicosia.animatedBackingStoreClient);
+        layerState.mainBackingStore->createTilesIfNeeded(transformedVisibleRectIncludingFuture(), IntRect(0, 0, m_size.width(), m_size.height()), visibleAreaOnly);
     }
 
     if (is<CoordinatedAnimatedBackingStoreClient>(m_nicosia.animatedBackingStoreClient)) {

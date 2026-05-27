@@ -103,6 +103,7 @@ private:
 #endif
     RefPtr<Nicosia::ImageBackingStore> imageBackingStore(uint64_t, Function<RefPtr<Nicosia::Buffer>()>) override;
     bool nonCompositedWebGLEnabled() const override { return m_nonCompositedWebGLEnabled; }
+    bool tileVisibleAreaOnly() const override { return m_tileVisibleAreaOnly; }
 
     // GraphicsLayerFactory
     Ref<WebCore::GraphicsLayer> createGraphicsLayer(WebCore::GraphicsLayer::Type, WebCore::GraphicsLayerClient&) override;
@@ -149,6 +150,7 @@ private:
     double m_lastAnimationServiceTime { 0 };
     bool m_forceFrameSync { false };
     bool m_nonCompositedWebGLEnabled { false };
+    bool m_tileVisibleAreaOnly { false };
 };
 
 }

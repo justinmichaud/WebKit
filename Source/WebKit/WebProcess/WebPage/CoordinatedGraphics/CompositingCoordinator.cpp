@@ -108,6 +108,8 @@ CompositingCoordinator::CompositingCoordinator(WebPage& page, CompositingCoordin
 #endif
     m_rootLayer->setDrawsContent(false);
     m_rootLayer->setSize(m_page.size());
+
+    m_tileVisibleAreaOnly = !g_strcmp0(std::getenv("WPE_TILE_VISIBLE_AREA_ONLY"), "1");
 }
 
 CompositingCoordinator::~CompositingCoordinator()
