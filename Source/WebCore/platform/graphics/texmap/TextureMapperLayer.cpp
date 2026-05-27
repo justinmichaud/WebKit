@@ -64,6 +64,7 @@ struct TextureMapperLayer::ComputeTransformData {
 TextureMapperLayer::TextureMapperLayer(Damage::ShouldPropagate propagateDamage)
     : m_propagateDamage(propagateDamage)
 {
+    m_simplified3DComposition = !g_strcmp0(std::getenv("WPE_SIMPLIFIED_3D_COMPOSITION"), "1");
 }
 
 TextureMapperLayer::~TextureMapperLayer()
@@ -262,7 +263,7 @@ void TextureMapperLayer::paintSelf(TextureMapperPaintOptions& options)
         options.textureMapper.beginClip(transform, m_state.contentsClippingRect);
     }
 
-    if (options.preserves3D && contentsLayer->isHolePunchBuffer())
+    if (options.preserves3D && contentsLayer->isHolePunchBuffer() && !m_simplified3DComposition)
         paintPreserves3DHolePunch(contentsLayer, transform, options);
     else
         contentsLayer->paintToTextureMapper(options.textureMapper, m_state.contentsRect, transform, options.opacity);
@@ -312,6 +313,27 @@ void TextureMapperLayer::paintSelfAndChildren(TextureMapperPaintOptions& options
 {
     if (m_state.backdropLayer && m_state.backdropLayer == options.backdropLayer)
         return;
+
+    struct Preserves3DScope {
+        Preserves3DScope(TextureMapperPaintOptions& passedOptions, bool passedEnable)
+            : options(passedOptions)
+            , enable(passedEnable)
+        {
+            if (enable) {
+                options.preserves3D = true;
+                options.textureMapper.beginPreserves3D();
+            }
+        }
+        ~Preserves3DScope()
+        {
+            if (enable) {
+                options.preserves3D = false;
+                options.textureMapper.endPreserves3D();
+            }
+        }
+        TextureMapperPaintOptions& options;
+        bool enable;
+    } scopedPreserves3D(options, m_state.preserves3D && !options.preserves3D && m_simplified3DComposition);
 
     if (m_state.backdropLayer && !options.backdropLayer) {
         TransformationMatrix clipTransform;
@@ -812,7 +834,7 @@ void TextureMapperLayer::paintRecursive(TextureMapperPaintOptions& options)
 
     SetForScope scopedOpacity(options.opacity, options.opacity * m_currentOpacity);
 
-    if (m_state.preserves3D)
+    if (m_state.preserves3D && !m_simplified3DComposition)
         paintWith3DRenderingContext(options);
     else if (shouldBlend())
         paintUsingOverlapRegions(options);

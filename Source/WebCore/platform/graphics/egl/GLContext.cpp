@@ -77,6 +77,11 @@ bool GLContext::getEGLConfig(PlatformDisplay& platformDisplay, EGLConfig* config
             WTFLogAlways("Unknown pixel layout %s, falling back to RGBA8888", environmentVariable);
     }
 
+    // If simplified composition for preserve3D is enabled, we won't use intermediate surfaces with
+    // depth buffers to render preserve3D scenarios. Those are painted into the default framebuffer
+    // instead, which requires having a depth buffer there.
+    bool requiresDepthBuffer = !g_strcmp0(std::getenv("WPE_SIMPLIFIED_3D_COMPOSITION"), "1");
+
     EGLint attributeList[] = {
         EGL_RENDERABLE_TYPE, EGL_OPENGL_ES2_BIT,
         EGL_RED_SIZE, rgbaSize[0],
@@ -85,7 +90,7 @@ bool GLContext::getEGLConfig(PlatformDisplay& platformDisplay, EGLConfig* config
         EGL_ALPHA_SIZE, rgbaSize[3],
         EGL_STENCIL_SIZE, 8,
         EGL_SURFACE_TYPE, EGL_NONE,
-        EGL_DEPTH_SIZE, 0,
+        EGL_DEPTH_SIZE, requiresDepthBuffer ? 8 : 0,
         EGL_NONE
     };
 

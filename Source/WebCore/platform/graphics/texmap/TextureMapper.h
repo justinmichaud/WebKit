@@ -80,6 +80,8 @@ public:
     WEBCORE_EXPORT void endPainting();
     void endClip();
     IntRect clipBounds();
+    void beginPreserves3D();
+    void endPreserves3D();
     IntSize maxTextureSize() const;
     void setDepthRange(double zNear, double zFar);
     void setMaskMode(bool m) { m_isMaskMode = m; }

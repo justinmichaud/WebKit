@@ -275,6 +275,8 @@ private:
         TransformationMatrix futureCombinedForChildren;
 #endif
     } m_layerTransforms;
+
+    bool m_simplified3DComposition { false };
 };
 
 ALWAYS_INLINE void TextureMapperLayer::clearDamage()

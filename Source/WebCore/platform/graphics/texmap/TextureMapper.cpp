@@ -222,6 +222,7 @@ void TextureMapper::beginPainting(FlipY flipY, BitmapTexture* surface)
     glGetIntegerv(GL_CURRENT_PROGRAM, &data().previousProgram);
     data().previousScissorState = glIsEnabled(GL_SCISSOR_TEST);
     data().previousDepthState = glIsEnabled(GL_DEPTH_TEST);
+    glDisable(GL_DEPTH_TEST);
     glDepthFunc(GL_LEQUAL);
     glEnable(GL_SCISSOR_TEST);
     data().didModifyStencil = false;
@@ -1342,6 +1343,17 @@ void TextureMapper::endClip()
 IntRect TextureMapper::clipBounds()
 {
     return clipStack().current().scissorBox;
+}
+
+void TextureMapper::beginPreserves3D()
+{
+    glEnable(GL_DEPTH_TEST);
+    glClear(GL_DEPTH_BUFFER_BIT);
+}
+
+void TextureMapper::endPreserves3D()
+{
+    glDisable(GL_DEPTH_TEST);
 }
 
 IntSize TextureMapper::maxTextureSize() const
