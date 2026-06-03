@@ -1090,7 +1090,7 @@ MediaPlayerPrivateGStreamer::ChangePipelineStateResult MediaPlayerPrivateGStream
 {
     ASSERT(m_pipeline);
 
-    if (isSuspended()) {
+    if (playerIsSuspended()) {
         // Save requests to play until we resume.
         if (newState > GST_STATE_PAUSED) {
             GST_DEBUG_OBJECT(pipeline(), "Saving state for when player is resumed: %s", gst_element_state_get_name(newState));
@@ -4303,24 +4303,24 @@ void MediaPlayerPrivateGStreamer::managePlayerSuspend()
     bool shouldBeSuspended = (player && player->isVideoPlayer()) && muted && !m_isVisibleInViewport && (!allowPlaybackOfInvisibleVideos || strcmp(allowPlaybackOfInvisibleVideos, "1"));
     GST_INFO_OBJECT(m_pipeline.get(), "%s %s player %svisible in viewport", muted ? "Muted" : "Un-muted", (player && player->isVideoPlayer()) ? "video" : "audio", m_isVisibleInViewport ? "" : "not ");
 
-    if (shouldBeSuspended && !isSuspended()) {
+    if (shouldBeSuspended && !playerIsSuspended()) {
         GstState currentState, pendingState;
         gst_element_get_state(m_pipeline.get(), &currentState, &pendingState, 0);
         GstState targetState = (pendingState != GST_STATE_VOID_PENDING ? pendingState : currentState);
-        m_isSuspended = true;
+        m_playerIsSuspended = true;
         if (targetState == GST_STATE_NULL) {
             GST_DEBUG_OBJECT(pipeline(), "Pipeline is already in NULL state, no point in pausing the player.");
             return;
         }
         m_stateToResume = targetState;
         GST_DEBUG_OBJECT(pipeline(), "Media element is muted and not visible in viewport, pausing it to save resources. Will resume afterwards to %s state.",
-            gst_element_state_get_name(m_stateToRestoreWhenVisible));
+            gst_element_state_get_name(m_stateToResume));
         gst_element_set_state(m_pipeline.get(), GST_STATE_PAUSED);
         gst_element_get_state(m_pipeline.get(), &currentState, &pendingState, 0);
         GST_DEBUG_OBJECT(pipeline(), "Now pipeline is in %s state with %s pending", gst_element_state_get_name(currentState), gst_element_state_get_name(pendingState));
         m_isPipelinePlaying = false;
-    } else if (!shouldBeSuspended && isSuspended()) {
-        m_isSuspended = false;
+    } else if (!shouldBeSuspended && playerIsSuspended()) {
+        m_playerIsSuspended = false;
 
         if (m_stateToResume == GST_STATE_VOID_PENDING)
             return;
@@ -4343,7 +4343,7 @@ void MediaPlayerPrivateGStreamer::paint(GraphicsContext& context, const FloatRec
     if (context.paintingDisabled())
         return;
 
-    if (!m_pageIsVisible || isSuspended())
+    if (!m_pageIsVisible || playerIsSuspended())
         return;
 
     // Keep a reference to the sample to avoid keeping the sampleMutex locked, which would be prone
@@ -4962,7 +4962,7 @@ void MediaPlayerPrivateGStreamer::setVideoRectangle(const IntRect& rect)
 
     Locker locker { m_holePunchLock };
 
-    if (!m_pageIsVisible || m_suspended)
+    if (!m_pageIsVisible || m_pageIsSuspended)
         return;
 
     if (m_quirksManagerForTesting) {
@@ -5000,18 +5000,18 @@ void MediaPlayerPrivateGStreamer::setPageIsVisible(bool visible)
 
 void MediaPlayerPrivateGStreamer::setPageIsSuspended(bool suspended)
 {
-    if (m_suspended == suspended)
+    if (m_pageIsSuspended == suspended)
         return;
 
     if (!isHolePunchRenderingEnabled() || !m_videoSink) {
-        m_suspended = suspended;
+        m_pageIsSuspended = suspended;
         return;
     }
 
     Locker locker { m_holePunchLock };
-    m_suspended = suspended;
+    m_pageIsSuspended = suspended;
 
-    if (m_suspended) {
+    if (m_pageIsSuspended) {
         if (m_quirksManagerForTesting) {
             m_quirksManagerForTesting->setHolePunchVideoRectangle(m_videoSink.get(), IntRect());
             return;

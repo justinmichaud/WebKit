@@ -453,7 +453,7 @@ protected:
     bool m_areVolumeAndMuteInitialized { false };
 
     // Reflects whether the pipeline was suspended due to the HTMLMediaElement being both muted and invisible in the viewport.
-    bool isSuspended() const { return m_isSuspended; };
+    bool playerIsSuspended() const { return m_playerIsSuspended; };
 
 #if USE(TEXTURE_MAPPER)
     OptionSet<TextureMapperFlags> m_textureMapperFlags;
@@ -679,7 +679,7 @@ private:
     // Whether the page containing the HTMLMediaElement is visible, reflects: setPageIsVisible()
     bool m_pageIsVisible { false };
 
-    bool m_suspended { false };
+    bool m_pageIsSuspended { false };
 
     // playbin3 only:
     bool m_waitingForStreamsSelectedEvent { true };
@@ -733,7 +733,7 @@ private:
 
     bool m_didTryToRecoverPlayingState { false };
 
-    bool m_isSuspended { false };
+    bool m_playerIsSuspended { false };
     // The state the pipeline should be set back to after the player is resumed.
     GstState m_stateToResume { GST_STATE_VOID_PENDING };
 
