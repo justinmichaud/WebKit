@@ -4900,8 +4900,12 @@ std::optional<VideoFrameMetadata> MediaPlayerPrivateGStreamer::videoFrameMetadat
     metadata.presentedFrames = m_sampleCount;
 
     if (GST_BUFFER_PTS_IS_VALID(buffer)) {
-        auto bufferPts = fromGstClockTime(GST_BUFFER_PTS(buffer));
-        metadata.mediaTime = (bufferPts - m_estimatedVideoFrameDuration).toDouble();
+        if (isMediaStreamPlayer())
+            metadata.mediaTime = currentTime().toDouble();
+        else {
+            auto bufferPts = fromGstClockTime(GST_BUFFER_PTS(buffer));
+            metadata.mediaTime = (bufferPts - m_estimatedVideoFrameDuration).toDouble();
+        }
     }
 
     // FIXME: presentationTime and expectedDisplayTime might not always have the same value, we should try getting more precise values.
