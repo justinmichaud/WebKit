@@ -66,6 +66,7 @@ GStreamerQuirkRialto::GStreamerQuirkRialto()
                 m_sinkCaps = WTFMove(templateCaps);
         }
     }
+    m_disallowedWebAudioDecoders = { "rialtomseaudiosink"_s };
 }
 
 bool GStreamerQuirkRialto::isPlatformSupported() const

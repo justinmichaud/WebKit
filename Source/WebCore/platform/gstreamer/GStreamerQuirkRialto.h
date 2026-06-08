@@ -41,12 +41,14 @@ public:
     GstElement* createAudioSink() final;
     GstElement* createWebAudioSink() final;
     std::optional<bool> isHardwareAccelerated(GstElementFactory*) final;
+    Vector<String> disallowedWebAudioDecoders() const final { return m_disallowedWebAudioDecoders; }
     bool shouldParseIncomingLibWebRTCBitStream() const final { return false; }
     unsigned getAdditionalPlaybinFlags() const { return getGstPlayFlag("text") | getGstPlayFlag("native-audio") | getGstPlayFlag("native-video"); }
     bool needsCustomInstantRateChange() const final { return true; }
 
 private:
     GRefPtr<GstCaps> m_sinkCaps;
+    Vector<String> m_disallowedWebAudioDecoders;
 };
 
 } // namespace WebCore
