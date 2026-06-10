@@ -1,4 +1,6 @@
 mod backtrace_capture;
+#[cfg(target_os = "linux")]
+mod libc_start;
 mod logger;
 mod reentrancy;
 mod store;
@@ -14,6 +16,9 @@ unsafe extern "C" {
         signum: libc::c_int,
         handler: unsafe extern "C" fn(libc::c_int),
     ) -> *mut libc::c_void;
+    /// Nonzero only in processes whose allocator provides `malloc_logger`
+    /// (weak symbol). See pac_interpose.c.
+    fn pleiades_has_malloc_logger() -> libc::c_int;
 }
 
 extern "C" fn flush_on_exit() {
@@ -27,6 +32,13 @@ unsafe extern "C" fn sigint_handler(_sig: libc::c_int) {
 
 #[ctor::ctor]
 fn init() {
+    // The hook is LD_PRELOAD'd into every process in the launch chain. Only
+    // activate where the allocator actually provides malloc_logger (WebKit/
+    // bmalloc); in launcher processes (/usr/bin/env, perl, bash, …) the weak
+    // symbol is absent, so do nothing — no hooks, no output files.
+    if unsafe { pleiades_has_malloc_logger() } == 0 {
+        return;
+    }
     store::capture_image_list();
     unsafe {
         pleiades_set_malloc_logger(logger::pleiades_on_malloc);

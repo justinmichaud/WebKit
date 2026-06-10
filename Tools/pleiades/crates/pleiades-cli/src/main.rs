@@ -1,5 +1,5 @@
 use pleiades_core::{
-    CompactEvent, ImageInfo, StackNode,
+    match_log_path, CompactEvent, ImageInfo, StackNode,
     DEFAULT_LOG_PATH, LOG_MAGIC, LOG_PATH_ENV,
 };
 use clap::{Parser, Subcommand};
@@ -31,6 +31,11 @@ enum Commands {
     Export {
         #[arg(short, long, default_value = "/tmp/pleiades-profile.json")]
         output: String,
+        /// Directory to search for JSC JIT dumps (jit-*-<pid>.dump, from
+        /// JSC_useJITDump=1 JSC_jitDumpDirectory=...). Used to symbolicate
+        /// JIT-compiled frames. Defaults to /tmp.
+        #[arg(long, default_value = "/tmp")]
+        jitdump_dir: String,
     },
 }
 
@@ -156,14 +161,18 @@ impl Symbolicator {
             }
         }
 
-        // Symbol table fallback
+        // Symbol table fallback. Read both .symtab and .dynsym: stripped system
+        // libraries (libc, libglib, …) have an empty .symtab but export their
+        // functions via .dynsym, so without the latter they'd never symbolicate.
         use object::{Object, ObjectSymbol};
-        let mut symbols: Vec<(u64, u64, String)> = obj.symbols().filter_map(|sym| {
+        let mut symbols: Vec<(u64, u64, String)> = obj.symbols().chain(obj.dynamic_symbols()).filter_map(|sym| {
+            if !sym.is_definition() { return None; }
             let addr = sym.address(); let size = sym.size(); let name = sym.name().ok()?;
             if addr == 0 || name.is_empty() { return None; }
             Some((addr, size, demangle(name)))
         }).collect();
         symbols.sort_by_key(|(a, _, _)| *a);
+        symbols.dedup_by_key(|(a, _, _)| *a);
 
         for &(ip, offset) in ips {
             if self.cache.contains_key(&ip) { continue; }
@@ -201,11 +210,69 @@ fn event_summary(e: &CompactEvent) -> String {
     else { format!("0x{:04x}(0x{:x}, 0x{:x}, 0x{:x}) -> 0x{:x}", et.0, e.arg1, e.arg2, e.arg3, e.return_val) }
 }
 
-fn export_profile(data: &ProfileData, output: &str) -> Result<(), Box<dyn std::error::Error>> {
+/// A JIT-compiled code region named by a JSC jitdump file.
+struct JitRange { start: u64, end: u64, name: String }
+
+/// Parse a perf jitdump file (as produced by JSC with JSC_useJITDump=1) into a
+/// sorted list of code ranges. Format mirrors Source/JavaScriptCore/assembler/PerfLog.cpp
+/// and the perf jitdump spec: a 40-byte FileHeader, then records each prefixed by
+/// {type:u32, totalSize:u32, timestamp:u64}. Type 0 (JITCodeLoad) carries
+/// {pid:u32, tid:u32, vma:u64, codeAddress:u64, codeSize:u64, codeIndex:u64},
+/// a NUL-terminated name, then the raw code bytes.
+fn parse_jitdump(path: &std::path::Path) -> Vec<JitRange> {
+    let d = match std::fs::read(path) { Ok(d) => d, Err(_) => return Vec::new() };
+    let u32at = |o: usize| -> u64 { u32::from_le_bytes(d[o..o + 4].try_into().unwrap()) as u64 };
+    let u64at = |o: usize| -> u64 { u64::from_le_bytes(d[o..o + 8].try_into().unwrap()) };
+
+    let mut ranges = Vec::new();
+    if d.len() < 40 || u32at(0) != 0x4a69_5444 { return ranges; }
+    let mut off = u32at(8) as usize; // FileHeader.totalSize (header length)
+    while off + 16 <= d.len() {
+        let rtype = u32at(off);
+        let rtotal = u32at(off + 4) as usize;
+        if rtotal < 16 || off + rtotal > d.len() { break; }
+        if rtype == 0 && off + 16 + 40 <= d.len() {
+            let code_address = u64at(off + 16 + 16);
+            let code_size = u64at(off + 16 + 24);
+            let name_start = off + 16 + 40;
+            if let Some(rel) = d[name_start..off + rtotal].iter().position(|&b| b == 0) {
+                let name = String::from_utf8_lossy(&d[name_start..name_start + rel]).into_owned();
+                if code_size > 0 {
+                    ranges.push(JitRange { start: code_address, end: code_address + code_size, name });
+                }
+            }
+        }
+        off += rtotal;
+    }
+    ranges.sort_by_key(|r| r.start);
+    ranges
+}
+
+/// Find the jitdump for `pid` (file name `jit-<tid>-<pid>.dump`) in `dir`, newest first.
+fn find_jitdump(dir: &str, pid: u32) -> Option<std::path::PathBuf> {
+    let suffix = format!("-{pid}.dump");
+    let mut found: Vec<(std::time::SystemTime, std::path::PathBuf)> = std::fs::read_dir(dir)
+        .ok()?
+        .flatten()
+        .filter_map(|e| {
+            let p = e.path();
+            let name = p.file_name()?.to_str()?;
+            if name.starts_with("jit-") && name.ends_with(&suffix) {
+                let mtime = e.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+                Some((mtime, p))
+            } else { None }
+        })
+        .collect();
+    found.sort_by_key(|(m, _)| *m);
+    found.pop().map(|(_, p)| p)
+}
+
+fn export_profile(data: &ProfileData, output: &str, jitdump_dir: &str) -> Result<(), Box<dyn std::error::Error>> {
     use fxprof_processed_profile::{
         CategoryColor, Frame, FrameFlags, FrameInfo,
-        Profile, ReferenceTimestamp, SamplingInterval, Timestamp,
+        Profile, ReferenceTimestamp, SamplingInterval, Symbol, SymbolTable, Timestamp,
     };
+    use std::sync::Arc;
 
     if data.events.is_empty() { return Err("no events".into()); }
 
@@ -223,21 +290,77 @@ fn export_profile(data: &ProfileData, output: &str) -> Result<(), Box<dyn std::e
     let main_thread = profile.add_thread(process, data.events[0].tid as u32, Timestamp::from_nanos_since_reference(first_ns), true);
     profile.set_thread_name(main_thread, "Main Thread");
 
-    // Add libs (sorted by load_address for proper range computation)
+    // Load JSC JIT symbols (if a jitdump for this pid exists) to name JIT-compiled
+    // frames, which live in anonymous executable memory and so belong to no library.
+    let jit_ranges = match find_jitdump(jitdump_dir, pid) {
+        Some(path) => {
+            let r = parse_jitdump(&path);
+            eprintln!("Loaded {} JIT symbols from {}", r.len(), path.display());
+            r
+        }
+        None => {
+            eprintln!("No JIT dump found for pid {pid} in {jitdump_dir} (run with JSC_useJITDump=1 to get JIT symbols)");
+            Vec::new()
+        }
+    };
+    let jit_lookup = |ip: u64| -> Option<&str> {
+        let i = jit_ranges.partition_point(|r| r.start <= ip);
+        if i == 0 { return None; }
+        let r = &jit_ranges[i - 1];
+        if ip < r.end { Some(&r.name) } else { None }
+    };
+
+    // Add libs (sorted by load_address for proper range computation).
     let mut sorted_images: Vec<_> = data.images.iter().collect();
     sorted_images.sort_by_key(|img| img.load_address);
+    let lib_end = |i: usize| -> u64 {
+        if i + 1 < sorted_images.len() { sorted_images[i + 1].load_address } else { sorted_images[i].load_address + 0x10000000 }
+    };
+
+    // Pre-symbolicate every captured frame with pleiades' own resolver (addr2line
+    // + ELF symbols) and embed the results as each library's symbol table. This
+    // makes the profile self-contained: samply/Firefox don't have to locate and
+    // build-id-match the on-disk binaries (which the Firefox Profiler keys off
+    // codeId / a byte-swapped debugId — neither of which a raw build-id matches),
+    // so symbols show up regardless. Names only — no file/line/inlines.
+    let all_ips: Vec<u64> = data.stack_nodes.iter().map(|n| n.ip).collect();
+    let mut sym = Symbolicator::new(data.images.clone());
+    eprintln!("Symbolicating {} unique frames...", all_ips.len());
+    sym.resolve_all_ips(&all_ips);
+
+    // Group resolved symbols by library, keyed on relative address.
+    let mut per_image: Vec<std::collections::BTreeMap<u32, String>> =
+        vec![std::collections::BTreeMap::new(); sorted_images.len()];
+    for &ip in &all_ips {
+        let idx = sorted_images.partition_point(|img| img.load_address <= ip);
+        if idx == 0 { continue; }
+        let i = idx - 1;
+        if ip >= lib_end(i) { continue; }
+        let name = sym.resolve(ip);
+        if name == "<unknown>" { continue; }
+        let rel = (ip - sorted_images[i].load_address) as u32;
+        per_image[i].entry(rel).or_insert_with(|| name.to_string());
+    }
+
     for (i, image) in sorted_images.iter().enumerate() {
         let name = std::path::Path::new(&image.path).file_name().and_then(|n| n.to_str()).unwrap_or(&image.path);
         // Use first 16 bytes for breakpad ID (Mach-O UUID or truncated ELF build-id)
         let uuid_hex = image.uuid[..16].iter().map(|b| format!("{b:02X}")).collect::<String>();
         let debug_id = fxprof_processed_profile::debugid::DebugId::from_breakpad(&format!("{uuid_hex}0")).unwrap_or_default();
+        let symbol_table = if per_image[i].is_empty() {
+            None
+        } else {
+            let symbols = per_image[i].iter().map(|(&address, name)| Symbol {
+                address, size: None, name: name.clone(),
+            }).collect();
+            Some(Arc::new(SymbolTable::new(symbols)))
+        };
         let lib = profile.add_lib(fxprof_processed_profile::LibraryInfo {
             name: name.to_string(), debug_name: name.to_string(),
             path: image.path.clone(), debug_path: image.path.clone(),
-            debug_id, code_id: None, arch: None, symbol_table: None,
+            debug_id, code_id: None, arch: None, symbol_table,
         });
-        let end = if i + 1 < sorted_images.len() { sorted_images[i + 1].load_address } else { image.load_address + 0x10000000 };
-        profile.add_lib_mapping(process, lib, image.load_address, end, 0);
+        profile.add_lib_mapping(process, lib, image.load_address, lib_end(i), 0);
     }
 
     let counter = profile.add_counter(process, "malloc", "Memory", "Amount of allocated memory");
@@ -246,8 +369,14 @@ fn export_profile(data: &ProfileData, output: &str) -> Result<(), Box<dyn std::e
     eprintln!("Building {} stack nodes...", data.stack_nodes.len());
     let mut stack_handles: Vec<Option<fxprof_processed_profile::StackHandle>> = Vec::with_capacity(data.stack_nodes.len());
     for node in &data.stack_nodes {
+        // JIT-compiled frames belong to no library; name them directly via a
+        // label from the jitdump. Everything else resolves through lib mappings.
+        let frame = match jit_lookup(node.ip) {
+            Some(name) => Frame::Label(profile.intern_string(name)),
+            None => Frame::InstructionPointer(node.ip),
+        };
         let frame_info = FrameInfo {
-            frame: Frame::InstructionPointer(node.ip),
+            frame,
             category_pair: memory_category.into(),
             flags: FrameFlags::empty(),
         };
@@ -318,9 +447,67 @@ fn export_profile(data: &ProfileData, output: &str) -> Result<(), Box<dyn std::e
     Ok(())
 }
 
+/// Resolve the log path the user gave (a template like `/tmp/pleiades-alloc.bin`)
+/// to a concrete file. The hook writes per-process files (`...<pid>.bin`), so if
+/// the literal path doesn't exist we scan its directory for matching per-process
+/// captures and pick the most recently modified, reporting the choice.
+fn resolve_input_path(template: &str) -> Result<String, Box<dyn std::error::Error>> {
+    if std::path::Path::new(template).exists() {
+        return Ok(template.to_string());
+    }
+
+    let dir = std::path::Path::new(template)
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| std::path::Path::new("."));
+
+    struct Found {
+        name: String,
+        pid: u32,
+        mtime: std::time::SystemTime,
+        path: String,
+    }
+    let mut matches: Vec<Found> = Vec::new();
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Some(path_str) = path.to_str() else { continue };
+            if let Some(tag) = match_log_path(template, path_str) {
+                let mtime = entry.metadata().and_then(|m| m.modified()).unwrap_or(std::time::UNIX_EPOCH);
+                matches.push(Found { name: tag.name, pid: tag.pid, mtime, path: path_str.to_string() });
+            }
+        }
+    }
+
+    let label = |f: &Found| if f.name.is_empty() { format!("pid {}", f.pid) } else { format!("{} (pid {})", f.name, f.pid) };
+
+    match matches.iter().max_by_key(|f| f.mtime) {
+        Some(newest) => {
+            if matches.len() > 1 {
+                eprintln!("Found {} per-process captures for '{template}':", matches.len());
+                let mut sorted: Vec<&Found> = matches.iter().collect();
+                sorted.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+                for f in &sorted {
+                    eprintln!("  {}  {}", label(f), f.path);
+                }
+                eprintln!("Using newest: {} — pass --log-path to pick another (e.g. the WebKitWebProcess).", label(newest));
+            } else {
+                eprintln!("Using per-process capture {}: {}", label(newest), newest.path);
+            }
+            Ok(newest.path.clone())
+        }
+        None => Err(format!(
+            "no capture found at '{template}' or matching per-process files in {}",
+            dir.display()
+        )
+        .into()),
+    }
+}
+
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let cli = Cli::parse();
-    let data = read_log(&cli.log_path)?;
+    let path = resolve_input_path(&cli.log_path)?;
+    let data = read_log(&path)?;
 
     eprintln!("Loaded {} images, {} stack nodes, {} events",
         data.images.len(), data.stack_nodes.len(), data.events.len());
@@ -358,8 +545,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             let total: u64 = data.events.iter().filter(|e| e.event_type.is_alloc() || e.event_type.is_calloc()).map(|e| e.arg2).sum();
             println!("  total bytes allocated: {total}");
         }
-        Commands::Export { output } => {
-            export_profile(&data, &output)?;
+        Commands::Export { output, jitdump_dir } => {
+            export_profile(&data, &output, &jitdump_dir)?;
         }
     }
 

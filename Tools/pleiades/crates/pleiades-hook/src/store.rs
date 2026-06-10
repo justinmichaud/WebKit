@@ -1,4 +1,4 @@
-use pleiades_core::{CompactEvent, ImageInfo, MallocEventType, StackNode, LOG_MAGIC};
+use pleiades_core::{CompactEvent, ImageInfo, MallocEventType, StackNode, DEFAULT_LOG_PATH, LOG_MAGIC};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicPtr, Ordering};
 use std::sync::Mutex;
@@ -21,6 +21,10 @@ static TRIE: Mutex<Option<TrieLookup>> = Mutex::new(None);
 static STACK_NODES: AtomicPtr<boxcar::Vec<StackNode>> = AtomicPtr::new(std::ptr::null_mut());
 static EVENTS: AtomicPtr<boxcar::Vec<CompactEvent>> = AtomicPtr::new(std::ptr::null_mut());
 static FLUSH_BUF: AtomicPtr<FlushBuffers> = AtomicPtr::new(std::ptr::null_mut());
+/// Per-process output path, resolved once at init (where allocation is safe) and
+/// stored as a NUL-terminated C string so the signal-safe flush path can `open`
+/// it without allocating. See [`resolve_db_path`].
+static DB_PATH: AtomicPtr<libc::c_char> = AtomicPtr::new(std::ptr::null_mut());
 
 fn get_boxcar<T>(ptr: &AtomicPtr<boxcar::Vec<T>>) -> Option<&'static boxcar::Vec<T>> {
     let p = ptr.load(Ordering::Acquire);
@@ -206,7 +210,49 @@ mod image_list {
 // Common code
 // ============================================================
 
+/// Resolve and cache the per-process output path. Done once at init so the
+/// signal-safe flush path never has to allocate. The pid is baked in here, so
+/// concurrent processes sharing one LD_PRELOAD (e.g. WebKit's UI/Web/Network
+/// processes) each write a distinct file instead of clobbering one.
+/// Best-effort process name: the basename of the executable (`/proc/self/exe`).
+/// This is what distinguishes WebKit's processes — `WebKitWebProcess` (web
+/// content) vs `WebKitNetworkProcess` vs the UI app (e.g. `MiniBrowser`).
+fn process_name() -> String {
+    let mut buf = [0u8; 4096];
+    let n = unsafe {
+        libc::readlink(c"/proc/self/exe".as_ptr(), buf.as_mut_ptr().cast(), buf.len())
+    };
+    if n <= 0 {
+        return "unknown".to_string();
+    }
+    let path = &buf[..n as usize];
+    let base = path.rsplit(|&b| b == b'/').next().unwrap_or(path);
+    String::from_utf8_lossy(base).into_owned()
+}
+
+fn resolve_db_path() {
+    use std::ffi::{CStr, CString};
+
+    let env_key = c"PLEIADES_DB_PATH";
+    let p = unsafe { libc::getenv(env_key.as_ptr()) };
+    let template = if p.is_null() {
+        DEFAULT_LOG_PATH.to_string()
+    } else {
+        unsafe { CStr::from_ptr(p) }.to_string_lossy().into_owned()
+    };
+
+    let pid = unsafe { libc::getpid() } as u32;
+    let resolved = pleiades_core::resolve_log_path(&template, &process_name(), pid);
+    if let Ok(cstr) = CString::new(resolved) {
+        // Leak intentionally: the path lives for the whole process and is read by
+        // the flush path, which may run from an atexit/signal context.
+        DB_PATH.store(cstr.into_raw(), Ordering::Release);
+    }
+}
+
 pub fn capture_image_list() {
+    resolve_db_path();
+
     let images = image_list::capture();
 
     // Pre-serialize images and allocate flush buffers (malloc is safe here).
@@ -284,10 +330,10 @@ pub fn flush_to_disk() {
     let node_count = nodes_box.count();
     let event_count = events_box.count();
 
-    // Open output file.
-    let env_key = c"PLEIADES_DB_PATH";
-    let path_ptr = unsafe { libc::getenv(env_key.as_ptr()) };
-    let c_path = if !path_ptr.is_null() {
+    // Open output file. Path was resolved (with pid) at init; fall back to the
+    // bare default only if that somehow failed.
+    let path_ptr = DB_PATH.load(Ordering::Acquire);
+    let c_path: *const libc::c_char = if !path_ptr.is_null() {
         path_ptr
     } else {
         c"/tmp/pleiades-alloc.bin".as_ptr()
@@ -326,8 +372,10 @@ pub fn flush_to_disk() {
             libc::write(2, m.as_ptr().cast(), m.len());
             let s = fmt_usize(node_count, &mut nb);
             libc::write(2, s.as_ptr().cast(), s.len());
-            let m = b" stack nodes\n";
+            let m = b" stack nodes -> ";
             libc::write(2, m.as_ptr().cast(), m.len());
+            libc::write(2, c_path.cast(), libc::strlen(c_path));
+            libc::write(2, b"\n".as_ptr().cast(), 1);
         }
     }
 }

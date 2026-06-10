@@ -6,7 +6,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 static ACTIVATED: AtomicBool = AtomicBool::new(false);
 
-/// Check if `main` appears in the current call stack (portable: dladdr works on both platforms).
+/// Flip pleiades into active capture. Allocations before this point (dynamic
+/// loader, libc, and the target's own static constructors) are skipped. On Linux
+/// this is called from the `__libc_start_main` interposer at program entry (see
+/// [`crate::libc_start`]) because `dladdr` cannot find `main` — it lives in the
+/// executable's `.symtab`, not `.dynsym`.
+#[cfg(target_os = "linux")]
+pub(crate) fn mark_main_reached() {
+    ACTIVATED.store(true, Ordering::Release);
+}
+
+/// Check if `main` appears in the current call stack. macOS only: there `dladdr`
+/// resolves `main` from the Mach-O symbol table. On Linux see [`mark_main_reached`].
+#[cfg(not(target_os = "linux"))]
 fn stack_contains_main() -> bool {
     const MAX: usize = 64;
     let mut buf = [std::ptr::null_mut::<libc::c_void>(); MAX];
@@ -18,10 +30,10 @@ fn stack_contains_main() -> bool {
         if unsafe { libc::dladdr(ip, &mut info) } != 0 && !info.dli_sname.is_null() {
             let s = info.dli_sname;
             unsafe {
-                if *s.add(0) == b'm' as i8
-                    && *s.add(1) == b'a' as i8
-                    && *s.add(2) == b'i' as i8
-                    && *s.add(3) == b'n' as i8
+                if *s.add(0) == b'm' as libc::c_char
+                    && *s.add(1) == b'a' as libc::c_char
+                    && *s.add(2) == b'i' as libc::c_char
+                    && *s.add(3) == b'n' as libc::c_char
                     && *s.add(4) == 0
                 {
                     return true;
@@ -48,10 +60,17 @@ pub unsafe extern "C" fn pleiades_on_malloc(
     };
 
     if !ACTIVATED.load(Ordering::Acquire) {
-        if !stack_contains_main() {
-            return;
+        // On Linux, ACTIVATED is flipped by the __libc_start_main interposer at
+        // program entry; until then every event is pre-main noise we skip.
+        #[cfg(target_os = "linux")]
+        return;
+        #[cfg(not(target_os = "linux"))]
+        {
+            if !stack_contains_main() {
+                return;
+            }
+            ACTIVATED.store(true, Ordering::Release);
         }
-        ACTIVATED.store(true, Ordering::Release);
     }
 
     let timestamp_ns = monotonic_time_ns();
