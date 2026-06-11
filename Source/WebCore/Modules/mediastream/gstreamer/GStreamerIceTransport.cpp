@@ -28,8 +28,12 @@
 #include "GUniquePtrRice.h"
 #include <gst/app/gstappsink.h>
 #include <gst/app/gstappsrc.h>
+extern "C" { // workaround: broken gst webrtc_fwd.h lacks G_BEGIN_DECLS
 #include <gst/webrtc/ice.h>
+} // extern "C"
+extern "C" { // workaround: broken gst webrtc_fwd.h lacks G_BEGIN_DECLS
 #include <gst/webrtc/webrtc.h>
+} // extern "C"
 #include <wtf/MonotonicTime.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/glib/WTFGType.h>

@@ -146,6 +146,8 @@
 #define PAS_USE_SPINLOCKS                0
 #else
 #define PAS_USE_SPINLOCKS                1
+#endif
+
 // FIXME: Workaround for rdar://119319825
 #if !defined(__swift__)
 #define PAS_ENABLE_MALLOC_STACK_LOGGER 1

@@ -31,7 +31,9 @@
 #include "ScriptExecutionContext.h"
 #include "SharedMemory.h"
 #include "SocketProvider.h"
+extern "C" { // workaround: broken gst webrtc_fwd.h lacks G_BEGIN_DECLS
 #include <gst/webrtc/webrtc.h>
+} // extern "C"
 #include <wtf/HashSet.h>
 #include <wtf/Markable.h>
 #include <wtf/MonotonicTime.h>

@@ -98,7 +98,9 @@
 
 #if USE(GSTREAMER_WEBRTC)
 #include "GStreamerRTPVideoRotationHeaderExtension.h"
+extern "C" { // workaround: broken gst webrtc_fwd.h lacks G_BEGIN_DECLS
 #include <gst/webrtc/webrtc-enumtypes.h>
+} // extern "C"
 #endif
 
 #if USE(GSTREAMER_FULL) && GST_CHECK_VERSION(1, 18, 0) && !GST_CHECK_VERSION(1, 20, 0)

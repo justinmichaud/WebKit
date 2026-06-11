@@ -38,7 +38,9 @@
 
 #if USE(GSTREAMER_WEBRTC)
 #define GST_USE_UNSTABLE_API
+extern "C" { // workaround: broken gst webrtc_fwd.h lacks G_BEGIN_DECLS
 #include <gst/webrtc/webrtc.h>
+} // extern "C"
 #undef GST_USE_UNSTABLE_API
 #endif
 

@@ -120,6 +120,7 @@ public:
 
     bool processSwapsOnNavigation() const
     {
+        return false;
         return m_processSwapsOnNavigationFromClient.value_or(m_processSwapsOnNavigationFromExperimentalFeatures);
     }
     void setProcessSwapsOnNavigation(bool swaps) { m_processSwapsOnNavigationFromClient = swaps; }

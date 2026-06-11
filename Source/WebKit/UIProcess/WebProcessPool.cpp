@@ -1117,6 +1117,8 @@ void WebProcessPool::initializeNewWebProcess(WebProcessProxy& process, WebsiteDa
 
 void WebProcessPool::prewarmProcess()
 {
+    return;
+
     if (m_prewarmedProcesses.computeSize() >= prewarmedProcessCountLimit())
         return;
 
