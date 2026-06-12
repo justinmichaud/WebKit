@@ -86,6 +86,7 @@ static RealtimeMediaSource::Type toSourceType(CaptureDevice::DeviceType type)
     case CaptureDevice::DeviceType::SystemAudio:
         return RealtimeMediaSource::Type::Audio;
     case CaptureDevice::DeviceType::Camera:
+    case CaptureDevice::DeviceType::Canvas:
     case CaptureDevice::DeviceType::Screen:
     case CaptureDevice::DeviceType::Window:
         return RealtimeMediaSource::Type::Video;

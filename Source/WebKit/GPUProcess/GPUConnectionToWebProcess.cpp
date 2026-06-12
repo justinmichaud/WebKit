@@ -203,6 +203,7 @@ private:
         case CaptureDevice::DeviceType::Microphone:
             return m_process.get()->allowsAudioCapture();
         case CaptureDevice::DeviceType::Camera:
+        case CaptureDevice::DeviceType::Canvas:
             if (!m_process.get()->allowsVideoCapture())
                 return false;
 #if PLATFORM(IOS_FAMILY)

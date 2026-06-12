@@ -85,6 +85,7 @@ private:
         void scheduleCaptureCanvas();
         void captureCanvas();
         void requestFrameTimerFired();
+        CaptureDevice::DeviceType deviceType() const final { return CaptureDevice::DeviceType::Canvas; }
 
         bool m_shouldEmitFrame { true };
         std::optional<double> m_frameRequestRate;
