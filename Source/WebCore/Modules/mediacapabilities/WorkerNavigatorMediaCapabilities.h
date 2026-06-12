@@ -35,7 +35,7 @@ class WorkerNavigator;
 class WorkerNavigatorMediaCapabilities final : public Supplement<WorkerNavigator> {
     WTF_MAKE_FAST_ALLOCATED;
 public:
-    WorkerNavigatorMediaCapabilities();
+    explicit WorkerNavigatorMediaCapabilities(WorkerNavigator&);
     ~WorkerNavigatorMediaCapabilities();
 
     static MediaCapabilities& mediaCapabilities(WorkerNavigator&);

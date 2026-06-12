@@ -31,8 +31,8 @@
 
 namespace WebCore {
 
-NavigatorMediaCapabilities::NavigatorMediaCapabilities()
-    : m_mediaCapabilities(MediaCapabilities::create())
+NavigatorMediaCapabilities::NavigatorMediaCapabilities(Navigator& navigator)
+    : m_mediaCapabilities(MediaCapabilities::create(navigator))
 {
 }
 
@@ -47,7 +47,7 @@ NavigatorMediaCapabilities& NavigatorMediaCapabilities::from(Navigator& navigato
 {
     NavigatorMediaCapabilities* supplement = static_cast<NavigatorMediaCapabilities*>(Supplement<Navigator>::from(&navigator, supplementName()));
     if (!supplement) {
-        auto newSupplement = makeUnique<NavigatorMediaCapabilities>();
+        auto newSupplement = makeUnique<NavigatorMediaCapabilities>(navigator);
         supplement = newSupplement.get();
         provideTo(&navigator, supplementName(), WTFMove(newSupplement));
     }

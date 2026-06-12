@@ -33,18 +33,22 @@
 namespace WebCore {
 
 class DeferredPromise;
+class NavigatorBase;
 class ScriptExecutionContext;
 
 class MediaCapabilities : public RefCounted<MediaCapabilities>, public CanMakeWeakPtr<MediaCapabilities> {
 public:
-    static Ref<MediaCapabilities> create() { return adoptRef(*new MediaCapabilities); }
+    static Ref<MediaCapabilities> create(NavigatorBase& navigator) { return adoptRef(*new MediaCapabilities(navigator)); }
+
+    NavigatorBase* navigator();
 
     void decodingInfo(ScriptExecutionContext&, MediaDecodingConfiguration&&, Ref<DeferredPromise>&&);
     void encodingInfo(ScriptExecutionContext&, MediaEncodingConfiguration&&, Ref<DeferredPromise>&&);
 
 private:
-    MediaCapabilities() = default;
+    explicit MediaCapabilities(NavigatorBase&);
 
+    WeakPtr<NavigatorBase> m_navigator;
     uint64_t m_nextTaskIdentifier { 0 };
     HashMap<uint64_t, MediaEngineConfigurationFactory::DecodingConfigurationCallback> m_decodingTasks;
     HashMap<uint64_t, MediaEngineConfigurationFactory::EncodingConfigurationCallback> m_encodingTasks;
