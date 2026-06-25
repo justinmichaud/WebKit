@@ -68,6 +68,9 @@ public:
     FloatSize presentationSize() const final { return m_presentationSize; }
     uint32_t pixelFormat() const final;
 
+    bool isEncoded() const final;
+    bool hasSameEncodedFormat(const VideoFrame&) const final;
+
 private:
     VideoFrameGStreamer(GRefPtr<GstSample>&&, const FloatSize& presentationSize, const MediaTime& presentationTime = MediaTime::invalidTime(), Rotation = Rotation::None, bool videoMirrored = false, std::optional<VideoFrameTimeMetadata>&& = std::nullopt, PlatformVideoColorSpace&& = { });
     VideoFrameGStreamer(const GRefPtr<GstSample>&, const FloatSize& presentationSize, const MediaTime& presentationTime = MediaTime::invalidTime(), Rotation = Rotation::None, PlatformVideoColorSpace&& = { });

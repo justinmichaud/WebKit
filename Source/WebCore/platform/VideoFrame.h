@@ -99,6 +99,8 @@ public:
 
     virtual FloatSize presentationSize() const = 0;
     virtual uint32_t pixelFormat() const = 0;
+    virtual bool isEncoded() const { return false; }
+    virtual bool hasSameEncodedFormat(const VideoFrame&) const { return false; }
 
     virtual bool isRemoteProxy() const { return false; }
     virtual bool isLibWebRTC() const { return false; }

@@ -391,6 +391,13 @@ private:
     mutable Lock m_videoFrameObserversLock;
     HashMap<VideoFrameObserver*, std::unique_ptr<VideoFrameAdaptor>> m_videoFrameObservers WTF_GUARDED_BY_LOCK(m_videoFrameObserversLock);
 
+    struct PendingVideoFrame {
+        Ref<VideoFrame> frame;
+        VideoFrameTimeMetadata metadata;
+    };
+    static constexpr size_t maxPendingVideoFramesBeforeAddTrack = 30;
+    Vector<PendingVideoFrame> m_pendingVideoFrames WTF_GUARDED_BY_LOCK(m_videoFrameObserversLock);
+
     CaptureDevice m_device;
 
     // Set on the main thread from constraints.
