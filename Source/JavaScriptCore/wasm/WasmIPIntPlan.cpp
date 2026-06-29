@@ -32,6 +32,7 @@
 #include "CalleeBits.h"
 #include "JITCompilation.h"
 #include "JITOpaqueByproducts.h"
+#include "JSCJSValueInlines.h"
 #include "JSToWasm.h"
 #include "LLIntData.h"
 #include "LLIntThunks.h"
