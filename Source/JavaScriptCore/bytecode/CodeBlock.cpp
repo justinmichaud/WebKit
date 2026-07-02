@@ -378,6 +378,15 @@ bool CodeBlock::finishCreation(VM& vm, ScriptExecutable* ownerExecutable, Unlink
 
     ASSERT(vm.heap.isDeferred());
 
+    if constexpr (is32Bit()) {
+        // The metadata table is memset(0)-initialized, but on JSVALUE32_64 the empty JSValue is not 0.
+        if (m_metadata) {
+            forEachValueProfile([](auto& profile, bool) {
+                profile.clearBuckets();
+            });
+        }
+    }
+
     auto throwScope = DECLARE_THROW_SCOPE(vm);
 
     if (m_unlinkedCode->wasCompiledWithTypeProfilerOpcodes() || m_unlinkedCode->wasCompiledWithControlFlowProfilerOpcodes())

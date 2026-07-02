@@ -595,9 +595,12 @@ static void overrideDefaults()
 #endif
 
 #if OS(LINUX) && CPU(ARM)
-    Options::maximumFunctionForCallInlineCandidateBytecodeCostForDFG() = 77;
-    Options::maximumOptimizationCandidateBytecodeCost() = 42403;
-    Options::maximumFunctionForClosureCallInlineCandidateBytecodeCostForDFG() = 68;
+    Options::thresholdForOptimizeAfterWarmUp() = 250;
+    Options::thresholdForOptimizeAfterLongWarmUp() = 250;
+    Options::thresholdForOptimizeSoon() = 250;
+    Options::maximumFunctionForCallInlineCandidateBytecodeCostForDFG() = 120;
+    Options::maximumOptimizationCandidateBytecodeCost() = 80000;
+    Options::maximumFunctionForClosureCallInlineCandidateBytecodeCostForDFG() = 120;
     Options::maximumInliningCallerBytecodeCost() = 9912;
     Options::maximumInliningDepth() = 8;
     Options::maximumInliningRecursion() = 3;
@@ -914,6 +917,11 @@ void Options::notifyOptionsChanged()
 
     if (Options::useProfiler())
         Options::useConcurrentJIT() = false;
+
+#if USE(JSVALUE32_64)
+    if (!isARMv7_LPAE())
+        Options::useConcurrentJIT() = false;
+#endif
 
     if (Options::alwaysUseShadowChicken())
         Options::maximumInliningDepth() = 1;

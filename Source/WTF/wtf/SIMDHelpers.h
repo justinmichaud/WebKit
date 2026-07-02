@@ -594,16 +594,20 @@ ALWAYS_INLINE const CharacterType* find(std::span<const CharacterType> span, con
     static_assert(threshold >= stride);
     const auto* cursor = span.data();
     const auto* end = span.data() + span.size();
-    if (span.size() >= threshold) {
-        for (; cursor + stride <= end; cursor += stride) {
-            if (auto index = vectorMatch(SIMD::load(std::bit_cast<const UnsignedType*>(cursor))))
-                return cursor + index.value();
+
+    constexpr bool is32Bit = sizeof(void*) == 4;
+    if constexpr (!is32Bit) {
+        if (span.size() >= threshold) {
+            for (; cursor + stride <= end; cursor += stride) {
+                if (auto index = vectorMatch(SIMD::load(std::bit_cast<const UnsignedType*>(cursor))))
+                    return cursor + index.value();
+            }
+            if (cursor < end) {
+                if (auto index = vectorMatch(SIMD::load(std::bit_cast<const UnsignedType*>(end - stride))))
+                    return end - stride + index.value();
+            }
+            return end;
         }
-        if (cursor < end) {
-            if (auto index = vectorMatch(SIMD::load(std::bit_cast<const UnsignedType*>(end - stride))))
-                return end - stride + index.value();
-        }
-        return end;
     }
 
     for (; cursor != end; ++cursor) {
