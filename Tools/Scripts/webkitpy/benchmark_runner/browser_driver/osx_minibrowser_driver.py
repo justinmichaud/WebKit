@@ -86,3 +86,8 @@ class OSXMiniDriver(OSXBrowserDriver):
             subprocess.check_call(['/usr/bin/defaults', 'write', 'com.apple.MiniBrowser', 'NSWindow Frame BrowserWindowFrame', ' '.join(['0', '0', str(cls._screen_size().width), str(cls._screen_size().height)] * 2)])
         except Exception as error:
             _log.error('Reset window size failed - Error: {}'.format(error))
+
+    @property
+    def pgo_profile_output_directories(self):
+        # Instrumented frameworks bake this path into __llvm_profile_filename, so it is the same for any host browser.
+        return ['/private/tmp/WebKitPGO']
