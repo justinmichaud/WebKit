@@ -80,24 +80,32 @@ class LinuxBrowserDriver(BrowserDriver):
                 if 'psutil' in sys.modules:
                     main_browser_process = psutil.Process(self._browser_process.pid)
                     browser_children = main_browser_process.children(recursive=True)
-                    _log.info('Killing browser {browser_name} with pid {browser_pid} and cmd: {browser_cmd}'.format(
-                               browser_name=self.browser_name, browser_pid=self._browser_process.pid,
-                               browser_cmd=' '.join(main_browser_process.cmdline()).strip() or main_browser_process.name()))
-                    main_browser_process.kill()
-                    for browser_child in browser_children:
-                        if browser_child.is_running():
-                            try:
-                                browser_child.kill()
-                                _log.info('Killed still alive {browser_name} child with pid {browser_pid} and cmd: {browser_cmd}'.format(
-                                          browser_name=self.browser_name, browser_pid=browser_child.pid,
-                                          browser_cmd=' '.join(browser_child.cmdline()).strip() or browser_child.name()))
-                            except psutil.NoSuchProcess:
-                                # There can be a race condition where the child ends in the interval between the is_running() and kill() calls.
-                                pass
+                    all_procs = [main_browser_process] + browser_children
+                    # Terminate gracefully so an instrumented (PGO) build flushes its LLVM
+                    # profile counters: SIGTERM lets the GtkApplication UI process quit cleanly,
+                    # which closes the Web/Network process IPC connections so they too exit via
+                    # atexit and write their .profraw. SIGKILL would write nothing. Whatever has
+                    # not exited after the grace period is force-killed.
+                    ui_procs = [p for p in all_procs
+                                if 'MiniBrowser' in (p.name() or '')
+                                or any('MiniBrowser' in a for a in (p.cmdline() or []))]
+                    _log.info('Terminating browser {} (graceful, for PGO flush) with pid {}'.format(self.browser_name, self._browser_process.pid))
+                    for p in (ui_procs or all_procs):
+                        try:
+                            p.terminate()
+                        except psutil.NoSuchProcess:
+                            pass
+                    _gone, alive = psutil.wait_procs(all_procs, timeout=30)
+                    for p in alive:
+                        try:
+                            p.kill()
+                            _log.info('Force-killed still-alive {} child with pid {}'.format(self.browser_name, p.pid))
+                        except psutil.NoSuchProcess:
+                            # Race: the child ended between wait_procs() and kill().
+                            pass
                 else:
-                    _log.info('Killing browser {browser_name} with pid {browser_pid}'.format(
-                               browser_name=self.browser_name, browser_pid=self._browser_process.pid))
-                    self._browser_process.kill()
+                    _log.info('Terminating browser {} with pid {}'.format(self.browser_name, self._browser_process.pid))
+                    self._browser_process.terminate()
                     _log.warning('python psutil not found, can\'t check for '
                                  'still-alive browser children to kill.')
             else:

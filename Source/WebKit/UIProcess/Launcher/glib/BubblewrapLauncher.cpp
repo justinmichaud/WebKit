@@ -973,7 +973,10 @@ GRefPtr<GSubprocess> bubblewrapSpawn(GSubprocessLauncher* launcher, const Proces
         sandboxArgs.append("--unshare-ipc");
     }
 
-#if ENABLE(DEVELOPER_MODE)
+    // Bind the tree holding the helper processes into the sandbox so bwrap can exec them
+    // when they live outside the installed PKGLIBEXECDIR: WEBKIT_EXEC_PATH's parent and the
+    // running executable's prefix. This is what lets an un-installed, relocated build tree or
+    // bundle run with the sandbox on. For an installed build these are already-bound prefixes.
     const char* execDirectory = g_getenv("WEBKIT_EXEC_PATH");
     if (execDirectory) {
         auto parentDir = FileSystem::parentPath(FileSystem::stringFromFileSystemRepresentation(execDirectory));
@@ -986,7 +989,6 @@ GRefPtr<GSubprocess> bubblewrapSpawn(GSubprocessLauncher* launcher, const Proces
         auto parentDir = FileSystem::parentPath(FileSystem::parentPath(FileSystem::stringFromFileSystemRepresentation(executablePath.data())));
         bindIfExists(sandboxArgs, parentDir.utf8().data());
     }
-#endif
 
     int seccompFd = setupSeccomp();
     GUniquePtr<char> fdStr(g_strdup_printf("%d", seccompFd));

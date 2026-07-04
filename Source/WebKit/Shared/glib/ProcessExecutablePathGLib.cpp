@@ -1,6 +1,7 @@
 /*
  * Copyright (C) 2010 Apple Inc. All rights reserved.
  * Portions Copyright (c) 2010 Motorola Mobility, Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -32,7 +33,6 @@
 
 namespace WebKit {
 
-#if ENABLE(DEVELOPER_MODE)
 static String getExecutablePath()
 {
     CString executablePath = FileSystem::currentExecutablePath();
@@ -40,11 +40,12 @@ static String getExecutablePath()
         return FileSystem::parentPath(FileSystem::stringFromFileSystemRepresentation(executablePath.data()));
     return { };
 }
-#endif
 
 static String findWebKitProcess(const ASCIILiteral processName)
 {
-#if ENABLE(DEVELOPER_MODE)
+    // Resolve a helper process from, in order: the WEBKIT_EXEC_PATH override, the running
+    // executable's own directory, then the installed PKGLIBEXECDIR. The first two let an
+    // un-installed, relocatable build tree or bundle find its helpers.
     static const char* execDirectory = g_getenv("WEBKIT_EXEC_PATH");
     if (execDirectory) {
         String processPath = FileSystem::pathByAppendingComponent(FileSystem::stringFromFileSystemRepresentation(execDirectory), processName);
@@ -58,7 +59,6 @@ static String findWebKitProcess(const ASCIILiteral processName)
         if (FileSystem::fileExists(processPath))
             return processPath;
     }
-#endif
 
     return FileSystem::pathByAppendingComponent(FileSystem::stringFromFileSystemRepresentation(PKGLIBEXECDIR), processName);
 }
