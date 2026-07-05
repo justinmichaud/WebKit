@@ -1,0 +1,122 @@
+diff --git a/DEPS b/DEPS
+index 48a7f94892ac9..effe64393dc6e 100644
+--- a/DEPS
++++ b/DEPS
+@@ -2234,7 +2234,7 @@ deps = {
+           'version': 'version:3@3.2',
+         },
+       ],
+-      'condition': 'host_os == "linux" and non_git_source',
++      'condition': 'False',  # ARM64: no linux-arm64 gperf CIPD pkg; use system gperf
+       'dep_type': 'cipd',
+   },
+ 
+diff --git a/build/config/compiler/BUILD.gn b/build/config/compiler/BUILD.gn
+index e1da11405c1f6..01541a3ca0f0a 100644
+--- a/build/config/compiler/BUILD.gn
++++ b/build/config/compiler/BUILD.gn
+@@ -1035,6 +1035,9 @@ config("compiler") {
+   # as NEON is a mandatory part of ARMv8 anyway.
+   if (current_cpu == "arm64") {
+     defines += [ "__ARM_NEON__=1" ]
++    # CHROMIUM_PGO_MCPU: ARMv8.2-A baseline shared by Neoverse-N1 and
++    # Cortex-A76 (RPi5), tuned for N1. No crypto (BoringSSL detects at runtime).
++    cflags += [ "-mcpu=neoverse-n1+nocrypto" ]  # composes: per-target -march still overrides
+   }
+ }
+ 
+diff --git a/tools/clang/scripts/build.py b/tools/clang/scripts/build.py
+index 372440de944ac..3e916cb417cb0 100755
+--- a/tools/clang/scripts/build.py
++++ b/tools/clang/scripts/build.py
+@@ -1003,11 +1003,12 @@ def main():
+   if sys.platform.startswith('linux'):
+     # Add the sysroot to base_cmake_args.
+     if platform.machine() == 'aarch64':
+-      cmake_sysroot = sysroot_arm64
++      cmake_sysroot = None  # ARM64-NATIVE: no cross sysroot (avoids libxml2 config failures)
+     else:
+       # amd64 is the default toolchain.
+       cmake_sysroot = sysroot_amd64
+-    base_cmake_args.append('-DCMAKE_SYSROOT=' + cmake_sysroot)
++    if cmake_sysroot:
++      base_cmake_args.append('-DCMAKE_SYSROOT=' + cmake_sysroot)
+ 
+   if sys.platform == 'win32':
+     AddGitForWindowsToPath()
+@@ -1110,6 +1111,8 @@ def main():
+     if sys.platform == 'darwin':
+       # Need ARM and AArch64 for building the ios clang_rt.
+       bootstrap_targets += ';ARM;AArch64'
++    if sys.platform.startswith('linux') and platform.machine() == 'aarch64':
++      bootstrap_targets += ';AArch64'  # ARM64-NATIVE
+     bootstrap_args = base_cmake_args + compiler_wrapper_cmake_args + [
+         '-DLLVM_TARGETS_TO_BUILD=' + bootstrap_targets,
+         '-DLLVM_ENABLE_PROJECTS=clang;lld',
+diff --git a/tools/rust/build_bindgen.py b/tools/rust/build_bindgen.py
+index 9f6786e9796f7..9fe2a4abc6f38 100755
+--- a/tools/rust/build_bindgen.py
++++ b/tools/rust/build_bindgen.py
+@@ -81,7 +81,7 @@ def RunCargo(cargo_args):
+     clang/llvm parts).  That's a bit icky, but ultimately okay.
+     """
+     ncursesw_dir = None
+-    if sys.platform.startswith('linux'):
++    if sys.platform.startswith('linux') and platform.machine() not in ('aarch64', 'arm64'):  # ARM64-NATIVE: system ncursesw
+         ncursesw_dir = FetchNcurseswLibrary()
+ 
+     cargo_bin = os.path.join(RUST_TOOLCHAIN_OUT_DIR, 'bin', f'cargo{EXE}')
+@@ -139,7 +139,7 @@ def RunCargo(cargo_args):
+     env['LD'] = linker
+     env['RUSTFLAGS'] += f' -Clinker={linker}'
+ 
+-    if sys.platform.startswith('linux'):
++    if sys.platform.startswith('linux') and platform.machine() not in ('aarch64', 'arm64'):  # ARM64-NATIVE: host libs, no amd64 sysroot
+         # We use these flags to avoid linking with the system libstdc++.
+         sysroot = DownloadDebianSysroot('amd64')
+         sysroot_flag = f'--sysroot={sysroot}'
+diff --git a/tools/rust/build_rust.py b/tools/rust/build_rust.py
+index 4faf350703e99..a4acd1885a7b0 100755
+--- a/tools/rust/build_rust.py
++++ b/tools/rust/build_rust.py
+@@ -177,6 +177,12 @@ def InstallRustBetaSysroot(rust_git_hash, target_triples):
+ 
+ def AddOpenSSLToEnv():
+     """Download OpenSSL, and add to OPENSSL_DIR."""
++    if sys.platform.startswith('linux') and platform.machine() in ('aarch64', 'arm64'):
++        # ARM64-NATIVE-OPENSSL: no linux-arm64 OpenSSL in CIPD; use the system one.
++        os.environ['OPENSSL_LIB_DIR'] = '/usr/lib/aarch64-linux-gnu'
++        os.environ['OPENSSL_INCLUDE_DIR'] = '/usr/include'
++        os.environ['OPENSSL_NO_VENDOR'] = '1'
++        return '/usr'
+     ssl_dir = os.path.join(LLVM_BUILD_TOOLS_DIR, 'openssl')
+ 
+     if sys.platform == 'darwin':
+@@ -570,6 +576,8 @@ def RustTargetTriple():
+             return 'x86_64-apple-darwin'
+     elif sys.platform == 'win32':
+         return 'x86_64-pc-windows-msvc'
++    elif platform.machine() in ('aarch64', 'arm64'):  # ARM64-NATIVE
++        return 'aarch64-unknown-linux-gnu'
+     else:
+         return 'x86_64-unknown-linux-gnu'
+ 
+@@ -596,6 +604,9 @@ def BuildLLVMLibraries(skip_checkout, llvm_force_head_revision):
+     if sys.platform.startswith('linux'):
+         build_cmd.append('--without-android')
+         build_cmd.append('--without-fuchsia')
++        if platform.machine() in ('aarch64', 'arm64'):  # ARM64-NATIVE
++            build_cmd.append('--use-system-cmake')
++            build_cmd += ['--host-cc=/usr/bin/clang', '--host-cxx=/usr/bin/clang++']
+     RunCommand(build_cmd + [
+         '--build-dir', RUST_HOST_LLVM_BUILD_DIR, '--install-dir',
+         RUST_HOST_LLVM_INSTALL_DIR
+@@ -775,7 +786,7 @@ def main():
+             return 1
+ 
+     debian_sysroot = None
+-    if sys.platform.startswith('linux') and not args.sync_for_gnrt:
++    if sys.platform.startswith('linux') and not args.sync_for_gnrt and platform.machine() not in ('aarch64', 'arm64'):  # ARM64-NATIVE
+         # Fetch sysroot we build rustc against. This ensures a minimum supported
+         # host (not Chromium target). Since the rustc linux package is for
+         # x86_64 only, that is the sole needed sysroot.
