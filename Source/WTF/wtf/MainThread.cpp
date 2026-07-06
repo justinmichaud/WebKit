@@ -44,7 +44,9 @@ void initializeMainThread()
         initialize();
         initializeMainThreadPlatform();
         RunLoop::initializeMain();
-        RELEASE_ASSERT(!isMainThread() || Thread::currentSingleton().uid() == 1);
+        // FIXME: JSC_useJITDump=1 spawns the PerfLog thread before the main thread
+        // registers, so the main thread's uid is not 1. https://bugs.webkit.org/show_bug.cgi?id=315675
+        // RELEASE_ASSERT(!isMainThread() || Thread::currentSingleton().uid() == 1);
     });
 }
 
