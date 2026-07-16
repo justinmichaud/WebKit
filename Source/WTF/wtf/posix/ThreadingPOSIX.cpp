@@ -35,6 +35,7 @@
 #if USE(PTHREADS)
 
 #include <errno.h>
+#include <time.h>
 #include <wtf/MonotonicTime.h>
 #include <wtf/NeverDestroyed.h>
 #include <wtf/SafeStrerror.h>
@@ -50,7 +51,6 @@
 #include <sched.h>
 #include <sys/prctl.h>
 #include <sys/syscall.h>
-#include <wtf/linux/RealTimeThreads.h>
 #ifndef SCHED_RESET_ON_FORK
 #define SCHED_RESET_ON_FORK 0x40000000
 #endif
@@ -289,7 +289,6 @@ static int schedPolicy(Thread::QOS qos, Thread::SchedulingPolicy schedulingPolic
 
     switch (qos) {
     case Thread::QOS::UserInteractive:
-        return SCHED_RR;
     case Thread::QOS::UserInitiated:
     case Thread::QOS::Default:
         return SCHED_OTHER;
@@ -340,14 +339,13 @@ bool Thread::establishHandle(NewThreadContext& context, StackAllocationSpecifica
 
 #if OS(LINUX)
     int policy = schedPolicy(qos, schedulingPolicy);
+    ASSERT(policy != SCHED_RR);
     if (policy == SCHED_RR)
-        RealTimeThreads::singleton().registerThread(*this);
-    else {
-        struct sched_param param = { };
-        error = pthread_setschedparam(threadHandle, policy | SCHED_RESET_ON_FORK, &param);
-        if (error)
-            LOG_ERROR("Failed to set sched policy %d for thread %ld: %s", policy, threadHandle, safeStrerror(error).data());
-    }
+        policy = SCHED_OTHER;
+    struct sched_param param = { };
+    error = pthread_setschedparam(threadHandle, policy | SCHED_RESET_ON_FORK, &param);
+    if (error)
+        LOG_ERROR("Failed to set sched policy %d for thread %ld: %s", policy, threadHandle, safeStrerror(error).data());
 #else
 #if !HAVE(QOS_CLASSES)
     UNUSED_PARAM(qos);
@@ -723,7 +721,9 @@ void Thread::yield()
     constexpr mach_msg_timeout_t timeoutInMS = 1;
     thread_switch(MACH_PORT_NULL, SWITCH_OPTION_DEPRESS, timeoutInMS);
 #else
-    sched_yield();
+    // This takes ~50us not 1ns, see PR_SET_TIMERSLACK.
+    struct timespec minimalSleep { 0, 1 };
+    nanosleep(&minimalSleep, nullptr);
 #endif
 }
 

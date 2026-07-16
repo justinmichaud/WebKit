@@ -21,7 +21,6 @@ list(APPEND WTF_SOURCES
     glib/URLGLib.cpp
 
     linux/CurrentProcessMemoryStatus.cpp
-    linux/RealTimeThreads.cpp
 
     posix/CPUTimePOSIX.cpp
     posix/FileHandlePOSIX.cpp
@@ -76,7 +75,6 @@ list(APPEND WTF_PUBLIC_HEADERS
 
     linux/CurrentProcessMemoryStatus.h
     linux/ProcessMemoryFootprint.h
-    linux/RealTimeThreads.h
 
     posix/SocketPOSIX.h
 

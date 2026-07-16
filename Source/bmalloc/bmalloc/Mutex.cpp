@@ -36,8 +36,18 @@
 #endif
 
 #include <thread>
+#include <time.h>
 
 namespace bmalloc {
+
+static inline void cpuPause()
+{
+#if BCPU(X86_64)
+    asm volatile("pause");
+#elif BCPU(ARM64)
+    asm volatile("isb");
+#endif
+}
 
 static inline void yield()
 {
@@ -50,7 +60,8 @@ static inline void yield()
     if (!SwitchToThread())
         Sleep(0);
 #else
-    sched_yield();
+    struct timespec minimalSleep { 0, 1 };
+    nanosleep(&minimalSleep, nullptr);
 #endif
 }
 
@@ -59,20 +70,31 @@ void Mutex::lockSlowCase()
     // The longest critical section in bmalloc is much shorter than the
     // time it takes to make a system call to yield to the OS scheduler.
     // So, we try again a lot before we yield.
-    static constexpr size_t aLot = 256;
-    
+    static constexpr size_t spinLimit = 256;
+#if BOS(DARWIN)
+    static constexpr size_t maxBackoff = 0; // Darwin uses thread_switch
+#else
+    static constexpr size_t maxBackoff = 256;
+#endif
+
     if (!m_isSpinning.exchange(true)) {
         auto clear = makeScopeExit([&] { m_isSpinning.store(false); });
 
-        for (size_t i = 0; i < aLot; ++i) {
+        for (size_t i = 0; i < spinLimit; ++i) {
             if (try_lock())
                 return;
         }
     }
 
-    // Avoid spinning pathologically.
-    while (!try_lock())
-        yield();
+    unsigned backoff = 1;
+    while (!try_lock()) {
+        if (backoff < maxBackoff) {
+            for (unsigned i = 0; i < backoff; ++i)
+                cpuPause();
+            backoff *= 2;
+        } else
+            yield();
+    }
 }
 
 } // namespace bmalloc

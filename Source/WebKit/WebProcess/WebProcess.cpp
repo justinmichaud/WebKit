@@ -236,10 +236,6 @@
 #include <WebCore/VP9UtilitiesCocoa.h>
 #endif
 
-#if OS(LINUX)
-#include <wtf/linux/RealTimeThreads.h>
-#endif
-
 #if ENABLE(CONTENT_FILTERING)
 #include "WebMockContentFilterManager.h"
 #endif
@@ -1056,10 +1052,6 @@ void WebProcess::createWebPage(PageIdentifier pageID, WebPageCreationParameters&
         disableTermination();
         updateCPULimit();
         updateIsBroadcastChannelEnabled();
-
-#if OS(LINUX)
-        RealTimeThreads::singleton().setEnabled(hasVisibleWebPage());
-#endif
     } else
         page->reinitializeWebPage(WTF::move(parameters));
 
@@ -1086,10 +1078,6 @@ void WebProcess::removeWebPage(PageIdentifier pageID)
     enableTermination();
     updateCPULimit();
     updateIsBroadcastChannelEnabled();
-
-#if OS(LINUX)
-    RealTimeThreads::singleton().setEnabled(hasVisibleWebPage());
-#endif
 }
 
 bool WebProcess::shouldTerminate()
@@ -1753,9 +1741,6 @@ void WebProcess::pageActivityStateDidChange(PageIdentifier, OptionSet<WebCore::A
 {
     if (changed & WebCore::ActivityState::IsVisible) {
         updateCPUMonitorState(CPUMonitorUpdateReason::VisibilityHasChanged);
-#if OS(LINUX)
-        RealTimeThreads::singleton().setEnabled(hasVisibleWebPage());
-#endif
     }
 }
 

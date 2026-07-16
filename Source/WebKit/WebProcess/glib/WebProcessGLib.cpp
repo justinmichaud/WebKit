@@ -82,10 +82,6 @@
 #include <malloc.h>
 #endif
 
-#if OS(LINUX)
-#include <wtf/linux/RealTimeThreads.h>
-#endif
-
 #if USE(ATSPI)
 #include <WebCore/AccessibilityAtspi.h>
 #endif
@@ -131,11 +127,6 @@ void WebProcess::platformSetCacheModel(CacheModel cacheModel)
 
 void WebProcess::platformInitializeProcess(const AuxiliaryProcessInitializationParameters&)
 {
-#if OS(LINUX)
-    // Disable RealTimeThreads in WebProcess initially, since it depends on having a visible web page.
-    RealTimeThreads::singleton().setEnabled(false);
-#endif
-
     addSupplementWithoutRefCountedCheck<SystemSettingsManager>();
 }
 

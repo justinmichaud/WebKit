@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2015-2019 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -102,18 +103,18 @@ void LockAlgorithm<LockType, isHeldBit, hasParkedBit, Hooks>::lockSlow(Atomic<Lo
     static constexpr unsigned spinLimit = 40;
     static constexpr unsigned nopCount = 16;
     static constexpr unsigned yieldInterval = 4;
-#else
+#elif OS(DARWIN)
     static constexpr unsigned spinLimit = 40;
-    // The tuning necessary to determine the optimal values
-    // for other platforms has not yet been done, so we
-    // retain the old sched-yield loop to avoid
-    // possible regressions.
     static constexpr unsigned nopCount = 0;
     static constexpr unsigned yieldInterval = 1;
+#else
+    static constexpr unsigned spinLimit = 40;
+    static constexpr unsigned maxBackoff = 256;
+    unsigned backoff = 1;
 #endif
-    
+
     unsigned spinCount = 0;
-    
+
     for (;;) {
         LockType currentValue = lock.load();
         
@@ -127,6 +128,7 @@ void LockAlgorithm<LockType, isHeldBit, hasParkedBit, Hooks>::lockSlow(Atomic<Lo
         // If there is nobody parked and we haven't spun too much, we can just try to spin around.
         if (!(currentValue & hasParkedBit) && spinCount < spinLimit) {
             spinCount++;
+#if OS(DARWIN)
             // It's important that we check this after incrementing,
             // as we want to avoid yielding for the first few spins.
             // This makes it more likely that we can acquire the lock
@@ -135,6 +137,12 @@ void LockAlgorithm<LockType, isHeldBit, hasParkedBit, Hooks>::lockSlow(Atomic<Lo
                 Thread::yield();
             for (unsigned i = 0; i < nopCount; i++)
                 simde_mm_pause();
+#else
+            for (unsigned i = 0; i < backoff; ++i)
+                simde_mm_pause();
+            if (backoff < maxBackoff)
+                backoff *= 2;
+#endif
             continue;
         }
 

@@ -55,7 +55,6 @@ list(APPEND WTF_PUBLIC_HEADERS
 
     linux/CurrentProcessMemoryStatus.h
     linux/ProcessMemoryFootprint.h
-    linux/RealTimeThreads.h
 
     posix/SocketPOSIX.h
 
@@ -66,7 +65,6 @@ if (CMAKE_SYSTEM_NAME MATCHES "Linux")
     list(APPEND WTF_SOURCES
         linux/CurrentProcessMemoryStatus.cpp
         linux/MemoryFootprintLinux.cpp
-        linux/RealTimeThreads.cpp
 
         unix/MemoryPressureHandlerUnix.cpp
     )

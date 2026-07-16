@@ -29,6 +29,7 @@
 #include <condition_variable>
 #include <mutex>
 #include <wtf/Threading.h>
+#include <wtf/simde/simde.h>
 
 namespace WTF {
 
@@ -62,6 +63,10 @@ struct ThreadData {
 NEVER_INLINE void WordLock::lockSlow()
 {
     unsigned spinCount = 0;
+#if !OS(DARWIN)
+    unsigned backoff = 1;
+    constexpr unsigned maxBackoff = 256;
+#endif
 
     // This magic number turns out to be optimal based on past JikesRVM experiments.
     const unsigned spinLimit = 40;
@@ -83,7 +88,14 @@ NEVER_INLINE void WordLock::lockSlow()
         // If there is no queue and we haven't spun too much, we can just try to spin around again.
         if (!(currentWordValue & ~queueHeadMask) && spinCount < spinLimit) {
             spinCount++;
+#if OS(DARWIN)
             Thread::yield();
+#else
+            for (unsigned i = 0; i < backoff; ++i)
+                simde_mm_pause();
+            if (backoff < maxBackoff)
+                backoff *= 2;
+#endif
             continue;
         }
 
