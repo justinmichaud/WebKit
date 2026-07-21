@@ -40,6 +40,8 @@ static constexpr double sweepTimeMultiplier = 1.0 / sweepTimeTotal;
 
 void IncrementalSweeper::scheduleTimer()
 {
+    if (Options::useFixedIntervalGCOnly()) [[unlikely]]
+        return;
     setTimeUntilFire(sweepTimeSlice * sweepTimeMultiplier);
 }
 
@@ -51,6 +53,9 @@ IncrementalSweeper::IncrementalSweeper(JSC::Heap* heap)
 
 void IncrementalSweeper::doWorkUntil(VM& vm, MonotonicTime deadline)
 {
+    if (Options::useFixedIntervalGCOnly()) [[unlikely]]
+        return;
+
     if (!m_currentDirectory)
         m_currentDirectory = vm.heap.objectSpace().firstDirectory();
 
@@ -60,6 +65,9 @@ void IncrementalSweeper::doWorkUntil(VM& vm, MonotonicTime deadline)
 
 void IncrementalSweeper::doWork(VM& vm)
 {
+    if (Options::useFixedIntervalGCOnly()) [[unlikely]]
+        return;
+
     if (m_lastOpportunisticTaskDidFinishSweeping) {
         m_lastOpportunisticTaskDidFinishSweeping = false;
         scheduleTimer();
@@ -128,6 +136,8 @@ bool IncrementalSweeper::sweepNextBlock(VM& vm, SweepTrigger trigger)
 
 void IncrementalSweeper::startSweeping(JSC::Heap& heap)
 {
+    if (Options::useFixedIntervalGCOnly()) [[unlikely]]
+        return;
     scheduleTimer();
     m_currentDirectory = heap.objectSpace().firstDirectory();
 }

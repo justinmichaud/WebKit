@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2011-2025 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -28,12 +29,14 @@
 
 #include "AlignedMemoryAllocator.h"
 #include "FreeListInlines.h"
+#include "HeapInlines.h"
 #include "JSCJSValueInlines.h"
 #include "MarkedBlockInlines.h"
 #include "SweepingScope.h"
 #include "VMManager.h"
 #include "WeakSetInlines.h"
 #include <wtf/CommaPrinter.h>
+#include <wtf/Scope.h>
 
 #if PLATFORM(COCOA)
 #include <wtf/cocoa/CrashReporter.h>
@@ -479,7 +482,25 @@ void MarkedBlock::Handle::sweep(FreeList* freeList)
     SweepMode sweepMode = freeList ? SweepToFreeList : SweepOnly;
     bool needsDestruction = m_attributes.destruction != DoesNotNeedDestruction && m_directory->isDestructible(this);
 
-    m_weakSet.sweep();
+    bool trackGCTime = Options::logGCTimeBreakdown();
+    MonotonicTime sweepBodyStart;
+    if (trackGCTime) [[unlikely]] {
+        // Weak handle finalization counts as Finalizers; the rest of the block sweep as Sweeping.
+        MonotonicTime weakSweepStart = MonotonicTime::now();
+        m_weakSet.sweep();
+        sweepBodyStart = MonotonicTime::now();
+        heap()->noteGCTimeBreakdown(GCTimeBreakdownPhase::Finalizers, sweepBodyStart - weakSweepStart);
+    } else
+        m_weakSet.sweep();
+
+    auto noteSweepTime = makeScopeExit([&] {
+        if (trackGCTime) [[unlikely]] {
+            Seconds duration = MonotonicTime::now() - sweepBodyStart;
+            heap()->noteGCTimeBreakdown(GCTimeBreakdownPhase::Sweeping, duration);
+            if (needsDestruction)
+                heap()->noteGCTimeBreakdown(GCTimeBreakdownPhase::DestructorSweeping, duration);
+        }
+    });
 
     // If we don't "release" our read access without locking then the ThreadSafetyAnalysis code gets upset with the locker below.
     m_directory->releaseAssertAcquiredBitVectorLock();

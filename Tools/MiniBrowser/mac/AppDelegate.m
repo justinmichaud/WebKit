@@ -311,7 +311,7 @@ static NSNumber *_currentBadge;
         configuration.preferences._allowsPictureInPictureMediaPlayback = YES;
         configuration.preferences._developerExtrasEnabled = YES;
         configuration.preferences._accessibilityIsolatedTreeEnabled = YES;
-        configuration.preferences._logsPageMessagesToSystemConsoleEnabled = YES;
+        configuration.preferences._logsPageMessagesToSystemConsoleEnabled = NO;
         configuration.preferences._pushAPIEnabled = YES;
         configuration.preferences._notificationsEnabled = YES;
         configuration.preferences._notificationEventEnabled = YES;

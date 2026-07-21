@@ -2,6 +2,7 @@
  *  Copyright (C) 1999-2000 Harri Porten (porten@kde.org)
  *  Copyright (C) 2001 Peter Kelly (pmk@post.com)
  *  Copyright (C) 2003-2026 Apple Inc. All rights reserved.
+ *  Copyright (C) 2026 Igalia S.L.
  *
  *  This library is free software; you can redistribute it and/or
  *  modify it under the terms of the GNU Lesser General Public
@@ -45,6 +46,8 @@
 #include <JavaScriptCore/SubspaceAccess.h>
 #include <JavaScriptCore/Synchronousness.h>
 #include <JavaScriptCore/WeakHandleOwner.h>
+#include <array>
+#include <atomic>
 #include <wtf/AutomaticThread.h>
 #include <wtf/Box.h>
 #include <wtf/ConcurrentPtrHashSet.h>
@@ -53,6 +56,7 @@
 #include <wtf/HashSet.h>
 #include <wtf/Lock.h>
 #include <wtf/Markable.h>
+#include <wtf/MonotonicTime.h>
 #include <wtf/NotFound.h>
 #include <wtf/ParallelHelperPool.h>
 #include <wtf/SegmentedVector.h>
@@ -82,6 +86,7 @@ class JITStubRoutineSet;
 class JSCell;
 class JSCellButterfly;
 class JSRopeString;
+class JSRunLoopTimer;
 class JSString;
 class JSValue;
 class MachineThreads;
@@ -105,6 +110,10 @@ struct CurrentThreadState;
 #ifdef JSC_GLIB_API_ENABLED
 class JSCGLibWrapperObject;
 #endif
+
+// Wall time accumulated per thread, so ParallelMarking can exceed the collection's wall time.
+// DestructorSweeping is the subset of Sweeping spent on blocks that run destructors.
+enum class GCTimeBreakdownPhase : uint8_t { ParallelMarking, Sweeping, DestructorSweeping, Finalizers };
 
 namespace DFG {
 class SpeculativeJIT;
@@ -421,8 +430,26 @@ public:
     JS_EXPORT_PRIVATE void collectNow(Synchronousness, GCRequest = GCRequest());
     
     JS_EXPORT_PRIVATE void collectNowFullIfNotDoneRecently(Synchronousness);
-    
+
     void collectIfNecessaryOrDefer(GCDeferralContext* = nullptr);
+
+    // The collection run by the useFixedIntervalGCOnly timer, which is exempt from that mode's
+    // blocking of all other collection requests.
+    void performFixedIntervalGC();
+
+    void noteGCTimeBreakdown(GCTimeBreakdownPhase phase, Seconds duration)
+    {
+        m_gcTimeBreakdownNS[static_cast<uint8_t>(phase)].fetch_add(static_cast<uint64_t>(duration.nanoseconds()), std::memory_order_relaxed);
+    }
+
+    // Records a samply text-marker span for a GC phase (JSC_useTextMarkers); spans are
+    // merged and written to the marker file at the end of the collection.
+    void recordGCPhaseMarker(GCTimeBreakdownPhase, MonotonicTime start, MonotonicTime end);
+
+    Seconds gcTimeBreakdown(GCTimeBreakdownPhase phase) const
+    {
+        return Seconds::fromNanoseconds(m_gcTimeBreakdownNS[static_cast<uint8_t>(phase)].load(std::memory_order_relaxed));
+    }
 
     void completeAllJITPlans();
     
@@ -801,6 +828,9 @@ private:
     void sweepAllLogicallyEmptyWeakBlocks();
     bool sweepNextLogicallyEmptyWeakBlock();
 
+    bool shouldBlockCollectionRequest() const;
+    void logGCTimeBreakdownTotals();
+
     bool shouldDoFullCollection();
 
     inline void incrementDeferralDepth();
@@ -944,6 +974,9 @@ private:
     RefPtr<GCActivityCallback> m_edenActivityCallback;
     const Ref<IncrementalSweeper> m_sweeper;
     const Ref<StopIfNecessaryTimer> m_stopIfNecessaryTimer;
+    RefPtr<JSRunLoopTimer> m_fixedIntervalGCTimer;
+    bool m_fixedIntervalGCInProgress { false };
+    std::array<std::atomic<uint64_t>, 4> m_gcTimeBreakdownNS { };
 
     Vector<HeapObserver*> m_observers;
     

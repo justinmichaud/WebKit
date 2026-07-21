@@ -248,6 +248,7 @@ void MarkedSpace::registerPreciseAllocation(PreciseAllocation* allocation, bool 
 
 void MarkedSpace::sweepPreciseAllocations()
 {
+    GCTimeBreakdownScope timeScope(heap(), GCTimeBreakdownPhase::Sweeping);
     RELEASE_ASSERT(m_preciseAllocationsNurseryOffset == m_preciseAllocations.size());
     unsigned srcIndex = m_preciseAllocationsNurseryOffsetForSweep;
     unsigned dstIndex = srcIndex;

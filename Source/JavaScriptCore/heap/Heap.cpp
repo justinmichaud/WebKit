@@ -1,6 +1,7 @@
 /*
  *  Copyright (C) 2003-2026 Apple Inc. All rights reserved.
  *  Copyright (C) 2007 Eric Seidel <eric@webkit.org>
+ *  Copyright (C) 2026 Igalia S.L.
  *
  *  This library is free software; you can redistribute it and/or
  *  modify it under the terms of the GNU Lesser General Public
@@ -42,6 +43,7 @@
 #include "GigacageAlignedMemoryAllocator.h"
 #include "HasOwnPropertyCache.h"
 #include "HeapHelperPool.h"
+#include "HeapInlines.h"
 #include "HeapIterationScope.h"
 #include "HeapProfiler.h"
 #include "HeapSnapshot.h"
@@ -79,6 +81,7 @@
 #include "NumberObject.h"
 #include "PinballCompletion.h"
 #include "PreventCollectionScope.h"
+#include "ProfilerSupport.h"
 #include "ProgramExecutable.h"
 #include "ProxyObject.h"
 #include "SamplingProfiler.h"
@@ -105,6 +108,7 @@
 #include <wtf/CryptographicallyRandomNumber.h>
 #include <wtf/ListDump.h>
 #include <wtf/MemoryFootprint.h>
+#include <wtf/NeverDestroyed.h>
 #include <wtf/RAMSize.h>
 #include <wtf/Scope.h>
 #include <wtf/SetForScope.h>
@@ -280,6 +284,25 @@ private:
 };
 
 } // anonymous namespace
+
+// In useFixedIntervalGCOnly mode, this timer runs the only collections that are allowed to happen.
+class FixedIntervalGCTimer final : public JSRunLoopTimer {
+public:
+    FixedIntervalGCTimer(VM& vm)
+        : JSRunLoopTimer(vm)
+    {
+    }
+
+    void doWork(VM& vm) final
+    {
+        if (vm.heap.isDeferred()) {
+            setTimeUntilFire(500_ms);
+            return;
+        }
+        vm.heap.performFixedIntervalGC();
+        setTimeUntilFire(Seconds::fromMilliseconds(Options::fixedIntervalGCPeriodMS()));
+    }
+};
 
 class Heap::HeapThread final : public AutomaticThread {
     WTF_MAKE_TZONE_ALLOCATED_INLINE(HeapThread);
@@ -783,6 +806,7 @@ void Heap::finalizeMarkedUnconditionalFinalizers(CellSet& cellSet, CollectionSco
 
 void Heap::finalizeUnconditionalFinalizers()
 {
+    GCTimeBreakdownScope timeScope(*this, GCTimeBreakdownPhase::Finalizers);
     CollectionScope collectionScope = this->collectionScope().value_or(CollectionScope::Full);
 
     {
@@ -1279,12 +1303,27 @@ void Heap::sweepSynchronously()
         dataLog("Full sweep: ", capacity() / 1024, "kb ");
         before = MonotonicTime::now();
     }
-    m_objectSpace.sweepBlocks();
-    m_objectSpace.shrink();
+    {
+        GCMarkerScope markerScope(*this, GCTimeBreakdownPhase::Sweeping);
+        m_objectSpace.sweepBlocks();
+    }
+    {
+        GCTimeBreakdownScope timeScope(*this, GCTimeBreakdownPhase::Sweeping);
+        m_objectSpace.shrink();
+    }
     if (Options::logGC()) [[unlikely]] {
         MonotonicTime after = MonotonicTime::now();
         dataLog("=> ", capacity() / 1024, "kb, ", (after - before).milliseconds(), "ms");
     }
+}
+
+// In useFixedIntervalGCOnly mode, every collection request is dropped unless it comes from the
+// fixed-interval timer itself.
+ALWAYS_INLINE bool Heap::shouldBlockCollectionRequest() const
+{
+    if (!Options::useFixedIntervalGCOnly()) [[likely]]
+        return false;
+    return !m_fixedIntervalGCInProgress;
 }
 
 void Heap::collect(Synchronousness synchronousness, GCRequest request)
@@ -1304,9 +1343,76 @@ void Heap::collect(Synchronousness synchronousness, GCRequest request)
     RELEASE_ASSERT_NOT_REACHED();
 }
 
+namespace {
+
+// Parallel marking calls drain() thousands of times per GC. Emitting a marker per
+// call floods the file, so buffer the per-phase spans and, at end of collection,
+// write only their merged intervals; consumers only need the union of times per phase.
+class GCPhaseMarkerAccumulator {
+    WTF_MAKE_NONCOPYABLE(GCPhaseMarkerAccumulator);
+public:
+    GCPhaseMarkerAccumulator() = default;
+
+    static GCPhaseMarkerAccumulator& singleton()
+    {
+        static NeverDestroyed<GCPhaseMarkerAccumulator> instance;
+        return instance.get();
+    }
+
+    void add(GCTimeBreakdownPhase phase, MonotonicTime start, MonotonicTime end)
+    {
+        Locker locker { m_lock };
+        m_pending[static_cast<uint8_t>(phase)].append({ start, end });
+    }
+
+    void flush()
+    {
+        static constexpr std::array<ASCIILiteral, 4> names { {
+            "GC ParallelMarking"_s,
+            "GC Sweeping"_s,
+            "GC DestructorSweeping"_s,
+            "GC Finalizers"_s,
+        } };
+        // Merge spans separated by less than this, so back-to-back marking increments
+        // collapse into one span (a gap this small holds ~0 samples at typical rates).
+        constexpr Seconds mergeTolerance = 500_us;
+
+        Locker locker { m_lock };
+        for (uint8_t phase = 0; phase < m_pending.size(); ++phase) {
+            auto& spans = m_pending[phase];
+            if (spans.isEmpty())
+                continue;
+            std::sort(spans.begin(), spans.end(), [](auto& a, auto& b) { return a.first < b.first; });
+            auto name = CString(names[phase].characters());
+            MonotonicTime runStart = spans[0].first;
+            MonotonicTime runEnd = spans[0].second;
+            for (size_t i = 1; i < spans.size(); ++i) {
+                if (spans[i].first <= runEnd + mergeTolerance)
+                    runEnd = std::max(runEnd, spans[i].second);
+                else {
+                    ProfilerSupport::markInterval(this, ProfilerSupport::Category::JSGlobalObjectSignpost, runStart, runEnd, CString(name));
+                    runStart = spans[i].first;
+                    runEnd = spans[i].second;
+                }
+            }
+            ProfilerSupport::markInterval(this, ProfilerSupport::Category::JSGlobalObjectSignpost, runStart, runEnd, CString(name));
+            spans.clear();
+        }
+    }
+
+private:
+    Lock m_lock;
+    std::array<Vector<std::pair<MonotonicTime, MonotonicTime>>, 4> m_pending WTF_GUARDED_BY_LOCK(m_lock);
+};
+
+} // namespace
+
 void Heap::collectNow(Synchronousness synchronousness, GCRequest request)
 {
     if (!Options::useGC()) [[unlikely]]
+        return;
+
+    if (shouldBlockCollectionRequest()) [[unlikely]]
         return;
 
     if constexpr (validateDFGDoesGC)
@@ -1333,16 +1439,76 @@ void Heap::collectNow(Synchronousness synchronousness, GCRequest request)
             dataLogIf(Options::logGC(), "]\n");
         }
         m_objectSpace.assertNoUnswept();
-        
+
         sweepAllLogicallyEmptyWeakBlocks();
+
+        // All phases of this collection (marking, sweeping, finalizers) are done, so
+        // write out the merged per-phase text-marker spans.
+        if (Options::useTextMarkers()) [[unlikely]]
+            GCPhaseMarkerAccumulator::singleton().flush();
         return;
     } }
     RELEASE_ASSERT_NOT_REACHED();
 }
 
+void Heap::performFixedIntervalGC()
+{
+    ASSERT(Options::useFixedIntervalGCOnly());
+    if (!m_isSafeToCollect)
+        return;
+
+    // Markers (JSC_useTextMarkers) are the default diagnostic. The per-phase time
+    // breakdown and its logging are opt-in via logGCTimeBreakdown, since the per-block
+    // timing it needs is heavy enough to distort the sweep profile.
+    if (!Options::logGCTimeBreakdown()) [[likely]] {
+        SetForScope allowCollection(m_fixedIntervalGCInProgress, true);
+        collectNow(Sync, CollectionScope::Full);
+        return;
+    }
+
+    std::array<Seconds, 4> timesBefore;
+    for (size_t i = 0; i < timesBefore.size(); ++i)
+        timesBefore[i] = gcTimeBreakdown(static_cast<GCTimeBreakdownPhase>(i));
+
+    MonotonicTime before = MonotonicTime::now();
+    {
+        SetForScope allowCollection(m_fixedIntervalGCInProgress, true);
+        collectNow(Sync, CollectionScope::Full);
+    }
+    Seconds wall = MonotonicTime::now() - before;
+
+    auto deltaMS = [&](GCTimeBreakdownPhase phase) -> double {
+        return (gcTimeBreakdown(phase) - timesBefore[static_cast<uint8_t>(phase)]).milliseconds();
+    };
+    dataLogLn("[GC<", RawPointer(this), ">: fixed-interval full GC wall ", wall.milliseconds(),
+        "ms, parallel marking ", deltaMS(GCTimeBreakdownPhase::ParallelMarking),
+        "ms, sweeping ", deltaMS(GCTimeBreakdownPhase::Sweeping),
+        "ms (destructor blocks ", deltaMS(GCTimeBreakdownPhase::DestructorSweeping),
+        "ms), finalizers ", deltaMS(GCTimeBreakdownPhase::Finalizers), "ms]");
+    logGCTimeBreakdownTotals();
+}
+
+void Heap::logGCTimeBreakdownTotals()
+{
+    dataLogLn("[GC<", RawPointer(this), ">: total parallel marking ", gcTimeBreakdown(GCTimeBreakdownPhase::ParallelMarking).milliseconds(),
+        "ms, sweeping ", gcTimeBreakdown(GCTimeBreakdownPhase::Sweeping).milliseconds(),
+        "ms (destructor blocks ", gcTimeBreakdown(GCTimeBreakdownPhase::DestructorSweeping).milliseconds(),
+        "ms), finalizers ", gcTimeBreakdown(GCTimeBreakdownPhase::Finalizers).milliseconds(), "ms]");
+}
+
+void Heap::recordGCPhaseMarker(GCTimeBreakdownPhase phase, MonotonicTime start, MonotonicTime end)
+{
+    if (!Options::useTextMarkers()) [[likely]]
+        return;
+    GCPhaseMarkerAccumulator::singleton().add(phase, start, end);
+}
+
 void Heap::collectAsync(GCRequest request)
 {
     if (!Options::useGC()) [[unlikely]]
+        return;
+
+    if (shouldBlockCollectionRequest()) [[unlikely]]
         return;
 
     if constexpr (validateDFGDoesGC)
@@ -1370,6 +1536,9 @@ void Heap::collectAsync(GCRequest request)
 void Heap::collectSync(GCRequest request)
 {
     if (!Options::useGC()) [[unlikely]]
+        return;
+
+    if (shouldBlockCollectionRequest()) [[unlikely]]
         return;
 
     if constexpr (validateDFGDoesGC)
@@ -1642,7 +1811,11 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
             
         // Wondering what this does? Look at Heap::addCoreConstraints(). The DOM and others can also
         // add their own using Heap::addMarkingConstraint().
-        bool converged = m_constraintSet->executeConvergence(visitor);
+        bool converged;
+        {
+            GCTimeBreakdownScope timeScope(*this, GCTimeBreakdownPhase::ParallelMarking);
+            converged = m_constraintSet->executeConvergence(visitor);
+        }
         
         // FIXME: The visitor.isEmpty() check is most likely not needed.
         // https://bugs.webkit.org/show_bug.cgi?id=180310
@@ -1830,6 +2003,8 @@ NEVER_INLINE bool Heap::runEndPhase(GCConductor conn)
     ParkingLot::unparkAll(&m_worldState);
 
     dataLogLnIf(Options::logGC(), "GC END!");
+    if (Options::logGCTimeBreakdown() && !Options::useFixedIntervalGCOnly()) [[unlikely]]
+        logGCTimeBreakdownTotals();
     if (Options::useGCSignpost()) [[unlikely]] {
         WTFEndSignpost(this, JSCGarbageCollector, "%" PUBLIC_LOG_STRING, m_signpostMessage.data() ? m_signpostMessage.data() : "(nullptr)");
         m_signpostMessage = { };
@@ -2479,6 +2654,7 @@ void Heap::cancelDeferredWorkIfNeeded()
 
 void Heap::reapWeakHandles()
 {
+    GCTimeBreakdownScope timeScope(*this, GCTimeBreakdownPhase::Finalizers);
     m_objectSpace.reapWeakSets();
 }
 
@@ -2783,6 +2959,8 @@ bool Heap::sweepNextLogicallyEmptyWeakBlock()
     if (m_indexOfNextLogicallyEmptyWeakBlockToSweep == WTF::notFound)
         return false;
 
+    GCTimeBreakdownScope timeScope(*this, GCTimeBreakdownPhase::Finalizers);
+
     WeakBlock* block = m_logicallyEmptyWeakBlocks[m_indexOfNextLogicallyEmptyWeakBlockToSweep];
     RELEASE_ASSERT(!block->next() && !block->prev());
 
@@ -2912,7 +3090,10 @@ void Heap::collectIfNecessaryOrDefer(GCDeferralContext* deferralContext)
         else
             stopIfNecessary();
     }
-    
+
+    if (shouldBlockCollectionRequest()) [[unlikely]]
+        return;
+
     auto shouldRequestGC = [&] () -> bool {
         bool logRequestGC = false;
         // Don't log if we already have a request pending or if we have to come back later so we don't flood dataFile.
@@ -3280,9 +3461,14 @@ void Heap::notifyIsSafeToCollect()
     }
     
     addCoreConstraints();
-    
+
     m_isSafeToCollect = true;
-    
+
+    if (Options::useFixedIntervalGCOnly()) [[unlikely]] {
+        m_fixedIntervalGCTimer = adoptRef(*new FixedIntervalGCTimer(vm()));
+        m_fixedIntervalGCTimer->setTimeUntilFire(Seconds::fromMilliseconds(Options::fixedIntervalGCPeriodMS()));
+    }
+
     if (Options::collectContinuously()) {
         m_collectContinuouslyThread = Thread::create(
             "JSC DEBUG Continuous GC"_s,

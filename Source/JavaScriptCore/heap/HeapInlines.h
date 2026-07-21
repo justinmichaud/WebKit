@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2014-2022 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -30,10 +31,12 @@
 #include <JavaScriptCore/HeapCellInlines.h>
 #include <JavaScriptCore/IndexingHeader.h>
 #include <JavaScriptCore/JSCast.h>
+#include <JavaScriptCore/Options.h>
 #include <JavaScriptCore/Structure.h>
 #include <type_traits>
 #include <wtf/Assertions.h>
 #include <wtf/MainThread.h>
+#include <wtf/MonotonicTime.h>
 
 namespace JSC {
 
@@ -232,6 +235,58 @@ void Heap::forEachSlotVisitor(const Func& func)
     for (auto& visitor : m_parallelSlotVisitors)
         func(*visitor);
 }
+
+class GCTimeBreakdownScope {
+    WTF_MAKE_NONCOPYABLE(GCTimeBreakdownScope);
+public:
+    ALWAYS_INLINE GCTimeBreakdownScope(JSC::Heap& heap, GCTimeBreakdownPhase phase)
+        : m_heap(heap)
+        , m_phase(phase)
+    {
+        if (Options::logGCTimeBreakdown() || Options::useTextMarkers()) [[unlikely]]
+            m_start = MonotonicTime::now();
+    }
+
+    ALWAYS_INLINE ~GCTimeBreakdownScope()
+    {
+        if (Options::logGCTimeBreakdown() || Options::useTextMarkers()) [[unlikely]] {
+            MonotonicTime end = MonotonicTime::now();
+            if (Options::logGCTimeBreakdown())
+                m_heap.noteGCTimeBreakdown(m_phase, end - m_start);
+            m_heap.recordGCPhaseMarker(m_phase, m_start, end);
+        }
+    }
+
+private:
+    JSC::Heap& m_heap;
+    GCTimeBreakdownPhase m_phase;
+    MonotonicTime m_start;
+};
+
+// Emits a text-marker span for one GC phase without touching the breakdown
+// counters, for phases counted per-block elsewhere (e.g. the block sweep loop).
+class GCMarkerScope {
+    WTF_MAKE_NONCOPYABLE(GCMarkerScope);
+public:
+    ALWAYS_INLINE GCMarkerScope(JSC::Heap& heap, GCTimeBreakdownPhase phase)
+        : m_heap(heap)
+        , m_phase(phase)
+    {
+        if (Options::useTextMarkers()) [[unlikely]]
+            m_start = MonotonicTime::now();
+    }
+
+    ALWAYS_INLINE ~GCMarkerScope()
+    {
+        if (Options::useTextMarkers()) [[unlikely]]
+            m_heap.recordGCPhaseMarker(m_phase, m_start, MonotonicTime::now());
+    }
+
+private:
+    JSC::Heap& m_heap;
+    GCTimeBreakdownPhase m_phase;
+    MonotonicTime m_start;
+};
 
 namespace GCClient {
 

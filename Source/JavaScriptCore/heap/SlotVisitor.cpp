@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2012-2023 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -31,6 +32,7 @@
 #include "GCSegmentedArrayInlines.h"
 #include "HeapAnalyzer.h"
 #include "HeapCellInlines.h"
+#include "HeapInlines.h"
 #include "HeapProfiler.h"
 #include "IntegrityInlines.h"
 #include "JSArray.h"
@@ -492,7 +494,8 @@ NEVER_INLINE void SlotVisitor::drain(MonotonicTime timeout)
         dataLog("FATAL: attempting to drain when not in parallel mode.\n");
         RELEASE_ASSERT_NOT_REACHED();
     }
-    
+
+    GCTimeBreakdownScope timeScope(m_heap, GCTimeBreakdownPhase::ParallelMarking);
     Locker locker { m_rightToRun };
     
     while (!hasElapsed(timeout)) {
@@ -539,6 +542,7 @@ size_t SlotVisitor::performIncrementOfDraining(size_t bytesRequested)
 {
     RELEASE_ASSERT(m_isInParallelMode);
 
+    GCTimeBreakdownScope timeScope(m_heap, GCTimeBreakdownPhase::ParallelMarking);
     size_t cellsRequested = bytesRequested / MarkedBlock::atomSize;
     {
         Locker locker { m_heap.m_markingMutex };
@@ -700,8 +704,11 @@ NEVER_INLINE SlotVisitor::SharedDrainResult SlotVisitor::drainFromShared(SharedD
         }
         
         if (bonusTask) {
-            bonusTask->run(*this);
-            
+            {
+                GCTimeBreakdownScope timeScope(m_heap, GCTimeBreakdownPhase::ParallelMarking);
+                bonusTask->run(*this);
+            }
+
             // The main thread could still be running, and may run for a while. Unless we clear the task
             // ourselves, we will keep looping around trying to run the task.
             {

@@ -55,7 +55,11 @@ void GCActivityCallback::doWork(VM& vm)
 {
     if (!isEnabled())
         return;
-    
+
+    // JSC_useFixedIntervalGCOnly=1 __XPC_JSC_useFixedIntervalGCOnly=1 Tools/Scripts/run-minibrowser --release "http://localhost:8080"
+    if (Options::useFixedIntervalGCOnly()) [[unlikely]]
+        return;
+
     ASSERT(vm.currentThreadIsHoldingAPILock());
     JSC::Heap& heap = vm.heap;
     if (heap.isDeferred()) {

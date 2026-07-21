@@ -5065,7 +5065,7 @@ LogsPageMessagesToSystemConsoleEnabled:
   type: bool
   status: internal
   category: dom
-  defaultsOverridable: true
+  defaultsOverridable: false
   humanReadableName: "Log page messages to system console"
   humanReadableDescription: "Enable logging page messages to system console"
   defaultValue:
