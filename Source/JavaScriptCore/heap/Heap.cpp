@@ -1917,9 +1917,14 @@ NEVER_INLINE bool Heap::runEndPhase(GCConductor conn)
         m_markingConditionVariable.notifyAll();
     }
     m_helperClient.finish();
-    
+
     ASSERT(m_mutatorMarkStack->isEmpty());
     ASSERT(m_raceMarkStack->isEmpty());
+
+    // Cover the whole post-marking end phase under Finalizers so the marker union spans all GC
+    // time. Helpers have stopped (finish() above), so this never overlaps a ParallelMarking span;
+    // the accumulator merges same-phase spans, so the inner Finalizers scopes below don't double count.
+    GCMarkerScope endPhaseMarkerScope(*this, GCTimeBreakdownPhase::Finalizers);
 
     SlotVisitor& visitor = *m_collectorSlotVisitor;
     iterateExecutingAndCompilingCodeBlocks(visitor,
