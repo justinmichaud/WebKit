@@ -70,10 +70,15 @@ protected:
     // Returns true if the pointer should be freed.
     bool weakDerefBase() const
     {
+        // The weak count outlives the destructor, so reading it here from the
+        // derefSlowCase() path (which has already run ~T()) is intentional; GCC
+        // misreads that as an uninitialized access.
+        IGNORE_GCC_WARNINGS_BEGIN("uninitialized")
         if (m_weakCount != 1) {
             --m_weakCount;
             return false;
         }
+        IGNORE_GCC_WARNINGS_END
 
         return true;
     }
