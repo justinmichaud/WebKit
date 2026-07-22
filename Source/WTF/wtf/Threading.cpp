@@ -151,10 +151,12 @@ uint32_t ThreadLike::currentSequence()
 
 struct Thread::NewThreadContext : public ThreadSafeRefCounted<NewThreadContext> {
 public:
-    NewThreadContext(ASCIILiteral name, Function<void()>&& entryPoint, Ref<Thread>&& thread)
+    NewThreadContext(ASCIILiteral name, Function<void()>&& entryPoint, Ref<Thread>&& thread, Thread::QOS qos, ThreadType threadType)
         : name(name)
         , entryPoint(WTF::move(entryPoint))
         , thread(WTF::move(thread))
+        , qos(qos)
+        , threadType(threadType)
     {
     }
 
@@ -163,6 +165,8 @@ public:
     ASCIILiteral name;
     Function<void()> entryPoint;
     Ref<Thread> thread;
+    Thread::QOS qos;
+    ThreadType threadType;
     Mutex mutex;
 
 #if !HAVE(STACK_BOUNDS_FOR_NEW_THREAD)
@@ -242,6 +246,9 @@ void Thread::entryPoint(NewThreadContext* newThreadContext)
 #endif
 
         Thread::initializeCurrentThreadInternal(context->name);
+#if OS(LINUX)
+        Thread::applyThreadQOS(context->qos, context->threadType);
+#endif
         function = WTF::move(context->entryPoint);
 
         Ref thread = WTF::move(context->thread);
@@ -266,7 +273,7 @@ Ref<Thread> Thread::create(ASCIILiteral name, Function<void()>&& entryPoint, Thr
 
     Ref thread = adoptRef(*new Thread(schedulingPolicy, Thread::IsMain::No));
 
-    Ref context = adoptRef(*new NewThreadContext { name, WTF::move(entryPoint), thread.get() });
+    Ref context = adoptRef(*new NewThreadContext { name, WTF::move(entryPoint), thread.get(), qos, threadType });
     {
         MutexLocker locker(context->mutex);
         context->ref(); // Adopted by Thread::entryPoint

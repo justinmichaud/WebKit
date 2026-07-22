@@ -33,6 +33,7 @@
 #include <wtf/SharedTask.h>
 #include <wtf/TZoneMalloc.h>
 #include <wtf/ThreadSafeRefCounted.h>
+#include <wtf/ThreadingEnums.h>
 #include <wtf/Vector.h>
 #include <wtf/WeakRandom.h>
 #include <wtf/text/CString.h>
@@ -69,7 +70,7 @@ class ParallelHelperPool final : public ThreadSafeRefCounted<ParallelHelperPool>
     WTF_MAKE_TZONE_ALLOCATED(ParallelHelperPool);
     WTF_OVERRIDE_DELETE_FOR_CHECKED_PTR(ParallelHelperPool);
 public:
-    WTF_EXPORT_PRIVATE static Ref<ParallelHelperPool> create(ASCIILiteral threadName);
+    WTF_EXPORT_PRIVATE static Ref<ParallelHelperPool> create(ASCIILiteral threadName, ThreadType = ThreadType::Unknown);
     WTF_EXPORT_PRIVATE ~ParallelHelperPool();
 
     WTF_EXPORT_PRIVATE void ensureThreads(unsigned numThreads);
@@ -79,7 +80,7 @@ public:
     WTF_EXPORT_PRIVATE void doSomeHelping();
 
 private:
-    explicit ParallelHelperPool(ASCIILiteral threadName);
+    ParallelHelperPool(ASCIILiteral threadName, ThreadType);
 
     friend class ParallelHelperClient;
     class Thread;
@@ -99,6 +100,7 @@ private:
     Vector<ParallelHelperClient*> m_clients WTF_GUARDED_BY_LOCK(*m_lock);
     Vector<RefPtr<AutomaticThread>> m_threads;
     ASCIILiteral m_threadName;
+    ThreadType m_threadType;
     unsigned m_numThreads { 0 }; // This can be larger than m_threads.size() because we start threads only once there is work.
     bool m_isDying { false };
 };

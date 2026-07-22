@@ -124,15 +124,16 @@ void ParallelHelperClient::runTask(const RefPtr<SharedTask<void ()>>& task)
     }
 }
 
-Ref<ParallelHelperPool> ParallelHelperPool::create(ASCIILiteral threadName)
+Ref<ParallelHelperPool> ParallelHelperPool::create(ASCIILiteral threadName, ThreadType threadType)
 {
-    return adoptRef(*new ParallelHelperPool(threadName));
+    return adoptRef(*new ParallelHelperPool(threadName, threadType));
 }
 
-ParallelHelperPool::ParallelHelperPool(ASCIILiteral threadName)
+ParallelHelperPool::ParallelHelperPool(ASCIILiteral threadName, ThreadType threadType)
     : m_lock(Box<Lock>::create())
     , m_workAvailableCondition(AutomaticThreadCondition::create())
     , m_threadName(threadName)
+    , m_threadType(threadType)
 {
 }
 
@@ -181,7 +182,7 @@ class ParallelHelperPool::Thread final : public AutomaticThread {
     WTF_OVERRIDE_DELETE_FOR_CHECKED_PTR(Thread);
 public:
     Thread(const AbstractLocker& locker, ParallelHelperPool& pool)
-        : AutomaticThread(locker, pool.m_lock, pool.m_workAvailableCondition.copyRef())
+        : AutomaticThread(locker, pool.m_lock, pool.m_workAvailableCondition.copyRef(), pool.m_threadType)
         , m_pool(pool)
     {
     }

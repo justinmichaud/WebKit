@@ -50,6 +50,7 @@
 #if OS(LINUX)
 #include <sched.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/syscall.h>
 #ifndef SCHED_RESET_ON_FORK
 #define SCHED_RESET_ON_FORK 0x40000000
@@ -298,6 +299,78 @@ static int schedPolicy(Thread::QOS qos, Thread::SchedulingPolicy schedulingPolic
         return SCHED_IDLE;
     }
     RELEASE_ASSERT_NOT_REACHED();
+}
+
+// Linux has no notion of QOS classes, so we approximate them with the nice
+// level (in addition to the scheduling policy chosen in schedPolicy()). We only
+// ever lower the priority (nice >= 0) so this works without CAP_SYS_NICE and for
+// sandboxed processes; the interactive classes stay at the default of 0.
+static int niceLevelForQOS(Thread::QOS qos)
+{
+    switch (qos) {
+    case Thread::QOS::UserInteractive:
+    case Thread::QOS::UserInitiated:
+    case Thread::QOS::Default:
+        return 0;
+    case Thread::QOS::Utility:
+        return 10;
+    case Thread::QOS::Background:
+        return 19;
+    }
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+// Valid nice range on Linux is [-20, 19] (PRIO_MAX is exclusive).
+static constexpr int minNiceLevel = -20;
+static constexpr int maxNiceLevel = 19;
+
+// Parse a nice level from an environment variable, used to override the per-role
+// defaults below for per-device tuning. Returns std::nullopt if the variable is
+// unset or malformed; parsed values are clamped to the valid nice range.
+static std::optional<int> niceLevelFromEnvironment(const char* name)
+{
+    const char* value = getenv(name);
+    if (!value || !value[0])
+        return std::nullopt;
+    char* end = nullptr;
+    long parsed = strtol(value, &end, 10);
+    if (end == value || *end)
+        return std::nullopt;
+    return std::clamp<int>(parsed, minNiceLevel, maxNiceLevel);
+}
+
+// Helper threads that do off-main-thread work are deprioritized relative to the
+// main thread, so that on core-constrained devices the main thread stays
+// responsive instead of being preempted by background work. Compiler (JIT)
+// threads can be deprioritized aggressively at no measured throughput cost; GC
+// marker threads are more latency sensitive, so they use a gentler default. These
+// values were tuned on 2-core hardware and can be overridden per-device via the
+// environment variables below. (The WTF_ prefix is intentional: JSC's option
+// parser claims every JSC_-prefixed variable.)
+static constexpr int defaultCompilerThreadNice = 19;
+static constexpr int defaultGCMarkerThreadNice = 10;
+
+static std::optional<int> niceLevelForThreadType(ThreadType threadType)
+{
+    switch (threadType) {
+    case ThreadType::Compiler:
+        return niceLevelFromEnvironment("WTF_JIT_THREAD_NICE").value_or(defaultCompilerThreadNice);
+    case ThreadType::GarbageCollection:
+        return niceLevelFromEnvironment("WTF_GC_THREAD_NICE").value_or(defaultGCMarkerThreadNice);
+    default:
+        return std::nullopt;
+    }
+}
+
+void Thread::applyThreadQOS(QOS qos, ThreadType threadType)
+{
+    // A per-role deprioritization takes precedence; otherwise fall back to the
+    // QOS-derived level. On Linux the nice level is per-thread and who == 0
+    // targets the calling thread (there is no pthread_t-based API), so each thread
+    // sets its own level as it starts up.
+    int niceLevel = niceLevelForThreadType(threadType).value_or(niceLevelForQOS(qos));
+    if (setpriority(PRIO_PROCESS, 0, niceLevel))
+        LOG_ERROR("Failed to set nice level %d for thread: %s", niceLevel, safeStrerror(errno).data());
 }
 #endif
 

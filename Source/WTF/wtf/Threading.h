@@ -307,6 +307,15 @@ protected:
     // Internal platform-specific Thread establishment implementation.
     bool establishHandle(NewThreadContext&, StackAllocationSpecification, QOS, SchedulingPolicy);
 
+#if OS(LINUX)
+    // Applies the QOS to the calling thread by setting its nice level. Must be
+    // called from within the thread itself (see ThreadingPOSIX.cpp). The thread
+    // type selects a per-role nice default (e.g. deprioritized compiler/GC helper
+    // threads), overridable via the WTF_JIT_THREAD_NICE / WTF_GC_THREAD_NICE
+    // environment variables for per-device tuning.
+    static void applyThreadQOS(QOS, ThreadType);
+#endif
+
 #if USE(PTHREADS)
     void establishPlatformSpecificHandle(PlatformThreadHandle);
 #else

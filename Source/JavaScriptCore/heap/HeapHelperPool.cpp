@@ -44,7 +44,7 @@ ParallelHelperPool& heapHelperPool()
 #else
             constexpr auto threadName = "Heap Helper Thread"_s;
 #endif
-            Ref pool = ParallelHelperPool::create(threadName);
+            Ref pool = ParallelHelperPool::create(threadName, ThreadType::GarbageCollection);
             pool->ensureThreads(Options::numberOfGCMarkers() - 1);
             helperPool.construct(WTF::move(pool));
         });
