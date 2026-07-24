@@ -3719,6 +3719,10 @@ void SpeculativeJIT::compile(Node* node)
         compileMakeRope(node);
         break;
 
+    case StringBuilderStrCatMany:
+        compileStringBuilderStrCatMany(node);
+        break;
+
     case MakeAtomString:
         compileMakeAtomString(node);
         break;

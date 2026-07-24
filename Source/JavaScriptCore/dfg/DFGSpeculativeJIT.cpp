@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2011-2025 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -15631,6 +15632,182 @@ void SpeculativeJIT::compileStrCat(Node* node)
     cellResult(result.gpr(), node);
 }
 
+void SpeculativeJIT::compileStringBuilderStrCatMany(Node* node)
+{
+    unsigned count = node->numChildren();
+    ASSERT(count >= 3);
+    unsigned numPieces = count - 1;
+    size_t scratchSize = sizeof(EncodedJSValue) * count;
+    ScratchBuffer* scratchBuffer = vm().scratchBufferForSize(scratchSize);
+    EncodedJSValue* buffer = static_cast<EncodedJSValue*>(scratchBuffer->dataBuffer());
+
+    // Marshal every operand to the scratch buffer: buffer[0] is the accumulator, buffer[1..] the
+    // pieces. Both the inline fast path and the slow-path C call read the operands only from here, so
+    // the accumulator is never held in a manually allocated register across the JS loop back-edge.
+    for (unsigned i = 0; i < count; ++i) {
+        JSValueOperand input(this, m_graph.m_varArgChildren[node->firstChild() + i], ManualOperandSpeculation);
+        storeValue(input.jsValueRegs(), &buffer[i]);
+    }
+
+#if CPU(ADDRESS64)
+    // A numeric operand was lowered to an inline ToString whose result is a string, and string
+    // literals are constants, so those provably a string skip the runtime isCell/isString check that
+    // otherwise routes an operand to the slow path.
+    Vector<bool, 16> provenString(count);
+    for (unsigned i = 0; i < count; ++i) {
+        SpeculatedType type = m_state.forNode(m_graph.varArgChild(node, i)).m_type;
+        provenString[i] = type && !(type & ~SpecString);
+    }
+
+    GPRTemporary result(this);
+    GPRTemporary bufferBase(this);
+    GPRTemporary acc(this);
+    GPRTemporary piece(this);
+    GPRTemporary chunk(this);
+    GPRTemporary countTmp(this);
+    GPRTemporary lengthAcc(this);
+    GPRTemporary flagsAcc(this);
+    GPRTemporary scratch(this);
+    GPRTemporary scratch2(this);
+    GPRReg resultGPR = result.gpr();
+    GPRReg bufferGPR = bufferBase.gpr();
+    GPRReg accGPR = acc.gpr();
+    GPRReg pieceGPR = piece.gpr();
+    GPRReg chunkGPR = chunk.gpr();
+    GPRReg countGPR = countTmp.gpr();
+    GPRReg lengthGPR = lengthAcc.gpr();
+    GPRReg flagsGPR = flagsAcc.gpr();
+    GPRReg scratchGPR = scratch.gpr();
+    GPRReg scratch2GPR = scratch2.gpr();
+
+    // Publish the buffer's active length so the GC scans the operands (and the coerced strings the
+    // slow-path ToString stores back) across the C call. The inline fast path never allocates, so the
+    // published range only spans a valid marshalled buffer there and is harmless.
+    move(TrustedImmPtr(scratchBuffer->addressOfActiveLength()), scratchGPR);
+    storePtr(TrustedImmPtr(reinterpret_cast<void*>(scratchSize)), Address(scratchGPR));
+
+    move(TrustedImmPtr(buffer), bufferGPR);
+
+    // Inline fast path: when the accumulator is already a native builder and its tail chunk has room
+    // for all pieces and every piece is a string, append the piece pointers in place (a few stores,
+    // no C call). Any miss falls to operationStringBuilderStrCatMany, which creates/promotes/grows and
+    // coerces from the same already-marshalled buffer.
+    JumpList slowCases;
+
+    load64(Address(bufferGPR, 0 * sizeof(EncodedJSValue)), accGPR);
+    if (!provenString[0]) {
+        slowCases.append(branchIfNotCell(JSValueRegs(accGPR)));
+        slowCases.append(branchIfNotString(accGPR));
+    }
+
+    // A builder is always >= stringBuilderPromoteLength(): promotion creates it at the threshold and
+    // it only grows, so a shorter accumulator cannot be a builder. Gate on length first and skip the
+    // marker load when the accumulator is too short to be a builder.
+    loadPtr(Address(accGPR, JSString::offsetOfValue()), scratch2GPR);
+    Jump accLenIsRope = branchIfRopeStringImpl(scratch2GPR);
+    load32(Address(scratch2GPR, StringImpl::lengthMemoryOffset()), lengthGPR);
+    Jump haveAccLen = jump();
+    accLenIsRope.link(this);
+    load32(Address(accGPR, JSRopeString::offsetOfLength()), lengthGPR);
+    haveAccLen.link(this);
+    slowCases.append(branch32(Below, lengthGPR, TrustedImm32(JSRopeString::stringBuilderPromoteLength())));
+
+    // Builder? (m_fiber & stringMask) == marker. A flat string or partial rope never matches.
+    loadPtr(Address(accGPR, JSString::offsetOfValue()), scratchGPR);
+    andPtr(TrustedImmPtr(std::bit_cast<void*>(JSRopeString::stringMask)), scratchGPR);
+    slowCases.append(branchPtr(NotEqual, scratchGPR, TrustedImmPtr(std::bit_cast<void*>(JSRopeString::stringBuilderMarker))));
+
+    load64(Address(accGPR, JSRopeString::offsetOfFiber1Lower()), chunkGPR);
+    andPtr(TrustedImmPtr(std::bit_cast<void*>(JSRopeString::CompactFibers::addressMask)), chunkGPR);
+    loadPtr(Address(chunkGPR, JSStringBuilderState::offsetOfTail()), chunkGPR);
+    load32(Address(chunkGPR, JSStringBuilderChunk::offsetOfCount()), countGPR);
+    slowCases.append(branch32(Above, countGPR, TrustedImm32(jsStringBuilderChunkSize - numPieces)));
+
+    // Running length/is8Bit start from the builder cell; the outer concat reads both, so keep them
+    // exact. is8Bit lives in bit is8BitInPointer of the flags word for both a flat StringImpl and a
+    // rope, so one mask handles either.
+    load32(Address(accGPR, JSRopeString::offsetOfLength()), lengthGPR);
+    load32(Address(accGPR, JSRopeString::offsetOfFlags()), flagsGPR);
+
+    for (unsigned i = 1; i < count; ++i) {
+        load64(Address(bufferGPR, i * sizeof(EncodedJSValue)), pieceGPR);
+        if (!provenString[i]) {
+            slowCases.append(branchIfNotCell(JSValueRegs(pieceGPR)));
+            slowCases.append(branchIfNotString(pieceGPR));
+        }
+        storePtr(pieceGPR, BaseIndex(chunkGPR, countGPR, TimesEight, JSStringBuilderChunk::offsetOfSlots()));
+        add32(TrustedImm32(1), countGPR);
+        loadPtr(Address(pieceGPR, JSString::offsetOfValue()), scratchGPR);
+        Jump isRope = branchIfRopeStringImpl(scratchGPR);
+        load32(Address(scratchGPR, StringImpl::lengthMemoryOffset()), scratch2GPR);
+        add32(scratch2GPR, lengthGPR);
+        load32(Address(scratchGPR, StringImpl::flagsOffset()), scratch2GPR);
+        Jump doneFold = jump();
+        isRope.link(this);
+        load32(Address(pieceGPR, JSRopeString::offsetOfLength()), scratch2GPR);
+        add32(scratch2GPR, lengthGPR);
+        load32(Address(pieceGPR, JSRopeString::offsetOfFlags()), scratch2GPR);
+        doneFold.link(this);
+        // flags &= (pieceFlags | ~is8Bit): clears the builder's is8Bit bit iff this piece is 16-bit.
+        or32(TrustedImm32(~static_cast<int32_t>(JSRopeString::is8BitInPointer)), scratch2GPR);
+        and32(scratch2GPR, flagsGPR);
+    }
+
+    store32(lengthGPR, Address(accGPR, JSRopeString::offsetOfLength()));
+    store32(flagsGPR, Address(accGPR, JSRopeString::offsetOfFlags()));
+    storeFence(); // publish the slot stores before the count so a concurrent collector sees them
+    store32(countGPR, Address(chunkGPR, JSStringBuilderChunk::offsetOfCount()));
+    move(accGPR, resultGPR);
+
+    // Miss: create/promote/grow and coerce from the same marshalled buffer.
+    addSlowPathGenerator(slowPathCall(slowCases, this, operationStringBuilderStrCatMany, resultGPR, LinkableConstant::globalObject(*this, node), TrustedImmPtr(buffer), TrustedImm32(count)));
+
+    move(TrustedImmPtr(scratchBuffer->addressOfActiveLength()), scratchGPR);
+    storePtr(TrustedImmPtr(nullptr), Address(scratchGPR));
+
+    // The builder references young pieces through its off-heap chunk, so keep it remembered.
+    Jump barrierNeeded = barrierBranchWithoutFence(resultGPR, true);
+    Label barrierDone = label();
+
+    // resultGPR is a temporary the append leaves the builder in; it is not a tracked DFG value, so
+    // silentSpill/silentFill do not preserve it. Save it around the barrier C call by hand, since the
+    // call clobbers it and cellResult below reads it back.
+    Vector<SilentRegisterSavePlan> savePlans;
+    silentSpillAllRegistersImpl(false, savePlans, resultGPR);
+    addSlowPathGeneratorLambda([=, this, savePlans = WTF::move(savePlans)]() {
+        barrierNeeded.link(this);
+        pushToSave(resultGPR);
+        silentSpill(savePlans);
+        callOperationWithoutExceptionCheck(operationWriteBarrierSlowPath, TrustedImmPtr(&vm()), resultGPR);
+        silentFill(savePlans);
+        popToRestore(resultGPR);
+        jump().linkTo(barrierDone, this);
+    });
+
+    cellResult(resultGPR, node);
+#else
+    // Publish the buffer's active length so the GC scans the operands (and the coerced strings the
+    // operation stores back) across its ToString calls, then clear it once the append is done.
+    {
+        GPRTemporary scratch(this);
+        move(TrustedImmPtr(scratchBuffer->addressOfActiveLength()), scratch.gpr());
+        storePtr(TrustedImmPtr(reinterpret_cast<void*>(scratchSize)), Address(scratch.gpr()));
+    }
+
+    flushRegisters();
+    GPRFlushedCallResult result(this);
+    callOperation(operationStringBuilderStrCatMany, result.gpr(), LinkableConstant::globalObject(*this, node), TrustedImmPtr(buffer), TrustedImm32(count));
+
+    {
+        GPRTemporary scratch(this);
+        move(TrustedImmPtr(scratchBuffer->addressOfActiveLength()), scratch.gpr());
+        storePtr(TrustedImmPtr(nullptr), Address(scratch.gpr()));
+    }
+
+    cellResult(result.gpr(), node);
+#endif
+}
+
 void SpeculativeJIT::compileNewArrayBuffer(Node* node)
 {
     JSGlobalObject* globalObject = m_graph.globalObjectFor(node->origin.semantic);
@@ -17668,6 +17845,146 @@ void SpeculativeJIT::compileMakeRope(Node* node)
     ASSERT(node->child2().useKind() == KnownStringUse);
     ASSERT(!node->child3() || node->child3().useKind() == KnownStringUse);
 
+#if CPU(ADDRESS64)
+    // Allocate and fiber-pack a normal (non-builder) rope inline, leaving the result in resultGPR
+    // (the caller binds it with cellResult). Shared by an ordinary MakeRope and the deferred
+    // StringBuilder's short-accumulator case so both use identical, already-validated allocation
+    // code, including the empty-string special case and the OOM length-overflow check. Clobbers
+    // resultGPR, allocatorGPR, scratchGPR, and scratch2GPR; opGPRs (the fibers) must stay live.
+    auto emitPlainRope = [&] (GPRReg resultGPR, GPRReg allocatorGPR, GPRReg scratchGPR, GPRReg scratch2GPR, std::array<GPRReg, 3> opGPRs, unsigned numOpGPRs, std::array<Edge, 3> edges) {
+        JumpList slowPath;
+        Allocator allocatorValue = allocatorForConcurrently<JSRopeString>(vm(), sizeof(JSRopeString), AllocatorForMode::AllocatorIfExists);
+        emitAllocateJSCell(resultGPR, JITAllocator::constant(allocatorValue), allocatorGPR, TrustedImmPtr(m_graph.registerStructure(vm().stringStructure.get())), scratchGPR, slowPath, SlowAllocationResult::UndefinedBehavior);
+
+        // This puts nullptr for the first fiber. It makes visitChildren safe even if this JSRopeString is discarded due to the speculation failure in the following path.
+        storePtr(TrustedImmPtr(JSString::isRopeInPointer), Address(resultGPR, JSRopeString::offsetOfFiber0()));
+
+        {
+            if (JSString* string = edges[0]->dynamicCastConstant<JSString*>()) {
+                move(TrustedImm32(string->is8Bit() ? StringImpl::flagIs8Bit() : 0), scratchGPR);
+                move(TrustedImm32(string->length()), allocatorGPR);
+            } else {
+                bool needsRopeCase = canBeRope(edges[0]);
+                loadPtr(Address(opGPRs[0], JSString::offsetOfValue()), scratch2GPR);
+                Jump isRope;
+                if (needsRopeCase)
+                    isRope = branchIfRopeStringImpl(scratch2GPR);
+
+                load32(Address(scratch2GPR, StringImpl::flagsOffset()), scratchGPR);
+                load32(Address(scratch2GPR, StringImpl::lengthMemoryOffset()), allocatorGPR);
+
+                if (needsRopeCase) {
+                    auto done = jump();
+
+                    isRope.link(this);
+                    load32(Address(opGPRs[0], JSRopeString::offsetOfFlags()), scratchGPR);
+                    load32(Address(opGPRs[0], JSRopeString::offsetOfLength()), allocatorGPR);
+                    done.link(this);
+                }
+            }
+
+            if (ASSERT_ENABLED) {
+                Jump ok = branch32(
+                    GreaterThanOrEqual, allocatorGPR, TrustedImm32(0));
+                abortWithReason(DFGNegativeStringLength);
+                ok.link(this);
+            }
+        }
+
+        JumpList outOfMemory;
+
+        // This pattern can be seen when the code is doing `string += string`.
+        if (numOpGPRs == 2 && edges[0].node() == edges[1].node())
+            outOfMemory.append(branchAdd32(Overflow, allocatorGPR, allocatorGPR));
+        else {
+            for (unsigned i = 1; i < numOpGPRs; ++i) {
+                if (JSString* string = edges[i]->dynamicCastConstant<JSString*>()) {
+                    and32(TrustedImm32(string->is8Bit() ? StringImpl::flagIs8Bit() : 0), scratchGPR);
+                    outOfMemory.append(branchAdd32(Overflow, TrustedImm32(string->length()), allocatorGPR));
+                } else {
+                    bool needsRopeCase = canBeRope(edges[i]);
+                    loadPtr(Address(opGPRs[i], JSString::offsetOfValue()), scratch2GPR);
+                    Jump isRope;
+                    if (needsRopeCase)
+                        isRope = branchIfRopeStringImpl(scratch2GPR);
+
+                    and32(Address(scratch2GPR, StringImpl::flagsOffset()), scratchGPR);
+                    outOfMemory.append(branchAdd32(Overflow, Address(scratch2GPR, StringImpl::lengthMemoryOffset()), allocatorGPR));
+                    if (needsRopeCase) {
+                        auto done = jump();
+
+                        isRope.link(this);
+                        and32(Address(opGPRs[i], JSRopeString::offsetOfFlags()), scratchGPR);
+                        load32(Address(opGPRs[i], JSRopeString::offsetOfLength()), scratch2GPR);
+                        outOfMemory.append(branchAdd32(Overflow, scratch2GPR, allocatorGPR));
+                        done.link(this);
+                    }
+                }
+            }
+        }
+
+        speculationCheckOutOfMemory(JSValueSource(), nullptr, outOfMemory);
+
+        if (ASSERT_ENABLED) {
+            Jump ok = branch32(
+                GreaterThanOrEqual, allocatorGPR, TrustedImm32(0));
+            abortWithReason(DFGNegativeStringLength);
+            ok.link(this);
+        }
+
+        static_assert(StringImpl::flagIs8Bit() == JSRopeString::is8BitInPointer);
+        and32(TrustedImm32(StringImpl::flagIs8Bit()), scratchGPR);
+        orPtr(opGPRs[0], scratchGPR);
+        orPtr(TrustedImmPtr(JSString::isRopeInPointer), scratchGPR);
+        storePtr(scratchGPR, Address(resultGPR, JSRopeString::offsetOfFiber0()));
+
+#if CPU(ARM64)
+        orLeftShift64(allocatorGPR, opGPRs[1], TrustedImm32(32), scratchGPR);
+#else
+        lshiftPtr(opGPRs[1], TrustedImm32(32), scratchGPR);
+        orPtr(allocatorGPR, scratchGPR);
+#endif
+
+        if (numOpGPRs == 2) {
+            rshiftPtr(opGPRs[1], TrustedImm32(32), scratch2GPR);
+            storePairPtr(scratchGPR, scratch2GPR, Address(resultGPR, JSRopeString::offsetOfFiber1()));
+        } else {
+#if CPU(ARM64)
+            rshiftPtr(opGPRs[1], TrustedImm32(32), scratch2GPR);
+            orLeftShift64(scratch2GPR, opGPRs[2], TrustedImm32(16), scratch2GPR);
+            storePairPtr(scratchGPR, scratch2GPR, Address(resultGPR, JSRopeString::offsetOfFiber1()));
+#else
+            storePtr(scratchGPR, Address(resultGPR, JSRopeString::offsetOfFiber1()));
+            rshiftPtr(opGPRs[1], TrustedImm32(32), scratchGPR);
+            lshiftPtr(opGPRs[2], TrustedImm32(16), scratch2GPR);
+            orPtr(scratch2GPR, scratchGPR);
+            storePtr(scratchGPR, Address(resultGPR, JSRopeString::offsetOfFiber2()));
+#endif
+        }
+
+        auto isNonEmptyString = branchTest32(NonZero, allocatorGPR);
+
+        loadLinkableConstant(LinkableConstant(*this, jsEmptyString(vm())), resultGPR);
+
+        isNonEmptyString.link(this);
+        mutatorFence(vm());
+
+        switch (numOpGPRs) {
+        case 2:
+            addSlowPathGenerator(slowPathCall(
+                slowPath, this, operationMakeRope2, resultGPR, LinkableConstant::globalObject(*this, node), opGPRs[0], opGPRs[1]));
+            break;
+        case 3:
+            addSlowPathGenerator(slowPathCall(
+                slowPath, this, operationMakeRope3, resultGPR, LinkableConstant::globalObject(*this, node), opGPRs[0], opGPRs[1], opGPRs[2]));
+            break;
+        default:
+            RELEASE_ASSERT_NOT_REACHED();
+            break;
+        }
+    };
+#endif // CPU(ADDRESS64)
+
     // Prototype StringBuilder: a recognized V = V + ... accumulator appends its extra fibers into a
     // deferred native builder. The common case (accumulator already a builder, room in the tail
     // chunk) is inlined here as a handful of stores -- no C call. Miss (not yet a builder, or the
@@ -17696,10 +18013,34 @@ void SpeculativeJIT::compileMakeRope(Node* node)
         GPRReg scratchGPR = scratch.gpr();
         GPRReg scratch2GPR = scratch2.gpr();
 
+        unsigned numOpGPRs = three ? 3 : 2;
+
+        // slowCases -> operationStringBuilderAppend{,3}: grow a full builder (marker hit, tail chunk
+        // full) or promote a long non-builder accumulator (marker miss, length >= threshold). A short
+        // non-builder accumulator instead builds a plain rope inline (below) and never pays the C call.
         JumpList slowCases;
 
-        // Builder? (m_fiber & stringMask) == marker. A normal rope has a real fiber0 pointer; a
-        // partially-constructed rope has null; only a builder has the sentinel.
+        // A builder is always >= stringBuilderPromoteLength(): promotion creates it once the
+        // accumulator reaches the threshold and it only grows, so a shorter accumulator cannot be a
+        // builder. Gate on length first and skip the marker load on the common short path. The
+        // threshold matches operationStringBuilderAppend, so the inline plain-rope boundary and the
+        // runtime promotion boundary always agree.
+        loadPtr(Address(accGPR, JSString::offsetOfValue()), scratch2GPR);
+        Jump accLenIsRope = branchIfRopeStringImpl(scratch2GPR);
+        load32(Address(scratch2GPR, StringImpl::lengthMemoryOffset()), lengthGPR);
+        Jump haveAccLen = jump();
+        accLenIsRope.link(this);
+        load32(Address(accGPR, JSRopeString::offsetOfLength()), lengthGPR);
+        haveAccLen.link(this);
+        Jump maybeBuilder = branch32(AboveOrEqual, lengthGPR, TrustedImm32(JSRopeString::stringBuilderPromoteLength()));
+
+        // Below the threshold: not a builder; create a normal plain rope inline via the shared path.
+        emitPlainRope(resultGPR, chunkGPR, scratchGPR, scratch2GPR, { accGPR, op2GPR, op3GPR }, numOpGPRs, { node->child1(), node->child2(), node->child3() });
+        Jump shortDone = jump();
+
+        // At or above the threshold: a builder marker means append in place; a miss is a non-builder
+        // that reached the threshold and must promote (slow path).
+        maybeBuilder.link(this);
         loadPtr(Address(accGPR, JSString::offsetOfValue()), scratchGPR);
         andPtr(TrustedImmPtr(std::bit_cast<void*>(JSRopeString::stringMask)), scratchGPR);
         slowCases.append(branchPtr(NotEqual, scratchGPR, TrustedImmPtr(std::bit_cast<void*>(JSRopeString::stringBuilderMarker))));
@@ -17751,7 +18092,8 @@ void SpeculativeJIT::compileMakeRope(Node* node)
         else
             addSlowPathGenerator(slowPathCall(slowCases, this, operationStringBuilderAppend, resultGPR, LinkableConstant::globalObject(*this, node), accGPR, op2GPR));
 
-        // The builder now points at young pieces through its off-heap chunk, so keep it remembered.
+        // The builder/promote result points at young pieces through its off-heap chunk, so keep it
+        // remembered. The fresh plain rope (shortDone) is a new eden allocation and skips this.
         Jump barrierNeeded = barrierBranchWithoutFence(resultGPR, true);
         Label barrierDone = label();
 
@@ -17765,6 +18107,7 @@ void SpeculativeJIT::compileMakeRope(Node* node)
             jump().linkTo(barrierDone, this);
         });
 
+        shortDone.link(this);
         cellResult(resultGPR, node);
         return;
     }
@@ -17785,151 +18128,13 @@ void SpeculativeJIT::compileMakeRope(Node* node)
     }
 
 #if CPU(ADDRESS64)
-    Edge edges[3] = {
-        node->child1(),
-        node->child2(),
-        node->child3()
-    };
-
     GPRTemporary result(this);
     GPRTemporary allocator(this);
     GPRTemporary scratch(this);
     GPRTemporary scratch2(this);
     GPRReg resultGPR = result.gpr();
-    GPRReg allocatorGPR = allocator.gpr();
-    GPRReg scratchGPR = scratch.gpr();
-    GPRReg scratch2GPR = scratch2.gpr();
 
-    JumpList slowPath;
-    Allocator allocatorValue = allocatorForConcurrently<JSRopeString>(vm(), sizeof(JSRopeString), AllocatorForMode::AllocatorIfExists);
-    emitAllocateJSCell(resultGPR, JITAllocator::constant(allocatorValue), allocatorGPR, TrustedImmPtr(m_graph.registerStructure(vm().stringStructure.get())), scratchGPR, slowPath, SlowAllocationResult::UndefinedBehavior);
-
-    // This puts nullptr for the first fiber. It makes visitChildren safe even if this JSRopeString is discarded due to the speculation failure in the following path.
-    storePtr(TrustedImmPtr(JSString::isRopeInPointer), Address(resultGPR, JSRopeString::offsetOfFiber0()));
-
-    {
-        if (JSString* string = edges[0]->dynamicCastConstant<JSString*>()) {
-            move(TrustedImm32(string->is8Bit() ? StringImpl::flagIs8Bit() : 0), scratchGPR);
-            move(TrustedImm32(string->length()), allocatorGPR);
-        } else {
-            bool needsRopeCase = canBeRope(edges[0]);
-            loadPtr(Address(opGPRs[0], JSString::offsetOfValue()), scratch2GPR);
-            Jump isRope;
-            if (needsRopeCase)
-                isRope = branchIfRopeStringImpl(scratch2GPR);
-
-            load32(Address(scratch2GPR, StringImpl::flagsOffset()), scratchGPR);
-            load32(Address(scratch2GPR, StringImpl::lengthMemoryOffset()), allocatorGPR);
-
-            if (needsRopeCase) {
-                auto done = jump();
-
-                isRope.link(this);
-                load32(Address(opGPRs[0], JSRopeString::offsetOfFlags()), scratchGPR);
-                load32(Address(opGPRs[0], JSRopeString::offsetOfLength()), allocatorGPR);
-                done.link(this);
-            }
-        }
-
-        if (ASSERT_ENABLED) {
-            Jump ok = branch32(
-                GreaterThanOrEqual, allocatorGPR, TrustedImm32(0));
-            abortWithReason(DFGNegativeStringLength);
-            ok.link(this);
-        }
-    }
-
-    JumpList outOfMemory;
-
-    // This pattern can be seen when the code is doing `string += string`.
-    if (numOpGPRs == 2 && node->child1().node() == node->child2().node())
-        outOfMemory.append(branchAdd32(Overflow, allocatorGPR, allocatorGPR));
-    else {
-        for (unsigned i = 1; i < numOpGPRs; ++i) {
-            if (JSString* string = edges[i]->dynamicCastConstant<JSString*>()) {
-                and32(TrustedImm32(string->is8Bit() ? StringImpl::flagIs8Bit() : 0), scratchGPR);
-                outOfMemory.append(branchAdd32(Overflow, TrustedImm32(string->length()), allocatorGPR));
-            } else {
-                bool needsRopeCase = canBeRope(edges[i]);
-                loadPtr(Address(opGPRs[i], JSString::offsetOfValue()), scratch2GPR);
-                Jump isRope;
-                if (needsRopeCase)
-                    isRope = branchIfRopeStringImpl(scratch2GPR);
-
-                and32(Address(scratch2GPR, StringImpl::flagsOffset()), scratchGPR);
-                outOfMemory.append(branchAdd32(Overflow, Address(scratch2GPR, StringImpl::lengthMemoryOffset()), allocatorGPR));
-                if (needsRopeCase) {
-                    auto done = jump();
-
-                    isRope.link(this);
-                    and32(Address(opGPRs[i], JSRopeString::offsetOfFlags()), scratchGPR);
-                    load32(Address(opGPRs[i], JSRopeString::offsetOfLength()), scratch2GPR);
-                    outOfMemory.append(branchAdd32(Overflow, scratch2GPR, allocatorGPR));
-                    done.link(this);
-                }
-            }
-        }
-    }
-
-    speculationCheckOutOfMemory(JSValueSource(), nullptr, outOfMemory);
-
-    if (ASSERT_ENABLED) {
-        Jump ok = branch32(
-            GreaterThanOrEqual, allocatorGPR, TrustedImm32(0));
-        abortWithReason(DFGNegativeStringLength);
-        ok.link(this);
-    }
-
-    static_assert(StringImpl::flagIs8Bit() == JSRopeString::is8BitInPointer);
-    and32(TrustedImm32(StringImpl::flagIs8Bit()), scratchGPR);
-    orPtr(opGPRs[0], scratchGPR);
-    orPtr(TrustedImmPtr(JSString::isRopeInPointer), scratchGPR);
-    storePtr(scratchGPR, Address(resultGPR, JSRopeString::offsetOfFiber0()));
-
-#if CPU(ARM64)
-    orLeftShift64(allocatorGPR, opGPRs[1], TrustedImm32(32), scratchGPR);
-#else
-    lshiftPtr(opGPRs[1], TrustedImm32(32), scratchGPR);
-    orPtr(allocatorGPR, scratchGPR);
-#endif
-
-    if (numOpGPRs == 2) {
-        rshiftPtr(opGPRs[1], TrustedImm32(32), scratch2GPR);
-        storePairPtr(scratchGPR, scratch2GPR, Address(resultGPR, JSRopeString::offsetOfFiber1()));
-    } else {
-#if CPU(ARM64)
-        rshiftPtr(opGPRs[1], TrustedImm32(32), scratch2GPR);
-        orLeftShift64(scratch2GPR, opGPRs[2], TrustedImm32(16), scratch2GPR);
-        storePairPtr(scratchGPR, scratch2GPR, Address(resultGPR, JSRopeString::offsetOfFiber1()));
-#else
-        storePtr(scratchGPR, Address(resultGPR, JSRopeString::offsetOfFiber1()));
-        rshiftPtr(opGPRs[1], TrustedImm32(32), scratchGPR);
-        lshiftPtr(opGPRs[2], TrustedImm32(16), scratch2GPR);
-        orPtr(scratch2GPR, scratchGPR);
-        storePtr(scratchGPR, Address(resultGPR, JSRopeString::offsetOfFiber2()));
-#endif
-    }
-
-    auto isNonEmptyString = branchTest32(NonZero, allocatorGPR);
-
-    loadLinkableConstant(LinkableConstant(*this, jsEmptyString(vm())), resultGPR);
-
-    isNonEmptyString.link(this);
-    mutatorFence(vm());
-
-    switch (numOpGPRs) {
-    case 2:
-        addSlowPathGenerator(slowPathCall(
-            slowPath, this, operationMakeRope2, resultGPR, LinkableConstant::globalObject(*this, node), opGPRs[0], opGPRs[1]));
-        break;
-    case 3:
-        addSlowPathGenerator(slowPathCall(
-            slowPath, this, operationMakeRope3, resultGPR, LinkableConstant::globalObject(*this, node), opGPRs[0], opGPRs[1], opGPRs[2]));
-        break;
-    default:
-        RELEASE_ASSERT_NOT_REACHED();
-        break;
-    }
+    emitPlainRope(resultGPR, allocator.gpr(), scratch.gpr(), scratch2.gpr(), { opGPRs[0], opGPRs[1], opGPRs[2] }, numOpGPRs, { node->child1(), node->child2(), node->child3() });
 
     cellResult(resultGPR, node);
 #else

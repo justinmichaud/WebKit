@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2013-2025 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -837,6 +838,9 @@ private:
             break;
         case StrCat:
             compileStrCat();
+            break;
+        case StringBuilderStrCatMany:
+            compileStringBuilderStrCatMany();
             break;
         case ArithAdd:
         case ArithSub:
@@ -3089,6 +3093,174 @@ private:
                 lowJSValue(m_node->child2(), ManualOperandSpeculation));
         }
         setJSValue(result);
+    }
+
+    void compileStringBuilderStrCatMany()
+    {
+        JSGlobalObject* globalObject = m_graph.globalObjectFor(m_origin.semantic);
+        unsigned count = m_node->numChildren();
+        ASSERT(count >= 3);
+        unsigned numPieces = count - 1;
+
+        size_t scratchSize = sizeof(EncodedJSValue) * count;
+        ScratchBuffer* scratchBuffer = vm().scratchBufferForSize(scratchSize);
+        EncodedJSValue* buffer = static_cast<EncodedJSValue*>(scratchBuffer->dataBuffer());
+
+        // A short chain passes its operands to the patchpoint in registers so the inline fast path
+        // needs no buffer round-trip; it marshals them to the buffer only on the slow path. A long
+        // chain would exceed the register file, so it marshals up front and the fast path reads back.
+        bool useArgs = count <= 5;
+
+        // operands[0] is the accumulator; [1..] the pieces.
+        Vector<LValue, 16> operands(count);
+        for (unsigned i = 0; i < count; ++i)
+            operands[i] = lowJSValue(m_graph.varArgChild(m_node, i), ManualOperandSpeculation);
+        if (!useArgs) {
+            for (unsigned i = 0; i < count; ++i)
+                m_out.store64(operands[i], m_out.absolute(buffer + i));
+        }
+
+        // Pieces are UntypedUse edges, but a numeric operand was lowered to an inline ToString whose
+        // result is a string, and string literals are string constants; only those already proven a
+        // string skip the runtime isCell/isString check that otherwise routes a piece to the slow path.
+        Vector<bool, 16> provenString(count);
+        for (unsigned i = 0; i < count; ++i) {
+            SpeculatedType type = provenType(m_graph.varArgChild(m_node, i));
+            provenString[i] = type && !(type & ~SpecString);
+        }
+
+        // Publish the buffer's active length so the GC scans the operands (and the coerced strings the
+        // slow path's ToString stores back) across the C call. The buffer-mode fast path never
+        // allocates, so the published range only spans a valid marshalled buffer and is harmless there;
+        // args mode publishes inside its slow path, once the operands have been marshalled.
+        if (!useArgs)
+            m_out.storePtr(m_out.constIntPtr(scratchSize), m_out.absolute(scratchBuffer->addressOfActiveLength()));
+
+        // Inline fast path: when the accumulator is already a native builder and its tail chunk has
+        // room for all pieces and every piece is a string, append the piece pointers in place (a few
+        // stores, no C call). Any miss (not yet a builder, chunk full, or a non-string piece needing
+        // ToString) falls to operationStringBuilderStrCatMany, which creates/promotes/grows and coerces.
+        PatchpointValue* patchpoint = m_out.patchpoint(pointerType());
+        if (useArgs) {
+            for (unsigned i = 0; i < count; ++i)
+                patchpoint->appendSomeRegister(operands[i]);
+        }
+        patchpoint->clobber(RegisterSet::macroClobberedGPRs());
+        patchpoint->numGPScratchRegisters = useArgs ? 6 : 8;
+        RefPtr<PatchpointExceptionHandle> exceptionHandle = preparePatchpointForExceptions(patchpoint);
+        State* state = &m_ftlState;
+        CodeOrigin semanticOrigin = m_node->origin.semantic;
+        patchpoint->setGenerator([=] (CCallHelpers& jit, const StackmapGenerationParams& params) {
+            AllowMacroScratchRegisterUsage allowScratch(jit);
+            Box<CCallHelpers::JumpList> exceptions = exceptionHandle->scheduleExitCreation(params)->jumps(jit);
+
+            GPRReg resultGPR = params[0].gpr();
+            unsigned scratchBase = 0;
+            GPRReg bufferGPR = useArgs ? InvalidGPRReg : params.gpScratch(scratchBase++);
+            GPRReg chunkGPR = params.gpScratch(scratchBase++);
+            GPRReg countGPR = params.gpScratch(scratchBase++);
+            GPRReg lengthGPR = params.gpScratch(scratchBase++);
+            GPRReg flagsGPR = params.gpScratch(scratchBase++);
+            GPRReg tmpGPR = params.gpScratch(scratchBase++);
+            // valueGPR holds a piece's StringImpl* only transiently, in the non-rope fold arm. In
+            // buffer mode there are no stackmap inputs so resultGPR aliases nothing and serves; in
+            // args mode resultGPR may share a register with a piece input, so use a dedicated scratch.
+            GPRReg valueGPR = useArgs ? params.gpScratch(scratchBase++) : resultGPR;
+            // In args mode the accumulator and pieces stay in their stackmap arg registers. In buffer
+            // mode a single scratch holds each operand as it is read back from the buffer.
+            GPRReg accGPR = useArgs ? params[1].gpr() : params.gpScratch(scratchBase++);
+            GPRReg pieceGPR = useArgs ? InvalidGPRReg : params.gpScratch(scratchBase++);
+            auto operandGPR = [&] (unsigned j) -> GPRReg {
+                if (useArgs)
+                    return params[1 + j].gpr();
+                jit.load64(CCallHelpers::Address(bufferGPR, j * sizeof(EncodedJSValue)), j ? pieceGPR : accGPR);
+                return j ? pieceGPR : accGPR;
+            };
+
+            CCallHelpers::JumpList slowCases;
+
+            if (!useArgs)
+                jit.move(CCallHelpers::TrustedImmPtr(buffer), bufferGPR);
+            operandGPR(0); // buffer mode: read the accumulator back into accGPR
+            if (!provenString[0]) {
+                slowCases.append(jit.branchIfNotCell(JSValueRegs(accGPR)));
+                slowCases.append(jit.branchIfNotString(accGPR));
+            }
+
+            // Builder? (m_fiber & stringMask) == marker. A flat string or partial rope never matches.
+            jit.loadPtr(CCallHelpers::Address(accGPR, JSString::offsetOfValue()), tmpGPR);
+            jit.and64(CCallHelpers::TrustedImm64(JSRopeString::stringMask), tmpGPR);
+            slowCases.append(jit.branch64(CCallHelpers::NotEqual, tmpGPR, CCallHelpers::TrustedImm64(JSRopeString::stringBuilderMarker)));
+
+            jit.load64(CCallHelpers::Address(accGPR, JSRopeString::offsetOfFiber1Lower()), chunkGPR);
+            jit.and64(CCallHelpers::TrustedImm64(JSRopeString::CompactFibers::addressMask), chunkGPR);
+            jit.loadPtr(CCallHelpers::Address(chunkGPR, JSStringBuilderState::offsetOfTail()), chunkGPR);
+            jit.load32(CCallHelpers::Address(chunkGPR, JSStringBuilderChunk::offsetOfCount()), countGPR);
+            slowCases.append(jit.branch32(CCallHelpers::Above, countGPR, CCallHelpers::TrustedImm32(jsStringBuilderChunkSize - numPieces)));
+
+            jit.load32(CCallHelpers::Address(accGPR, JSRopeString::offsetOfLength()), lengthGPR);
+            jit.load32(CCallHelpers::Address(accGPR, JSRopeString::offsetOfFlags()), flagsGPR);
+
+            for (unsigned i = 1; i < count; ++i) {
+                GPRReg thisPieceGPR = operandGPR(i);
+                if (!provenString[i]) {
+                    slowCases.append(jit.branchIfNotCell(JSValueRegs(thisPieceGPR)));
+                    slowCases.append(jit.branchIfNotString(thisPieceGPR));
+                }
+                jit.storePtr(thisPieceGPR, CCallHelpers::BaseIndex(chunkGPR, countGPR, CCallHelpers::TimesEight, JSStringBuilderChunk::offsetOfSlots()));
+                jit.add32(CCallHelpers::TrustedImm32(1), countGPR);
+                jit.loadPtr(CCallHelpers::Address(thisPieceGPR, JSString::offsetOfValue()), valueGPR);
+                CCallHelpers::Jump isRope = jit.branchIfRopeStringImpl(valueGPR);
+                jit.load32(CCallHelpers::Address(valueGPR, StringImpl::lengthMemoryOffset()), tmpGPR);
+                jit.add32(tmpGPR, lengthGPR);
+                jit.load32(CCallHelpers::Address(valueGPR, StringImpl::flagsOffset()), tmpGPR);
+                CCallHelpers::Jump doneFold = jit.jump();
+                isRope.link(&jit);
+                jit.load32(CCallHelpers::Address(thisPieceGPR, JSRopeString::offsetOfLength()), tmpGPR);
+                jit.add32(tmpGPR, lengthGPR);
+                jit.load32(CCallHelpers::Address(thisPieceGPR, JSRopeString::offsetOfFlags()), tmpGPR);
+                doneFold.link(&jit);
+                // flags &= (pieceFlags | ~is8Bit): clears the builder's is8Bit bit iff this piece is 16-bit.
+                jit.or32(CCallHelpers::TrustedImm32(~static_cast<int32_t>(JSRopeString::is8BitInPointer)), tmpGPR);
+                jit.and32(tmpGPR, flagsGPR);
+            }
+
+            jit.store32(lengthGPR, CCallHelpers::Address(accGPR, JSRopeString::offsetOfLength()));
+            jit.store32(flagsGPR, CCallHelpers::Address(accGPR, JSRopeString::offsetOfFlags()));
+            jit.storeFence(); // publish the slot stores before the count so a concurrent collector sees them
+            jit.store32(countGPR, CCallHelpers::Address(chunkGPR, JSStringBuilderChunk::offsetOfCount()));
+            jit.move(accGPR, resultGPR);
+            CCallHelpers::Label done = jit.label();
+
+            params.addLatePath([=] (CCallHelpers& jit) {
+                AllowMacroScratchRegisterUsage allowScratch(jit);
+                slowCases.link(&jit);
+                if (useArgs) {
+                    // Marshal the register operands into the contiguous buffer the C call expects, then
+                    // publish the active length so the GC scans them across its ToString allocations.
+                    GPRReg addrGPR = params.gpScratch(0);
+                    jit.move(CCallHelpers::TrustedImmPtr(buffer), addrGPR);
+                    for (unsigned i = 0; i < count; ++i)
+                        jit.store64(params[1 + i].gpr(), CCallHelpers::Address(addrGPR, i * sizeof(EncodedJSValue)));
+                    jit.move(CCallHelpers::TrustedImmPtr(scratchBuffer->addressOfActiveLength()), addrGPR);
+                    jit.storePtr(CCallHelpers::TrustedImmPtr(reinterpret_cast<void*>(scratchSize)), CCallHelpers::Address(addrGPR));
+                }
+                callOperation(*state, params.unavailableRegisters(), jit, semanticOrigin, exceptions.get(), operationStringBuilderStrCatMany, resultGPR, CCallHelpers::TrustedImmPtr(globalObject), CCallHelpers::TrustedImmPtr(buffer), CCallHelpers::TrustedImm32(count)).call();
+                if (useArgs) {
+                    GPRReg addrGPR = params.gpScratch(0);
+                    jit.move(CCallHelpers::TrustedImmPtr(scratchBuffer->addressOfActiveLength()), addrGPR);
+                    jit.storePtr(CCallHelpers::TrustedImmPtr(nullptr), CCallHelpers::Address(addrGPR));
+                }
+                jit.jump().linkTo(done, &jit);
+            });
+        });
+
+        if (!useArgs)
+            m_out.storePtr(m_out.constIntPtr(0), m_out.absolute(scratchBuffer->addressOfActiveLength()));
+        // The builder now references young pieces through its off-heap chunk; keep it remembered.
+        emitStoreBarrier(patchpoint, false);
+
+        setJSValue(patchpoint);
     }
 
     void compileArithAddOrSub()
@@ -11747,12 +11919,150 @@ IGNORE_CLANG_WARNINGS_END
             numKids = 2;
         }
 
+        auto getFlagsAndLength = [&] (Edge& edge, LValue child) {
+            if (JSString* string = edge->dynamicCastConstant<JSString*>()) {
+                return FlagsAndLength {
+                    m_out.constInt32(string->is8Bit() ? StringImpl::flagIs8Bit() : 0),
+                    m_out.constInt32(string->length())
+                };
+            }
+
+            LBasicBlock continuation = m_out.newBlock();
+            LBasicBlock ropeCase = m_out.newBlock();
+            LBasicBlock notRopeCase = m_out.newBlock();
+
+            m_out.branch(isRopeString(child, edge), unsure(ropeCase), unsure(notRopeCase));
+
+            LBasicBlock lastNext = m_out.appendTo(ropeCase, notRopeCase);
+            ValueFromBlock flagsForRope = m_out.anchor(m_out.load32NonNegative(child, m_heaps.JSRopeString_flags));
+            ValueFromBlock lengthForRope = m_out.anchor(m_out.load32NonNegative(child, m_heaps.JSRopeString_length));
+            m_out.jump(continuation);
+
+            m_out.appendTo(notRopeCase, continuation);
+            LValue stringImpl = m_out.loadPtr(child, m_heaps.JSString_value);
+            ValueFromBlock flagsForNonRope = m_out.anchor(m_out.load32NonNegative(stringImpl, m_heaps.StringImpl_hashAndFlags));
+            ValueFromBlock lengthForNonRope = m_out.anchor(m_out.load32NonNegative(stringImpl, m_heaps.StringImpl_length));
+            m_out.jump(continuation);
+
+            m_out.appendTo(continuation, lastNext);
+            return FlagsAndLength {
+                m_out.phi(Int32, flagsForRope, flagsForNonRope),
+                m_out.phi(Int32, lengthForRope, lengthForNonRope)
+            };
+        };
+
+        // Allocate and fiber-pack a normal (non-builder) rope of edges/kids inline, returning the
+        // result. This is the proven allocation path shared by an ordinary MakeRope and the deferred
+        // StringBuilder's short-accumulator case, so both use identical, already-validated code (the
+        // empty-string special case and the OOM length-overflow check come with it).
+        auto emitPlainRope = [&] () -> LValue {
+            LBasicBlock emptyCase = m_out.newBlock();
+            LBasicBlock slowPath = m_out.newBlock();
+            LBasicBlock continuation = m_out.newBlock();
+
+            Allocator allocator = allocatorForConcurrently<JSRopeString>(vm(), sizeof(JSRopeString), AllocatorForMode::AllocatorIfExists);
+
+            LValue result = allocateCell(m_out.constIntPtr(allocator.localAllocator()), vm().stringStructure.get(), slowPath);
+
+            // This puts nullptr for the first fiber. It makes visitChildren safe even if this JSRopeString is discarded due to the speculation failure in the following path.
+            m_out.storePtr(m_out.constIntPtr(JSString::isRopeInPointer), result, m_heaps.JSRopeString_fiber0);
+
+            FlagsAndLength flagsAndLength = getFlagsAndLength(edges[0], kids[0]);
+            if (numKids == 2 && kids[0] == kids[1]) {
+                // This pattern can be seen when the code is doing `string += string`.
+                CheckValue* lengthCheck = m_out.speculateAdd(flagsAndLength.length, flagsAndLength.length);
+                blessSpeculationOutOfMemory(lengthCheck, noValue(), nullptr, m_origin);
+                flagsAndLength.length = lengthCheck;
+            } else {
+                for (unsigned i = 1; i < numKids; ++i) {
+                    auto mergeFlagsAndLength = [&] (Edge& edge, LValue child, FlagsAndLength previousFlagsAndLength) {
+                        FlagsAndLength flagsAndLength = getFlagsAndLength(edge, child);
+                        LValue flags = m_out.bitAnd(previousFlagsAndLength.flags, flagsAndLength.flags);
+                        CheckValue* lengthCheck = m_out.speculateAdd(previousFlagsAndLength.length, flagsAndLength.length);
+                        blessSpeculationOutOfMemory(lengthCheck, noValue(), nullptr, m_origin);
+                        return FlagsAndLength {
+                            flags,
+                            lengthCheck
+                        };
+                    };
+                    flagsAndLength = mergeFlagsAndLength(edges[i], kids[i], flagsAndLength);
+                }
+            }
+
+            m_out.storePtr(
+                m_out.bitOr(
+                    m_out.bitOr(kids[0], m_out.constIntPtr(JSString::isRopeInPointer)),
+                    m_out.bitAnd(m_out.constIntPtr(JSRopeString::is8BitInPointer), m_out.zeroExtPtr(flagsAndLength.flags))),
+                result, m_heaps.JSRopeString_fiber0);
+            m_out.storePtr(
+                m_out.bitOr(m_out.zeroExtPtr(flagsAndLength.length), m_out.shl(kids[1], m_out.constInt32(32))),
+                result, m_heaps.JSRopeString_fiber1);
+            if (numKids == 2)
+                m_out.storePtr(m_out.lShr(kids[1], m_out.constInt32(32)), result, m_heaps.JSRopeString_fiber2);
+            else
+                m_out.storePtr(m_out.bitOr(m_out.lShr(kids[1], m_out.constInt32(32)), m_out.shl(kids[2], m_out.constInt32(16))), result, m_heaps.JSRopeString_fiber2);
+
+            mutatorFence();
+            ValueFromBlock fastResult = m_out.anchor(result);
+            m_out.branch(m_out.isZero32(flagsAndLength.length), rarely(emptyCase), usually(continuation));
+
+            LBasicBlock lastNext = m_out.appendTo(emptyCase, slowPath);
+            ValueFromBlock emptyResult = m_out.anchor(weakPointer(jsEmptyString(m_graph.m_vm)));
+            m_out.jump(continuation);
+
+            m_out.appendTo(slowPath, continuation);
+            LValue slowResultValue;
+            VM& vm = this->vm();
+            switch (numKids) {
+            case 2:
+                slowResultValue = lazySlowPath(
+                    [=, &vm] (const Vector<Location>& locations) -> RefPtr<LazySlowPath::Generator> {
+                        return createLazyCallGenerator(vm,
+                            operationMakeRope2, locations[0].directGPR(), CCallHelpers::TrustedImmPtr(globalObject), locations[1].directGPR(),
+                            locations[2].directGPR());
+                    }, kids[0], kids[1]);
+                break;
+            case 3:
+                slowResultValue = lazySlowPath(
+                    [=, &vm] (const Vector<Location>& locations) -> RefPtr<LazySlowPath::Generator> {
+                        return createLazyCallGenerator(vm,
+                            operationMakeRope3, locations[0].directGPR(), CCallHelpers::TrustedImmPtr(globalObject), locations[1].directGPR(),
+                            locations[2].directGPR(), locations[3].directGPR());
+                    }, kids[0], kids[1], kids[2]);
+                break;
+            default:
+                DFG_CRASH(m_graph, m_node, "Bad number of children");
+                break;
+            }
+            ValueFromBlock slowResult = m_out.anchor(slowResultValue);
+            m_out.jump(continuation);
+
+            m_out.appendTo(continuation, lastNext);
+            return m_out.phi(Int64, fastResult, emptyResult, slowResult);
+        };
+
         // Prototype StringBuilder: a recognized V = V + ... accumulator. The common case (already a
         // builder, room in the tail chunk) is inlined as a few stores; a miss falls back to
         // operationStringBuilderAppend{,3}. This is the steady-state hot path, so inlining it (not
         // a C call per iteration) is what removes the per-append overhead. Mirrors the DFG path.
         if (m_graph.m_stringBuilderConcatBytecodes.contains(m_node->origin.semantic.bytecodeIndex().offset())) {
             bool three = (numKids == 3);
+
+            LBasicBlock patchpointCase = m_out.newBlock();
+            LBasicBlock shortCase = m_out.newBlock();
+            LBasicBlock builderContinuation = m_out.newBlock();
+
+            // A builder is always >= stringBuilderPromoteLength(): promotion creates it once the
+            // accumulator reaches the threshold and it only grows, so a shorter accumulator cannot be
+            // a builder. Gate on length first and build a plain rope inline without the marker load; at
+            // or above the threshold the patchpoint's own marker check decides append vs promote. The
+            // gate reads the same threshold the op uses, so the two never disagree on the boundary.
+            LValue accLength = getFlagsAndLength(edges[0], kids[0]).length;
+            m_out.branch(
+                m_out.aboveOrEqual(accLength, m_out.constInt32(JSRopeString::stringBuilderPromoteLength())),
+                unsure(patchpointCase), unsure(shortCase));
+
+            LBasicBlock lastNext = m_out.appendTo(patchpointCase, shortCase);
             PatchpointValue* patchpoint = m_out.patchpoint(pointerType());
             patchpoint->appendSomeRegister(kids[0]);
             patchpoint->appendSomeRegister(kids[1]);
@@ -11833,125 +12143,19 @@ IGNORE_CLANG_WARNINGS_END
             });
             // The builder now references young pieces through its off-heap chunk; keep it remembered.
             emitStoreBarrier(patchpoint, false);
-            setJSValue(patchpoint);
+            ValueFromBlock builderResult = m_out.anchor(patchpoint);
+            m_out.jump(builderContinuation);
+
+            m_out.appendTo(shortCase, builderContinuation);
+            ValueFromBlock shortResult = m_out.anchor(emitPlainRope());
+            m_out.jump(builderContinuation);
+
+            m_out.appendTo(builderContinuation, lastNext);
+            setJSValue(m_out.phi(pointerType(), builderResult, shortResult));
             return;
         }
 
-        LBasicBlock emptyCase = m_out.newBlock();
-        LBasicBlock slowPath = m_out.newBlock();
-        LBasicBlock continuation = m_out.newBlock();
-
-        Allocator allocator = allocatorForConcurrently<JSRopeString>(vm(), sizeof(JSRopeString), AllocatorForMode::AllocatorIfExists);
-
-        LValue result = allocateCell(m_out.constIntPtr(allocator.localAllocator()), vm().stringStructure.get(), slowPath);
-
-        // This puts nullptr for the first fiber. It makes visitChildren safe even if this JSRopeString is discarded due to the speculation failure in the following path.
-        m_out.storePtr(m_out.constIntPtr(JSString::isRopeInPointer), result, m_heaps.JSRopeString_fiber0);
-
-        auto getFlagsAndLength = [&] (Edge& edge, LValue child) {
-            if (JSString* string = edge->dynamicCastConstant<JSString*>()) {
-                return FlagsAndLength {
-                    m_out.constInt32(string->is8Bit() ? StringImpl::flagIs8Bit() : 0),
-                    m_out.constInt32(string->length())
-                };
-            }
-
-            LBasicBlock continuation = m_out.newBlock();
-            LBasicBlock ropeCase = m_out.newBlock();
-            LBasicBlock notRopeCase = m_out.newBlock();
-
-            m_out.branch(isRopeString(child, edge), unsure(ropeCase), unsure(notRopeCase));
-
-            LBasicBlock lastNext = m_out.appendTo(ropeCase, notRopeCase);
-            ValueFromBlock flagsForRope = m_out.anchor(m_out.load32NonNegative(child, m_heaps.JSRopeString_flags));
-            ValueFromBlock lengthForRope = m_out.anchor(m_out.load32NonNegative(child, m_heaps.JSRopeString_length));
-            m_out.jump(continuation);
-
-            m_out.appendTo(notRopeCase, continuation);
-            LValue stringImpl = m_out.loadPtr(child, m_heaps.JSString_value);
-            ValueFromBlock flagsForNonRope = m_out.anchor(m_out.load32NonNegative(stringImpl, m_heaps.StringImpl_hashAndFlags));
-            ValueFromBlock lengthForNonRope = m_out.anchor(m_out.load32NonNegative(stringImpl, m_heaps.StringImpl_length));
-            m_out.jump(continuation);
-
-            m_out.appendTo(continuation, lastNext);
-            return FlagsAndLength {
-                m_out.phi(Int32, flagsForRope, flagsForNonRope),
-                m_out.phi(Int32, lengthForRope, lengthForNonRope)
-            };
-        };
-
-        FlagsAndLength flagsAndLength = getFlagsAndLength(edges[0], kids[0]);
-        if (numKids == 2 && kids[0] == kids[1]) {
-            // This pattern can be seen when the code is doing `string += string`.
-            CheckValue* lengthCheck = m_out.speculateAdd(flagsAndLength.length, flagsAndLength.length);
-            blessSpeculationOutOfMemory(lengthCheck, noValue(), nullptr, m_origin);
-            flagsAndLength.length = lengthCheck;
-        } else {
-            for (unsigned i = 1; i < numKids; ++i) {
-                auto mergeFlagsAndLength = [&] (Edge& edge, LValue child, FlagsAndLength previousFlagsAndLength) {
-                    FlagsAndLength flagsAndLength = getFlagsAndLength(edge, child);
-                    LValue flags = m_out.bitAnd(previousFlagsAndLength.flags, flagsAndLength.flags);
-                    CheckValue* lengthCheck = m_out.speculateAdd(previousFlagsAndLength.length, flagsAndLength.length);
-                    blessSpeculationOutOfMemory(lengthCheck, noValue(), nullptr, m_origin);
-                    return FlagsAndLength {
-                        flags,
-                        lengthCheck
-                    };
-                };
-                flagsAndLength = mergeFlagsAndLength(edges[i], kids[i], flagsAndLength);
-            }
-        }
-
-        m_out.storePtr(
-            m_out.bitOr(
-                m_out.bitOr(kids[0], m_out.constIntPtr(JSString::isRopeInPointer)),
-                m_out.bitAnd(m_out.constIntPtr(JSRopeString::is8BitInPointer), m_out.zeroExtPtr(flagsAndLength.flags))),
-            result, m_heaps.JSRopeString_fiber0);
-        m_out.storePtr(
-            m_out.bitOr(m_out.zeroExtPtr(flagsAndLength.length), m_out.shl(kids[1], m_out.constInt32(32))),
-            result, m_heaps.JSRopeString_fiber1);
-        if (numKids == 2)
-            m_out.storePtr(m_out.lShr(kids[1], m_out.constInt32(32)), result, m_heaps.JSRopeString_fiber2);
-        else
-            m_out.storePtr(m_out.bitOr(m_out.lShr(kids[1], m_out.constInt32(32)), m_out.shl(kids[2], m_out.constInt32(16))), result, m_heaps.JSRopeString_fiber2);
-
-        mutatorFence();
-        ValueFromBlock fastResult = m_out.anchor(result);
-        m_out.branch(m_out.isZero32(flagsAndLength.length), rarely(emptyCase), usually(continuation));
-
-        LBasicBlock lastNext = m_out.appendTo(emptyCase, slowPath);
-        ValueFromBlock emptyResult = m_out.anchor(weakPointer(jsEmptyString(m_graph.m_vm)));
-        m_out.jump(continuation);
-
-        m_out.appendTo(slowPath, continuation);
-        LValue slowResultValue;
-        VM& vm = this->vm();
-        switch (numKids) {
-        case 2:
-            slowResultValue = lazySlowPath(
-                [=, &vm] (const Vector<Location>& locations) -> RefPtr<LazySlowPath::Generator> {
-                    return createLazyCallGenerator(vm,
-                        operationMakeRope2, locations[0].directGPR(), CCallHelpers::TrustedImmPtr(globalObject), locations[1].directGPR(),
-                        locations[2].directGPR());
-                }, kids[0], kids[1]);
-            break;
-        case 3:
-            slowResultValue = lazySlowPath(
-                [=, &vm] (const Vector<Location>& locations) -> RefPtr<LazySlowPath::Generator> {
-                    return createLazyCallGenerator(vm,
-                        operationMakeRope3, locations[0].directGPR(), CCallHelpers::TrustedImmPtr(globalObject), locations[1].directGPR(),
-                        locations[2].directGPR(), locations[3].directGPR());
-                }, kids[0], kids[1], kids[2]);
-            break;
-        default:
-            DFG_CRASH(m_graph, m_node, "Bad number of children");
-            break;
-        }
-        ValueFromBlock slowResult = m_out.anchor(slowResultValue);
-        m_out.jump(continuation);
-
-        m_out.appendTo(continuation, lastNext);
-        setJSValue(m_out.phi(Int64, fastResult, emptyResult, slowResult));
+        setJSValue(emitPlainRope());
     }
 
     void compileMakeAtomString()

@@ -411,6 +411,7 @@ JSC_DECLARE_JIT_OPERATION(operationStringBuilderAppend3, JSString*, (JSGlobalObj
 JSC_DECLARE_JIT_OPERATION(operationMakeRope3, JSString*, (JSGlobalObject*, JSString*, JSString*, JSString*));
 JSC_DECLARE_JIT_OPERATION(operationStrCat2, JSString*, (JSGlobalObject*, EncodedJSValue, EncodedJSValue));
 JSC_DECLARE_JIT_OPERATION(operationStrCat3, JSString*, (JSGlobalObject*, EncodedJSValue, EncodedJSValue, EncodedJSValue));
+JSC_DECLARE_JIT_OPERATION(operationStringBuilderStrCatMany, JSString*, (JSGlobalObject*, EncodedJSValue* operands, uint32_t count));
 JSC_DECLARE_JIT_OPERATION(operationMakeAtomString1, JSString*, (JSGlobalObject*, JSString*));
 JSC_DECLARE_JIT_OPERATION(operationMakeAtomString2, JSString*, (JSGlobalObject*, JSString*, JSString*));
 JSC_DECLARE_JIT_OPERATION(operationMakeAtomString3, JSString*, (JSGlobalObject*, JSString*, JSString*, JSString*));

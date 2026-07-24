@@ -524,6 +524,10 @@ namespace JSC { namespace DFG {
     macro(FunctionToString, NodeResultJS) \
     macro(FunctionBind, NodeResultJS | NodeMustGenerate | NodeHasVarArgs) \
     macro(MakeRope, NodeResultJS) \
+    /* Loop-carried string accumulator (V = V + p0 + p1 + ...) collapsed from a >3-operand */\
+    /* op_strcat chain by DFGStringBuilderPhase. Variadic: child[0] is the accumulator, the */\
+    /* rest are the pieces, appended into a deferred native StringBuilder rope in place. */\
+    macro(StringBuilderStrCatMany, NodeResultJS | NodeMustGenerate | NodeHasVarArgs) \
     macro(MakeAtomString, NodeResultJS) \
     macro(InByVal, NodeResultBoolean | NodeMustGenerate) \
     macro(InByValMegamorphic, NodeResultBoolean | NodeMustGenerate) \

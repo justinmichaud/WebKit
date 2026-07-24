@@ -51,6 +51,13 @@ bool sbDisabled()
     static bool v = envFlag("SB_DISABLE");
     return v;
 }
+// Isolation switch for the >3-piece StrCat-chain collapse only (leaves the local/field MakeRope
+// accumulator paths on); lets us A/B this extension's delta against the rest of the phase.
+bool sbNoStrCat()
+{
+    static bool v = envFlag("SB_NO_STRCAT");
+    return v;
+}
 }
 
 class StringBuilderConcatPhase : public Phase {
@@ -100,6 +107,34 @@ public:
         default:
             return false;
         }
+    }
+
+    // Performance guard: the deferred builder only pays off when the SAME accumulator local is
+    // appended to at a SINGLE site per loop iteration, so the builder cell threads through the loop
+    // Phi and is reused each iteration. With two or more concat stores to the same local in the loop
+    // (e.g. base64's `result += a; result += b; result += c`), the builder is NOT reused across the
+    // back-edge -- it is re-created every iteration (SB_STAT shows creates>>appends), which is
+    // catastrophically slower than a plain rope. Detect that here and leave such accumulators as
+    // normal ropes. Counts SetLocal(local, MakeRope|StrCat) in loop blocks.
+    bool hasMultipleConcatStoresInLoop(Operand local)
+    {
+        unsigned count = 0;
+        for (BlockIndex bi = m_graph.numBlocks(); bi--;) {
+            BasicBlock* b = m_graph.block(bi);
+            if (!b || !m_graph.m_cpsNaturalLoops->loopDepth(b))
+                continue;
+            for (unsigned j = 0; j < b->size(); ++j) {
+                Node* n = b->at(j);
+                if (n->op() != SetLocal || n->operand() != local)
+                    continue;
+                Node* v = n->child1().node();
+                if (v && (v->op() == MakeRope || v->op() == StrCat)) {
+                    if (++count > 1)
+                        return true;
+                }
+            }
+        }
+        return false;
     }
 
     // Safety: in-place append mutates the accumulator rope, so it is only sound if the old value is
@@ -380,6 +415,10 @@ public:
                 // but only in the FTL tier (see `lower` above).
                 if (!lower || hasUnsafeInLoopUse(dst, value, readWrapper))
                     continue;
+                // Skip accumulators written at more than one site in the loop: the builder is not
+                // reused across the back-edge there and thrashes (re-created every iteration).
+                if (hasMultipleConcatStoresInLoop(dst))
+                    continue;
 
                 // If this is `V = V + piece` (2-input) and the piece is itself a 2-input concat of
                 // leaves (MakeRope(a, b) -- the common `V += a + b` shape), pull a and b up so the
@@ -489,6 +528,96 @@ public:
                     m_graph.m_stringBuilderConcatBytecodes.add(off);
                     if (sbVerbose())
                         dataLogLn("[SB-FIELD] tagged field accumulator (", value->child3() ? "3" : "2", "-input) at offset=", off);
+                    changed = true;
+                }
+            }
+        }
+
+        // CHAINED accumulator (`V += p0 + p1 + p2 + ...`, more than three operands). One op_strcat
+        // becomes a left-leaning chain of <=3-operand nodes, each taking the previous as its first
+        // operand, with the accumulator read buried at the bottom-left leaf. The nodes are all
+        // StrCat when the operands are Untyped, or all MakeRope once Fixup proves them strings (which
+        // happens in FTL after the operand-producing calls inline) -- the accumulator read is a
+        // MakeRope's first child in the latter, or a ToPrimitive(GetLocal) in the former. All chain
+        // nodes share the op_strcat bytecode, so collapsing them into ONE variadic
+        // StringBuilderStrCatMany keeps the whole op atomic w.r.t. OSR (a chain of in-place appends
+        // would double-count on exit) while building the string once instead of allocating the
+        // chain of intermediate ropes. Emitted in both DFG and FTL; each tier has its own inline
+        // append fast path in compileStringBuilderStrCatMany.
+        if (!sbNoStrCat()) {
+            for (BlockIndex blockIndex = m_graph.numBlocks(); blockIndex--;) {
+                BasicBlock* block = m_graph.block(blockIndex);
+                if (!block || !m_graph.m_cpsNaturalLoops->loopDepth(block))
+                    continue;
+                for (unsigned i = 0; i < block->size(); ++i) {
+                    Node* node = block->at(i);
+                    if (node->op() != SetLocal)
+                        continue;
+                    Operand dst = node->operand();
+                    Node* top = node->child1().node();
+                    if (!top || (top->op() != StrCat && top->op() != MakeRope))
+                        continue;
+                    NodeType chainOp = top->op();
+
+                    // Descend the chain along child1 (the accumulator spine) while the first operand
+                    // is another node of the same kind from the same op_strcat bytecode.
+                    BytecodeIndex bc = top->origin.semantic.bytecodeIndex();
+                    Node* bottom = top;
+                    while (true) {
+                        Node* first = bottom->child1().node();
+                        if (first && first->op() == chainOp && first->origin.semantic.bytecodeIndex() == bc)
+                            bottom = first;
+                        else
+                            break;
+                    }
+
+                    // A single MakeRope accumulator (V + up to two pieces, no chain) is handled by the
+                    // inlined-append path above; only take over the multi-node chains here.
+                    if (chainOp == MakeRope && bottom == top)
+                        continue;
+
+                    // The spine bottom's first operand must be the accumulator read (through at most
+                    // one value-preserving coercion, e.g. the ToPrimitive Fixup inserts for StrCat).
+                    Node* readWrapper = nullptr;
+                    if (!readsLocalThroughCoercion(bottom->child1(), dst, readWrapper))
+                        continue;
+
+                    ++candidates;
+                    if (sbVerbose()) {
+                        dataLogLn("[SB-STRCAT] chain accumulator (", Graph::opName(chainOp), ") top D@", top->index(),
+                            " bottom D@", bottom->index(), " loc ", dst.value(), " bc#", bc.offset(),
+                            " in ", m_graph.m_codeBlock->inferredName().data());
+                    }
+
+                    if (hasUnsafeInLoopUse(dst, bottom, readWrapper))
+                        continue;
+                    // Same multi-site guard as the local MakeRope path: a local appended at more than
+                    // one site in the loop does not reuse the builder across the back-edge.
+                    if (hasMultipleConcatStoresInLoop(dst))
+                        continue;
+
+                    // Collect the pieces in concatenation order: walk bottom-to-top, each chain node
+                    // contributing child2 then child3 (its non-spine operands).
+                    Vector<Node*, 8> chainTopToBottom;
+                    for (Node* c = top; ; c = c->child1().node()) {
+                        chainTopToBottom.append(c);
+                        if (c == bottom)
+                            break;
+                    }
+                    Vector<Edge, 8> pieces;
+                    for (unsigned k = chainTopToBottom.size(); k--;) {
+                        Node* c = chainTopToBottom[k];
+                        pieces.append(Edge(c->child2().node(), UntypedUse));
+                        if (c->child3())
+                            pieces.append(Edge(c->child3().node(), UntypedUse));
+                    }
+
+                    // Keep the accumulator's original first-operand edge (the ToPrimitive/GetLocal),
+                    // so the coercion order matches the source op_strcat exactly.
+                    Edge accEdge = Edge(bottom->child1().node(), UntypedUse);
+                    top->convertToStringBuilderStrCatMany(m_graph, accEdge, pieces);
+                    if (sbVerbose())
+                        dataLogLn("[SB-STRCAT] collapsed ", chainTopToBottom.size(), " node(s) -> ", pieces.size(), " pieces");
                     changed = true;
                 }
             }

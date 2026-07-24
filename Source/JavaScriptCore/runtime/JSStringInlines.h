@@ -95,7 +95,9 @@ JSString* JSString::tryReplaceOneCharImpl(JSGlobalObject* globalObject, char16_t
     if (std::bit_cast<uint8_t*>(currentStackPointer()) < stackLimit) [[unlikely]]
         return nullptr; // Stack overflow
 
-    if (this->isNonSubstringRope()) {
+    // A deferred StringBuilder rope stores its pieces in an off-heap chunk behind a sentinel fiber0,
+    // not in walkable string fibers; materialize it via the view path below instead of recursing.
+    if (this->isNonSubstringRope() && !static_cast<JSRopeString*>(this)->isStringBuilderRope()) {
         JSRopeString* rope = static_cast<JSRopeString*>(this);
         JSString* oldFiber0 = rope->fiber0();
         JSString* oldFiber1 = rope->fiber1();
@@ -177,6 +179,11 @@ std::optional<size_t> JSString::tryFindOneChar(JSGlobalObject*, char16_t charact
 {
     ASSERT(isRope());
 
+    // A deferred StringBuilder rope has a sentinel fiber0 and off-heap chunk storage, not walkable
+    // fibers; bail so the caller resolves it and scans the flat string.
+    if (static_cast<const JSRopeString*>(this)->isStringBuilderRope())
+        return std::nullopt;
+
     // Search for a single character in a rope without resolving it.
     // If the root is a substring rope, scan it directly via its base's buffer.
     // If the root is a non-substring rope, iterate its top-level fibers:
@@ -236,6 +243,10 @@ std::optional<size_t> JSString::tryFindOneChar(JSGlobalObject*, char16_t charact
 std::optional<size_t> JSString::tryFindLastOneChar(JSGlobalObject*, char16_t character, unsigned& startPosition) const
 {
     ASSERT(isRope());
+
+    // See tryFindOneChar: a StringBuilder rope is not fiber-walkable; bail so the caller resolves it.
+    if (static_cast<const JSRopeString*>(this)->isStringBuilderRope())
+        return std::nullopt;
 
     // Reverse counterpart of tryFindOneChar: walk the rope structure without resolving it
     // and return the last occurrence of `character` at or before `startPosition` (inclusive).
@@ -317,6 +328,10 @@ ALWAYS_INLINE std::optional<char16_t> JSString::tryGetCharAt(JSGlobalObject*, un
         const JSRopeString* substringRope = static_cast<const JSRopeString*>(this);
         return StringView(substringRope->substringBase()->valueInternal())[substringRope->substringOffset() + index];
     }
+
+    // See tryFindOneChar: a StringBuilder rope is not fiber-walkable; bail so the caller resolves it.
+    if (static_cast<const JSRopeString*>(this)->isStringBuilderRope())
+        return std::nullopt;
 
     const JSRopeString* rope = static_cast<const JSRopeString*>(this);
     unsigned offset = 0;
@@ -644,9 +659,20 @@ inline void JSRopeString::resolveToBuffer(JSString* fiber0, JSString* fiber1, JS
 #endif
 }
 
+// A deferred StringBuilder rope has no walkable fibers; the jsAtomString fast paths below read
+// fibers directly (and via resolveToBuffer), so materialize any builder-rope argument in place first.
+ALWAYS_INLINE void materializeStringBuilderRopeForAtom(JSGlobalObject* globalObject, JSString* string)
+{
+    if (string->isRope() && static_cast<JSRopeString*>(string)->isStringBuilderRope())
+        string->value(globalObject);
+}
+
 inline JSString* jsAtomString(JSGlobalObject* globalObject, VM& vm, JSString* string)
 {
     auto scope = DECLARE_THROW_SCOPE(vm);
+
+    materializeStringBuilderRopeForAtom(globalObject, string);
+    RETURN_IF_EXCEPTION(scope, nullptr);
 
     unsigned length = string->length();
     if (length > KeyAtomStringCache::maxStringLengthForCache) {
@@ -711,6 +737,11 @@ inline JSString* jsAtomString(JSGlobalObject* globalObject, VM& vm, JSString* st
 inline JSString* jsAtomString(JSGlobalObject* globalObject, VM& vm, JSString* s1, JSString* s2)
 {
     auto scope = DECLARE_THROW_SCOPE(vm);
+
+    materializeStringBuilderRopeForAtom(globalObject, s1);
+    RETURN_IF_EXCEPTION(scope, nullptr);
+    materializeStringBuilderRopeForAtom(globalObject, s2);
+    RETURN_IF_EXCEPTION(scope, nullptr);
 
     unsigned length1 = s1->length();
     if (!length1)
@@ -791,6 +822,13 @@ inline JSString* jsAtomString(JSGlobalObject* globalObject, VM& vm, JSString* s1
 inline JSString* jsAtomString(JSGlobalObject* globalObject, VM& vm, JSString* s1, JSString* s2, JSString* s3)
 {
     auto scope = DECLARE_THROW_SCOPE(vm);
+
+    materializeStringBuilderRopeForAtom(globalObject, s1);
+    RETURN_IF_EXCEPTION(scope, nullptr);
+    materializeStringBuilderRopeForAtom(globalObject, s2);
+    RETURN_IF_EXCEPTION(scope, nullptr);
+    materializeStringBuilderRopeForAtom(globalObject, s3);
+    RETURN_IF_EXCEPTION(scope, nullptr);
 
     unsigned length1 = s1->length();
     if (!length1)

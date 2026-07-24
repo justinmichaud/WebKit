@@ -1506,7 +1506,8 @@ private:
         case NumberToStringWithRadix:
         case NumberToStringWithValidRadixConstant:
         case MakeRope:
-        case StrCat: {
+        case StrCat:
+        case StringBuilderStrCatMany: {
             setPrediction(SpecString);
             break;
         }

@@ -306,6 +306,7 @@ public:
                 case CompareStrictEq:
                 case SameValue:
                 case StrCat:
+                case StringBuilderStrCatMany:
                     m_graph.doToChildren(node, [&](Edge& edge) {
                         VALIDATE((node), !!edge);
                     });

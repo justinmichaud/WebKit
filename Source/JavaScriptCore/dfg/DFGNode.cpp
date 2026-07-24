@@ -395,6 +395,18 @@ void Node::convertToRegExpSearch(Node* globalObjectNode)
     children = AdjacencyList(AdjacencyList::Fixed, Edge(globalObjectNode), regExpEdge, stringEdge);
 }
 
+void Node::convertToStringBuilderStrCatMany(Graph& graph, Edge accumulator, const Vector<Edge, 8>& pieces)
+{
+    ASSERT(op() == StrCat || op() == MakeRope);
+    setOpAndDefaultFlags(StringBuilderStrCatMany);
+
+    unsigned firstChild = graph.m_varArgChildren.size();
+    graph.m_varArgChildren.append(accumulator);
+    for (const Edge& piece : pieces)
+        graph.m_varArgChildren.append(piece);
+    children = AdjacencyList(AdjacencyList::Variable, firstChild, 1 + pieces.size());
+}
+
 void Node::convertToDefineDataProperty(Graph& graph, Edge base, Edge property, Edge value, Edge attributes)
 {
     ASSERT(op() == ObjectDefinePropertyFromFields);

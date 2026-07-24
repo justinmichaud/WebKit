@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2011-2024 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -109,6 +110,7 @@
 #include "WeakMapImplInlines.h"
 #include "WeakMapPrototype.h"
 #include "WeakSetPrototype.h"
+#include <wtf/text/StringToIntegerConversion.h>
 
 #if ENABLE(JIT)
 #if ENABLE(DFG_JIT)
@@ -4783,6 +4785,9 @@ JSC_DEFINE_JIT_OPERATION(operationStringBuilderAppend, JSString*, (JSGlobalObjec
         static_cast<JSRopeString*>(left)->stringBuilderAppend(globalObject, right);
         OPERATION_RETURN(scope, left);
     }
+    // Below the promotion length, a plain rope is cheaper than a builder.
+    if (left->length() < JSRopeString::stringBuilderPromoteLength())
+        OPERATION_RETURN(scope, jsString(globalObject, left, right));
     OPERATION_RETURN(scope, JSRopeString::stringBuilderCreate(globalObject, left, right));
 }
 
@@ -4799,6 +4804,9 @@ JSC_DEFINE_JIT_OPERATION(operationStringBuilderAppend3, JSString*, (JSGlobalObje
     if (a->isRope() && static_cast<JSRopeString*>(a)->isStringBuilderRope()) {
         builder = a;
         static_cast<JSRopeString*>(builder)->stringBuilderAppend(globalObject, b);
+    } else if (a->length() < JSRopeString::stringBuilderPromoteLength()) {
+        // Below the promotion length, a plain 3-fiber rope is cheaper than a builder.
+        OPERATION_RETURN(scope, jsString(globalObject, a, b, c));
     } else
         builder = JSRopeString::stringBuilderCreate(globalObject, a, b);
     if (builder) [[likely]]
@@ -4851,6 +4859,67 @@ JSC_DEFINE_JIT_OPERATION(operationStrCat3, JSString*, (JSGlobalObject* globalObj
     OPERATION_RETURN_IF_EXCEPTION(scope, nullptr);
 
     OPERATION_RETURN(scope, jsString(globalObject, str1, str2, str3));
+}
+
+// Deferred StringBuilder for a >3-operand op_strcat accumulator (see DFGStringBuilderPhase).
+// operands[0] is the accumulator V; operands[1..count-1] are the pieces. Coerces every piece to a
+// string first (which is side-effect-free for StrCat's already-primitive operands, and leaves the
+// builder untouched should a coercion ever throw), storing each back into the scratch buffer so the
+// GC traces it, then appends them into V's native builder rope in place -- reusing the builder each
+// iteration instead of allocating the chain of intermediate ropes the split StrCat nodes would.
+JSC_DEFINE_JIT_OPERATION(operationStringBuilderStrCatMany, JSString*, (JSGlobalObject* globalObject, EncodedJSValue* operands, uint32_t count))
+{
+    VM& vm = globalObject->vm();
+    CallFrame* callFrame = DECLARE_CALL_FRAME(vm);
+    JITOperationPrologueCallFrameTracer tracer(vm, callFrame);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    ASSERT(count >= 3);
+
+    JSValue accValue = JSValue::decode(operands[0]);
+    bool accIsBuilder = accValue.isString() && asString(accValue)->isRope()
+        && static_cast<JSRopeString*>(asString(accValue))->isStringBuilderRope();
+
+    // The builder rope must not be run through toString (that would resolve it); a normal-string
+    // accumulator (empty on the first iteration) is coerced here in ToString order, ahead of the pieces.
+    JSString* accStr = nullptr;
+    if (!accIsBuilder) {
+        accStr = accValue.toString(globalObject);
+        OPERATION_RETURN_IF_EXCEPTION(scope, nullptr);
+    }
+
+    for (uint32_t i = 1; i < count; ++i) {
+        JSString* piece = JSValue::decode(operands[i]).toString(globalObject);
+        OPERATION_RETURN_IF_EXCEPTION(scope, nullptr);
+        operands[i] = JSValue::encode(piece);
+    }
+
+    // Below the promotion length, a plain rope chain is cheaper than a builder.
+    if (!accIsBuilder && accStr->length() < JSRopeString::stringBuilderPromoteLength()) {
+        JSString* result = accStr;
+        for (uint32_t i = 1; i < count; ++i) {
+            result = jsString(globalObject, result, asString(JSValue::decode(operands[i])));
+            OPERATION_RETURN_IF_EXCEPTION(scope, nullptr);
+        }
+        OPERATION_RETURN(scope, result);
+    }
+
+    JSString* builder;
+    uint32_t next;
+    if (accIsBuilder) {
+        builder = asString(accValue);
+        next = 1;
+    } else {
+        builder = JSRopeString::stringBuilderCreate(globalObject, accStr, asString(JSValue::decode(operands[1])));
+        OPERATION_RETURN_IF_EXCEPTION(scope, nullptr);
+        if (!builder) [[unlikely]]
+            OPERATION_RETURN(scope, nullptr);
+        next = 2;
+    }
+    for (; next < count; ++next)
+        static_cast<JSRopeString*>(builder)->stringBuilderAppend(globalObject, asString(JSValue::decode(operands[next])));
+
+    OPERATION_RETURN(scope, builder);
 }
 
 JSC_DEFINE_JIT_OPERATION(operationMakeAtomString1, JSString*, (JSGlobalObject* globalObject, JSString* a))

@@ -2,6 +2,7 @@
  *  Copyright (C) 1999-2002 Harri Porten (porten@kde.org)
  *  Copyright (C) 2001 Peter Kelly (pmk@post.com)
  *  Copyright (C) 2004-2021 Apple Inc. All rights reserved.
+ *  Copyright (C) 2026 Igalia S.L.
  *
  *  This library is free software; you can redistribute it and/or
  *  modify it under the terms of the GNU Library General Public
@@ -44,6 +45,7 @@
 #include <string>
 #include <vector>
 #include <wtf/text/StringBuilder.h>
+#include <wtf/text/StringToIntegerConversion.h>
 // --- END ---
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
@@ -454,6 +456,18 @@ size_t JSString::estimatedSize(JSCell* cell, VM& vm)
 using SBChunk = JSStringBuilderChunk;
 using SBState = JSStringBuilderState;
 static constexpr unsigned sbChunkSize = jsStringBuilderChunkSize;
+
+unsigned JSRopeString::stringBuilderPromoteLength()
+{
+    static unsigned value = [] -> unsigned {
+        if (const char* e = getenv("SB_PROMOTE")) {
+            if (auto parsed = parseInteger<unsigned>(StringView::fromLatin1(e)))
+                return *parsed;
+        }
+        return 64;
+    }();
+    return value;
+}
 
 // Diagnostic counters, off by default. The enable flag is a plain global read once at startup so
 // the append fast path pays only a predicted-not-taken branch, not a locked atomic, when disabled.

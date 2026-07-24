@@ -2,6 +2,7 @@
  *  Copyright (C) 1999-2001 Harri Porten (porten@kde.org)
  *  Copyright (C) 2001 Peter Kelly (pmk@post.com)
  *  Copyright (C) 2003-2023 Apple Inc. All rights reserved.
+ *  Copyright (C) 2026 Igalia S.L.
  *
  *  This library is free software; you can redistribute it and/or
  *  modify it under the terms of the GNU Library General Public
@@ -660,6 +661,15 @@ public:
     // so the collector may read them while the mutator appends. On first read it materializes to a
     // normal flat string (convertToNonRope). See operationStringBuilderAppend.
     static constexpr uintptr_t stringBuilderMarker = 0x40; // 8-aligned; low 3 flag bits stay clear
+
+    // Short-accumulator gate for the deferred StringBuilder. Creating a builder costs two heap
+    // allocations (a state object plus a multi-kilobyte chunk) that never amortize while the
+    // accumulator stays short, so an accumulator remains a plain rope until it reaches this length,
+    // then promotes to a builder. Both the inline MakeRope fast path (DFG and FTL codegen) and
+    // operationStringBuilderAppend{,3}/StrCatMany read this single accessor, so the inline
+    // length-compare and the runtime promotion gate can never disagree. Tunable via SB_PROMOTE.
+    static unsigned stringBuilderPromoteLength();
+
     static JSString* stringBuilderCreate(JSGlobalObject*, JSString* a, JSString* b);
     void stringBuilderAppend(JSGlobalObject*, JSString* piece);
     bool isStringBuilderRope() const { return isRope() && !isSubstring() && std::bit_cast<uintptr_t>(fiber0()) == stringBuilderMarker; }
@@ -1083,6 +1093,10 @@ inline JSString* tryJSSubstringImpl(VM& vm, JSString* base, unsigned offset, uns
             return nullptr;
 
         auto* rope = uncheckedDowncast<JSRopeString>(base);
+        // A deferred StringBuilder rope stores its pieces off-heap behind a sentinel fiber0, not in
+        // walkable fibers; bail so jsSubstring resolves it and slices the flat string.
+        if (rope->isStringBuilderRope())
+            return nullptr;
         auto* fiber0 = rope->fiber0();
         ASSERT(fiber0);
         if (offset < fiber0->length()) {

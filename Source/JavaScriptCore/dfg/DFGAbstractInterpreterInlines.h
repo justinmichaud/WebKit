@@ -949,7 +949,8 @@ bool AbstractInterpreter<AbstractStateType>::executeEffects(unsigned clobberLimi
         break;
     }
 
-    case StrCat: {
+    case StrCat:
+    case StringBuilderStrCatMany: {
         setTypeForNode(node, SpecString);
         break;
     }

@@ -1806,6 +1806,7 @@ public:
     void compileGetArgumentCountIncludingThis(Node*);
     void compileSetArgumentCountIncludingThis(Node*);
     void compileStrCat(Node*);
+    void compileStringBuilderStrCatMany(Node*);
     void compileNewArrayBuffer(Node*);
     void compileNewButterflyWithSize(Node*);
     void compileGetCellButterflySlot(Node*);

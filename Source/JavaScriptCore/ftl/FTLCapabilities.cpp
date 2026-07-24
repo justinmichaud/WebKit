@@ -111,6 +111,7 @@ inline CapabilityLevel canCompile(DFG::Node* node)
     case Inc:
     case Dec:
     case StrCat:
+    case StringBuilderStrCatMany:
     case ArithAdd:
     case ArithClz32:
     case ArithSub:

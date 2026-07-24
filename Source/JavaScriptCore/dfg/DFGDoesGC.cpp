@@ -462,6 +462,7 @@ bool doesGC(Graph& graph, Node* node)
     case MaterializeCreateActivation:
     case SetFunctionName:
     case StrCat:
+    case StringBuilderStrCatMany:
     case StringReplace:
     case StringReplaceAll:
     case StringReplaceRegExp:

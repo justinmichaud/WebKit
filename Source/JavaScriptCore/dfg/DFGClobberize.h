@@ -274,6 +274,14 @@ void clobberize(Graph& graph, Node* node, const ReadFunctor& read, const WriteFu
         def(PureValue(node));
         return;
 
+    case StringBuilderStrCatMany:
+        // Appends into the accumulator's native builder in place and may allocate. Model it as an
+        // allocation (not PureValue) so CSE never merges two accumulator appends; its operands are
+        // the same already-primitive values StrCat carries, so it reads nothing observable.
+        read(HeapObjectCount);
+        write(HeapObjectCount);
+        return;
+
     // These nodes are realm-dependent when MasqueradesAsUndefined is involved.
     // Including the globalObject in the PureValue ensures nodes from different realms are not folded by CSE.
     case TypeOfIsUndefined:

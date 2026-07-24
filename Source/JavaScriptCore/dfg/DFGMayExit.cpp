@@ -184,6 +184,7 @@ ExitMode mayExitImpl(Graph& graph, Node* node, StateType& state)
 
     case EnumeratorNextUpdatePropertyName:
     case StrCat:
+    case StringBuilderStrCatMany:
     case Call:
     case Construct:
     case CallVarargs:
