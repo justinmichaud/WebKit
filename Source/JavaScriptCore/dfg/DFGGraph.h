@@ -1502,6 +1502,11 @@ public:
     UncheckedKeyHashSet<Node*> m_slowGetByVal;
     UncheckedKeyHashSet<Node*> m_slowPutByVal;
 
+    // Prototype StringBuilder: bytecode offsets of MakeRope accumulators (V = V + x) recognized by
+    // DFGStringBuilderPhase. Keyed by bytecode (not Node*/flags) so it survives SSA conversion and
+    // reaches FTL codegen. compileMakeRope routes these to operationStringBuilderAppend.
+    UncheckedKeyHashSet<unsigned> m_stringBuilderConcatBytecodes;
+
 private:
     template<typename Visitor> void visitChildrenImpl(Visitor&);
 

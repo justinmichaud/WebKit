@@ -68,6 +68,7 @@
 #include "DFGStoreBarrierClusteringPhase.h"
 #include "DFGStoreBarrierInsertionPhase.h"
 #include "DFGStrengthReductionPhase.h"
+#include "DFGStringBuilderPhase.h"
 #include "DFGThunks.h"
 #include "DFGTierUpCheckInjectionPhase.h"
 #include "DFGTypeCheckHoistingPhase.h"
@@ -254,6 +255,7 @@ Plan::CompilationPath Plan::compileInThreadImpl()
     
     RUN_PHASE(performPredictionPropagation);
     RUN_PHASE(performFixup);
+    RUN_PHASE(performStringBuilderConcat);
     RUN_PHASE(performInvalidationPointInjection);
     RUN_PHASE(performTypeCheckHoisting);
 

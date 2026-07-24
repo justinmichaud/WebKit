@@ -67,6 +67,10 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
 namespace JSC {
 
+// rope-site instrumentation (defined in JSString.cpp; env RSITE=1, run JIT-off).
+extern bool g_ropeSiteEnabled;
+void ropeSiteRecordCreate(JSString*, CodeBlock*, unsigned bytecodeOffset, EncodedJSValue lhs, EncodedJSValue rhs, unsigned kindTag, unsigned operandCount);
+
 #define BEGIN_NO_SET_PC() \
     CodeBlock* codeBlock = callFrame->codeBlock(); \
     JSGlobalObject* globalObject = codeBlock->globalObject(); \
@@ -558,6 +562,9 @@ JSC_DEFINE_COMMON_SLOW_PATH(slow_path_add)
     arithProfile.observeLHSAndRHS(v1, v2);
 
     JSValue result = jsAdd(globalObject, v1, v2);
+
+    if (g_ropeSiteEnabled && result.isString()) [[unlikely]]
+        ropeSiteRecordCreate(asString(result), codeBlock, codeBlock->bytecodeOffset(pc), JSValue::encode(v1), JSValue::encode(v2), 0, 0);
 
     RETURN_WITH_PROFILING(result, {
         updateArithProfileForBinaryArithOp(globalObject, codeBlock, pc, result, v1, v2);
@@ -1126,7 +1133,10 @@ JSC_DEFINE_COMMON_SLOW_PATH(slow_path_strcat)
 {
     BEGIN();
     auto bytecode = pc->as<OpStrcat>();
-    RETURN(jsStringFromRegisterArray(globalObject, &GET(bytecode.m_src), bytecode.m_count));
+    JSValue strcatResult = jsStringFromRegisterArray(globalObject, &GET(bytecode.m_src), bytecode.m_count);
+    if (g_ropeSiteEnabled && strcatResult.isString()) [[unlikely]]
+        ropeSiteRecordCreate(asString(strcatResult), codeBlock, codeBlock->bytecodeOffset(pc), 0, 0, 1, bytecode.m_count);
+    RETURN(strcatResult);
 }
 
 JSC_DEFINE_COMMON_SLOW_PATH(slow_path_to_primitive)

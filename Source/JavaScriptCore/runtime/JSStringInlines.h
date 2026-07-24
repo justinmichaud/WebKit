@@ -37,6 +37,10 @@
 
 namespace JSC {
 
+// --- rope-usage instrumentation denominator (see JSString.cpp; JSC_ROPE_TRACE=1) ---
+extern bool g_ropeTraceEnabled;
+void ropeTraceRecordDestroy(const JSRopeString*);
+
 ALWAYS_INLINE void JSString::destroy(JSCell* cell)
 {
     auto* string = static_cast<JSString*>(cell);
@@ -46,6 +50,12 @@ ALWAYS_INLINE void JSString::destroy(JSCell* cell)
 ALWAYS_INLINE void JSRopeString::destroy(JSCell* cell)
 {
     auto* string = static_cast<JSRopeString*>(cell);
+    if (g_ropeTraceEnabled)
+        ropeTraceRecordDestroy(string);
+    if (string->isStringBuilderRope()) {
+        string->freeStringBuilderBuffer(); // free the native buffer of a never-materialized builder
+        return;
+    }
     if (string->isRope())
         return;
     string->valueInternal().~String();
@@ -402,9 +412,18 @@ inline void JSRopeString::convertToNonRope(String&& string) const
 // Vector before performing any concatenation, but by working backwards we likely
 // only fill the queue with the number of substrings at any given level in a
 // rope-of-ropes.)
+ALWAYS_INLINE void JSRopeString::materializeStringBuilderFiberIfNeeded(JSString* f)
+{
+    if (f && f->isRope() && static_cast<JSRopeString*>(f)->isStringBuilderRope())
+        static_cast<JSRopeString*>(f)->materializeStringBuilder();
+}
+
 template<typename CharacterType>
 NEVER_INLINE void JSRopeString::resolveToBufferSlow(JSString* fiber0, JSString* fiber1, JSString* fiber2, std::span<CharacterType> buffer, uint8_t*)
 {
+    materializeStringBuilderFiberIfNeeded(fiber0);
+    materializeStringBuilderFiberIfNeeded(fiber1);
+    materializeStringBuilderFiberIfNeeded(fiber2);
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
     // Keep in mind that resolveToBufferSlow signature must be the same to resolveToBuffer to encourage tail-calls by clang, that's the reason why
     // it takes the last stackLimit parameter still while it is not used here.
@@ -425,7 +444,11 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
         if (currentFiber->isRope()) {
             JSRopeString* currentFiberAsRope = static_cast<JSRopeString*>(currentFiber);
-            if (currentFiberAsRope->isSubstring()) {
+            // A builder rope reached as a nested fiber must materialize before it is read: its
+            // fiber slots hold a marker and an off-heap buffer pointer, not fibers to walk.
+            if (currentFiberAsRope->isStringBuilderRope())
+                currentFiberAsRope->materializeStringBuilder(); // now non-rope; fall through to the leaf copy
+            else if (currentFiberAsRope->isSubstring()) {
                 ASSERT(!currentFiberAsRope->substringBase()->isRope());
                 StringView view = *currentFiberAsRope->substringBase()->valueInternal().impl();
                 unsigned offset = currentFiberAsRope->substringOffset();
@@ -433,10 +456,11 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
                 position -= length;
                 view.substring(offset, length).getCharacters(unsafeMakeSpan(position, end - position));
                 continue;
+            } else {
+                for (size_t i = 0; i < JSRopeString::s_maxInternalRopeLength && currentFiberAsRope->fiber(i); ++i)
+                    workQueue.append(currentFiberAsRope->fiber(i));
+                continue;
             }
-            for (size_t i = 0; i < JSRopeString::s_maxInternalRopeLength && currentFiberAsRope->fiber(i); ++i)
-                workQueue.append(currentFiberAsRope->fiber(i));
-            continue;
         }
 
         StringView view = *currentFiber->valueInternal().impl();
@@ -451,6 +475,9 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 template<typename CharacterType>
 inline void JSRopeString::resolveToBuffer(JSString* fiber0, JSString* fiber1, JSString* fiber2, std::span<CharacterType> buffer, uint8_t* stackLimit)
 {
+    materializeStringBuilderFiberIfNeeded(fiber0);
+    materializeStringBuilderFiberIfNeeded(fiber1);
+    materializeStringBuilderFiberIfNeeded(fiber2);
 #if HAVE(MUST_TAIL_CALL)
     ASSERT(fiber0);
 

@@ -444,6 +444,7 @@ dfg/DFGStaticExecutionCountEstimationPhase.cpp
 dfg/DFGStoreBarrierClusteringPhase.cpp
 dfg/DFGStoreBarrierInsertionPhase.cpp
 dfg/DFGStrengthReductionPhase.cpp
+dfg/DFGStringBuilderPhase.cpp
 dfg/DFGStructureAbstractValue.cpp
 dfg/DFGThunks.cpp
 dfg/DFGTierUpCheckInjectionPhase.cpp

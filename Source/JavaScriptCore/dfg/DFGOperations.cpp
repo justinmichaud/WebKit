@@ -4766,6 +4766,46 @@ JSC_DEFINE_JIT_OPERATION(operationMakeRope2, JSString*, (JSGlobalObject* globalO
     OPERATION_RETURN(scope, jsString(globalObject, left, right));
 }
 
+// Prototype StringBuilder append (see DFGStringBuilderPhase): the DFG routes a recognized
+// V = V + x accumulator MakeRope here. If `left` is a 2-fiber rope, append `right` in place
+// (reusing one cell); otherwise fall back to a normal rope. Behaviourally identical to
+// operationMakeRope2 -- just fewer allocations.
+JSC_DEFINE_JIT_OPERATION(operationStringBuilderAppend, JSString*, (JSGlobalObject* globalObject, JSString* left, JSString* right))
+{
+    VM& vm = globalObject->vm();
+    CallFrame* callFrame = DECLARE_CALL_FRAME(vm);
+    JITOperationPrologueCallFrameTracer tracer(vm, callFrame);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    // If the accumulator is already a native StringBuilder rope, append into its buffer in place
+    // (no new JS cell). Otherwise (first iteration) start one seeded with left + right.
+    if (left->isRope() && static_cast<JSRopeString*>(left)->isStringBuilderRope()) {
+        static_cast<JSRopeString*>(left)->stringBuilderAppend(globalObject, right);
+        OPERATION_RETURN(scope, left);
+    }
+    OPERATION_RETURN(scope, JSRopeString::stringBuilderCreate(globalObject, left, right));
+}
+
+// Atomic 3-input variant: appends BOTH b and c into the builder in one call. A single call (hence
+// a single DFG node) keeps the whole `V = V + b + c` bytecode op atomic w.r.t. OSR.
+JSC_DEFINE_JIT_OPERATION(operationStringBuilderAppend3, JSString*, (JSGlobalObject* globalObject, JSString* a, JSString* b, JSString* c))
+{
+    VM& vm = globalObject->vm();
+    CallFrame* callFrame = DECLARE_CALL_FRAME(vm);
+    JITOperationPrologueCallFrameTracer tracer(vm, callFrame);
+    auto scope = DECLARE_THROW_SCOPE(vm);
+
+    JSString* builder;
+    if (a->isRope() && static_cast<JSRopeString*>(a)->isStringBuilderRope()) {
+        builder = a;
+        static_cast<JSRopeString*>(builder)->stringBuilderAppend(globalObject, b);
+    } else
+        builder = JSRopeString::stringBuilderCreate(globalObject, a, b);
+    if (builder) [[likely]]
+        static_cast<JSRopeString*>(builder)->stringBuilderAppend(globalObject, c);
+    OPERATION_RETURN(scope, builder);
+}
+
 JSC_DEFINE_JIT_OPERATION(operationMakeRope3, JSString*, (JSGlobalObject* globalObject, JSString* a, JSString* b, JSString* c))
 {
     VM& vm = globalObject->vm();

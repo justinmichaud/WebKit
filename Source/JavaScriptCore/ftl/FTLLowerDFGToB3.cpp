@@ -11747,6 +11747,96 @@ IGNORE_CLANG_WARNINGS_END
             numKids = 2;
         }
 
+        // Prototype StringBuilder: a recognized V = V + ... accumulator. The common case (already a
+        // builder, room in the tail chunk) is inlined as a few stores; a miss falls back to
+        // operationStringBuilderAppend{,3}. This is the steady-state hot path, so inlining it (not
+        // a C call per iteration) is what removes the per-append overhead. Mirrors the DFG path.
+        if (m_graph.m_stringBuilderConcatBytecodes.contains(m_node->origin.semantic.bytecodeIndex().offset())) {
+            bool three = (numKids == 3);
+            PatchpointValue* patchpoint = m_out.patchpoint(pointerType());
+            patchpoint->appendSomeRegister(kids[0]);
+            patchpoint->appendSomeRegister(kids[1]);
+            if (three)
+                patchpoint->appendSomeRegister(kids[2]);
+            patchpoint->clobber(RegisterSet::macroClobberedGPRs());
+            patchpoint->numGPScratchRegisters = 6;
+            RefPtr<PatchpointExceptionHandle> exceptionHandle = preparePatchpointForExceptions(patchpoint);
+            State* state = &m_ftlState;
+            CodeOrigin semanticOrigin = m_node->origin.semantic;
+            patchpoint->setGenerator([=] (CCallHelpers& jit, const StackmapGenerationParams& params) {
+                AllowMacroScratchRegisterUsage allowScratch(jit);
+                Box<CCallHelpers::JumpList> exceptions = exceptionHandle->scheduleExitCreation(params)->jumps(jit);
+
+                GPRReg resultGPR = params[0].gpr();
+                GPRReg accGPR = params[1].gpr();
+                GPRReg bGPR = params[2].gpr();
+                GPRReg cGPR = three ? params[3].gpr() : InvalidGPRReg;
+                GPRReg chunkGPR = params.gpScratch(0);
+                GPRReg countGPR = params.gpScratch(1);
+                GPRReg lengthGPR = params.gpScratch(2);
+                GPRReg flagsGPR = params.gpScratch(3);
+                GPRReg scratchGPR = params.gpScratch(4);
+                GPRReg scratch2GPR = params.gpScratch(5); // never resultGPR: B3 may alias result with an input
+
+                CCallHelpers::JumpList slowCases;
+
+                jit.loadPtr(CCallHelpers::Address(accGPR, JSString::offsetOfValue()), scratchGPR);
+                jit.and64(CCallHelpers::TrustedImm64(JSRopeString::stringMask), scratchGPR);
+                slowCases.append(jit.branch64(CCallHelpers::NotEqual, scratchGPR, CCallHelpers::TrustedImm64(JSRopeString::stringBuilderMarker)));
+
+                jit.load64(CCallHelpers::Address(accGPR, JSRopeString::offsetOfFiber1Lower()), chunkGPR);
+                jit.and64(CCallHelpers::TrustedImm64(JSRopeString::CompactFibers::addressMask), chunkGPR);
+                jit.loadPtr(CCallHelpers::Address(chunkGPR, JSStringBuilderState::offsetOfTail()), chunkGPR);
+                jit.load32(CCallHelpers::Address(chunkGPR, JSStringBuilderChunk::offsetOfCount()), countGPR);
+                slowCases.append(jit.branch32(CCallHelpers::AboveOrEqual, countGPR, CCallHelpers::TrustedImm32(jsStringBuilderChunkSize - (three ? 1 : 0))));
+
+                jit.load32(CCallHelpers::Address(accGPR, JSRopeString::offsetOfLength()), lengthGPR);
+                jit.load32(CCallHelpers::Address(accGPR, JSRopeString::offsetOfFlags()), flagsGPR);
+
+                auto foldPiece = [&] (GPRReg pieceGPR) {
+                    jit.storePtr(pieceGPR, CCallHelpers::BaseIndex(chunkGPR, countGPR, CCallHelpers::TimesEight, JSStringBuilderChunk::offsetOfSlots()));
+                    jit.add32(CCallHelpers::TrustedImm32(1), countGPR);
+                    jit.loadPtr(CCallHelpers::Address(pieceGPR, JSString::offsetOfValue()), scratchGPR);
+                    CCallHelpers::Jump isRope = jit.branchIfRopeStringImpl(scratchGPR);
+                    jit.load32(CCallHelpers::Address(scratchGPR, StringImpl::lengthMemoryOffset()), scratch2GPR);
+                    jit.add32(scratch2GPR, lengthGPR);
+                    jit.load32(CCallHelpers::Address(scratchGPR, StringImpl::flagsOffset()), scratch2GPR);
+                    CCallHelpers::Jump doneFold = jit.jump();
+                    isRope.link(&jit);
+                    jit.load32(CCallHelpers::Address(pieceGPR, JSRopeString::offsetOfLength()), scratch2GPR);
+                    jit.add32(scratch2GPR, lengthGPR);
+                    jit.load32(CCallHelpers::Address(pieceGPR, JSRopeString::offsetOfFlags()), scratch2GPR);
+                    doneFold.link(&jit);
+                    jit.or32(CCallHelpers::TrustedImm32(~static_cast<int32_t>(JSRopeString::is8BitInPointer)), scratch2GPR);
+                    jit.and32(scratch2GPR, flagsGPR);
+                };
+                foldPiece(bGPR);
+                if (three)
+                    foldPiece(cGPR);
+
+                jit.store32(lengthGPR, CCallHelpers::Address(accGPR, JSRopeString::offsetOfLength()));
+                jit.store32(flagsGPR, CCallHelpers::Address(accGPR, JSRopeString::offsetOfFlags()));
+                jit.storeFence();
+                jit.store32(countGPR, CCallHelpers::Address(chunkGPR, JSStringBuilderChunk::offsetOfCount()));
+                jit.move(accGPR, resultGPR);
+                CCallHelpers::Label done = jit.label();
+
+                params.addLatePath([=] (CCallHelpers& jit) {
+                    AllowMacroScratchRegisterUsage allowScratch(jit);
+                    slowCases.link(&jit);
+                    if (three)
+                        callOperation(*state, params.unavailableRegisters(), jit, semanticOrigin, exceptions.get(), operationStringBuilderAppend3, resultGPR, CCallHelpers::TrustedImmPtr(globalObject), accGPR, bGPR, cGPR).call();
+                    else
+                        callOperation(*state, params.unavailableRegisters(), jit, semanticOrigin, exceptions.get(), operationStringBuilderAppend, resultGPR, CCallHelpers::TrustedImmPtr(globalObject), accGPR, bGPR).call();
+                    jit.jump().linkTo(done, &jit);
+                });
+            });
+            // The builder now references young pieces through its off-heap chunk; keep it remembered.
+            emitStoreBarrier(patchpoint, false);
+            setJSValue(patchpoint);
+            return;
+        }
+
         LBasicBlock emptyCase = m_out.newBlock();
         LBasicBlock slowPath = m_out.newBlock();
         LBasicBlock continuation = m_out.newBlock();

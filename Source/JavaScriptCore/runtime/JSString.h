@@ -323,6 +323,23 @@ private:
     friend JSString* jsAtomString(JSGlobalObject*, VM&, JSString*, JSString*, JSString*);
 };
 
+// Prototype StringBuilder: off-heap storage for a builder rope's accumulated piece pointers. A
+// builder holds a chunked, append-only list of these; the JIT append fast path stores directly
+// into the tail chunk (see DFG/FTL compileMakeRope), and visitChildren traces every live slot.
+static constexpr unsigned jsStringBuilderChunkSize = 512;
+struct JSStringBuilderChunk {
+    JSStringBuilderChunk* next { nullptr };
+    unsigned count { 0 };
+    std::array<JSString*, jsStringBuilderChunkSize> slots;
+    static constexpr ptrdiff_t offsetOfCount() { return OBJECT_OFFSETOF(JSStringBuilderChunk, count); }
+    static constexpr ptrdiff_t offsetOfSlots() { return OBJECT_OFFSETOF(JSStringBuilderChunk, slots); }
+};
+struct JSStringBuilderState {
+    JSStringBuilderChunk* head { nullptr };
+    JSStringBuilderChunk* tail { nullptr };
+    static constexpr ptrdiff_t offsetOfTail() { return OBJECT_OFFSETOF(JSStringBuilderState, tail); }
+};
+
 // NOTE: This class cannot override JSString's destructor. JSString's destructor is called directly
 // from JSStringSubspace::
 class JSRopeString final : public JSString {
@@ -629,8 +646,35 @@ public:
     JS_EXPORT_PRIVATE const String& resolveRope(JSGlobalObject* nullOrGlobalObjectForOOM) const;
     JS_EXPORT_PRIVATE const String& resolveRopeWithoutGC() const;
 
+    // Prototype StringBuilder optimization (DFGStringBuilderPhase). A recognized V = V + x
+    // accumulator loop builds into a single "builder rope" cell instead of allocating a fresh
+    // JSRopeString per iteration. The builder DEFERS all character work: each append just records
+    // the piece POINTER into a chunked list held off-heap (a SBState* stashed in the unused fiber1
+    // slot); the characters are copied exactly ONCE, at materialization (matching a normal rope,
+    // whose resolve also copies each character once). This is both cheaper per-iteration than the
+    // old char-copying WTF::StringBuilder strategy AND trivially inlinable (fast path = one pointer
+    // store, no variable memcpy). The cell is marked by fiber0 == stringBuilderMarker, a sentinel
+    // that never collides with a real fiber pointer or the null fiber0 of a partially-constructed
+    // rope -- so visitChildren can tell a builder (whose pieces it must trace) apart from either.
+    // A write barrier on each append keeps generational/concurrent GC correct; chunks never move,
+    // so the collector may read them while the mutator appends. On first read it materializes to a
+    // normal flat string (convertToNonRope). See operationStringBuilderAppend.
+    static constexpr uintptr_t stringBuilderMarker = 0x40; // 8-aligned; low 3 flag bits stay clear
+    static JSString* stringBuilderCreate(JSGlobalObject*, JSString* a, JSString* b);
+    void stringBuilderAppend(JSGlobalObject*, JSString* piece);
+    bool isStringBuilderRope() const { return isRope() && !isSubstring() && std::bit_cast<uintptr_t>(fiber0()) == stringBuilderMarker; }
+    void materializeStringBuilder();
+    // Copy every accumulated piece's characters into `buffer` (one pass, no per-piece StringImpl):
+    // flat pieces are copied directly, rope pieces resolved straight into their slice.
+    template<typename CharacterType> void copyStringBuilderPiecesInto(JSStringBuilderState*, std::span<CharacterType> buffer) const;
+    void freeStringBuilderBuffer(); // called from destroy for a never-materialized builder
+
     template<typename CharacterType>
     static void resolveToBuffer(JSString*, JSString*, JSString*, std::span<CharacterType> buffer, uint8_t* stackLimit);
+
+    // If `f` is a prototype StringBuilder rope, materialize it to a flat string so the normal
+    // flattener sees an ordinary leaf. Called at the top of resolveToBuffer for each fiber.
+    static void materializeStringBuilderFiberIfNeeded(JSString* f);
 
 private:
     template<typename CharacterType>

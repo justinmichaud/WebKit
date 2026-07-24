@@ -17668,6 +17668,107 @@ void SpeculativeJIT::compileMakeRope(Node* node)
     ASSERT(node->child2().useKind() == KnownStringUse);
     ASSERT(!node->child3() || node->child3().useKind() == KnownStringUse);
 
+    // Prototype StringBuilder: a recognized V = V + ... accumulator appends its extra fibers into a
+    // deferred native builder. The common case (accumulator already a builder, room in the tail
+    // chunk) is inlined here as a handful of stores -- no C call. Miss (not yet a builder, or the
+    // tail chunk is full) falls back to operationStringBuilderAppend{,3}, which creates or grows.
+    if (m_graph.m_stringBuilderConcatBytecodes.contains(node->origin.semantic.bytecodeIndex().offset())) {
+        bool three = !!node->child3();
+        SpeculateCellOperand accOp(this, node->child1());
+        SpeculateCellOperand op2(this, node->child2());
+        SpeculateCellOperand op3(this, node->child3());
+        GPRReg accGPR = accOp.gpr();
+        GPRReg op2GPR = op2.gpr();
+        GPRReg op3GPR = three ? op3.gpr() : InvalidGPRReg;
+
+        GPRTemporary result(this);
+        GPRTemporary chunk(this);
+        GPRTemporary count(this);
+        GPRTemporary lengthAcc(this);
+        GPRTemporary flagsAcc(this);
+        GPRTemporary scratch(this);
+        GPRTemporary scratch2(this);
+        GPRReg resultGPR = result.gpr();
+        GPRReg chunkGPR = chunk.gpr();
+        GPRReg countGPR = count.gpr();
+        GPRReg lengthGPR = lengthAcc.gpr();
+        GPRReg flagsGPR = flagsAcc.gpr();
+        GPRReg scratchGPR = scratch.gpr();
+        GPRReg scratch2GPR = scratch2.gpr();
+
+        JumpList slowCases;
+
+        // Builder? (m_fiber & stringMask) == marker. A normal rope has a real fiber0 pointer; a
+        // partially-constructed rope has null; only a builder has the sentinel.
+        loadPtr(Address(accGPR, JSString::offsetOfValue()), scratchGPR);
+        andPtr(TrustedImmPtr(std::bit_cast<void*>(JSRopeString::stringMask)), scratchGPR);
+        slowCases.append(branchPtr(NotEqual, scratchGPR, TrustedImmPtr(std::bit_cast<void*>(JSRopeString::stringBuilderMarker))));
+
+        // tail = state->tail; state = fiber1 (48-bit packed pointer).
+        load64(Address(accGPR, JSRopeString::offsetOfFiber1Lower()), chunkGPR);
+        andPtr(TrustedImmPtr(std::bit_cast<void*>(JSRopeString::CompactFibers::addressMask)), chunkGPR);
+        loadPtr(Address(chunkGPR, JSStringBuilderState::offsetOfTail()), chunkGPR);
+        load32(Address(chunkGPR, JSStringBuilderChunk::offsetOfCount()), countGPR);
+        slowCases.append(branch32(AboveOrEqual, countGPR, TrustedImm32(jsStringBuilderChunkSize - (three ? 1 : 0))));
+
+        // Running length/is8Bit start from the builder cell; the outer concat reads both, so keep
+        // them exact. is8Bit lives in bit is8BitInPointer of the flags word (bit 2) for both a flat
+        // StringImpl (m_hashAndFlags) and a rope (m_fiber), so one mask handles either.
+        load32(Address(accGPR, JSRopeString::offsetOfLength()), lengthGPR);
+        load32(Address(accGPR, JSRopeString::offsetOfFlags()), flagsGPR);
+
+        auto foldPiece = [&] (GPRReg pieceGPR) {
+            storePtr(pieceGPR, BaseIndex(chunkGPR, countGPR, TimesEight, JSStringBuilderChunk::offsetOfSlots()));
+            add32(TrustedImm32(1), countGPR);
+            loadPtr(Address(pieceGPR, JSString::offsetOfValue()), scratchGPR);
+            Jump isRope = branchIfRopeStringImpl(scratchGPR);
+            load32(Address(scratchGPR, StringImpl::lengthMemoryOffset()), scratch2GPR);
+            add32(scratch2GPR, lengthGPR);
+            load32(Address(scratchGPR, StringImpl::flagsOffset()), scratch2GPR);
+            Jump done = jump();
+            isRope.link(this);
+            load32(Address(pieceGPR, JSRopeString::offsetOfLength()), scratch2GPR);
+            add32(scratch2GPR, lengthGPR);
+            load32(Address(pieceGPR, JSRopeString::offsetOfFlags()), scratch2GPR);
+            done.link(this);
+            // flags &= (pieceFlags | ~is8Bit): clears the builder's is8Bit bit iff this piece is 16-bit.
+            or32(TrustedImm32(~static_cast<int32_t>(JSRopeString::is8BitInPointer)), scratch2GPR);
+            and32(scratch2GPR, flagsGPR);
+        };
+        foldPiece(op2GPR);
+        if (three)
+            foldPiece(op3GPR);
+
+        store32(lengthGPR, Address(accGPR, JSRopeString::offsetOfLength()));
+        store32(flagsGPR, Address(accGPR, JSRopeString::offsetOfFlags()));
+        storeFence(); // publish the slot stores before the count so a concurrent collector sees them
+        store32(countGPR, Address(chunkGPR, JSStringBuilderChunk::offsetOfCount()));
+
+        move(accGPR, resultGPR);
+
+        if (three)
+            addSlowPathGenerator(slowPathCall(slowCases, this, operationStringBuilderAppend3, resultGPR, LinkableConstant::globalObject(*this, node), accGPR, op2GPR, op3GPR));
+        else
+            addSlowPathGenerator(slowPathCall(slowCases, this, operationStringBuilderAppend, resultGPR, LinkableConstant::globalObject(*this, node), accGPR, op2GPR));
+
+        // The builder now points at young pieces through its off-heap chunk, so keep it remembered.
+        Jump barrierNeeded = barrierBranchWithoutFence(resultGPR, true);
+        Label barrierDone = label();
+
+        Vector<SilentRegisterSavePlan> savePlans;
+        silentSpillAllRegistersImpl(false, savePlans, InvalidGPRReg);
+        addSlowPathGeneratorLambda([=, this, savePlans = WTF::move(savePlans)]() {
+            barrierNeeded.link(this);
+            silentSpill(savePlans);
+            callOperationWithoutExceptionCheck(operationWriteBarrierSlowPath, TrustedImmPtr(&vm()), resultGPR);
+            silentFill(savePlans);
+            jump().linkTo(barrierDone, this);
+        });
+
+        cellResult(resultGPR, node);
+        return;
+    }
+
     SpeculateCellOperand op1(this, node->child1());
     SpeculateCellOperand op2(this, node->child2());
     SpeculateCellOperand op3(this, node->child3());
