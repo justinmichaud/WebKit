@@ -31,6 +31,7 @@
 #include "CorpseError.h"
 
 #include <errno.h>
+#include <libproc.h>
 #include <mach/mach.h>
 #include <mach/mach_error.h>
 #include <mach/mach_traps.h>
@@ -100,6 +101,14 @@ void Process::detach()
     if (MACH_PORT_VALID(m_taskPort))
         mach_port_deallocate(mach_task_self(), m_taskPort);
     m_taskPort = MACH_PORT_NULL;
+}
+
+CString Process::executablePath() const
+{
+    char buffer[PROC_PIDPATHINFO_MAXSIZE];
+    if (proc_pidpath(m_pid, buffer, sizeof(buffer)) <= 0)
+        return { };
+    return CString(buffer);
 }
 
 } // namespace Corpse

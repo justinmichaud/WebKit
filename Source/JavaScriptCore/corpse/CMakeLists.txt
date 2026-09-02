@@ -9,6 +9,8 @@ set(JavaScriptCoreTools_SOURCES
     CorpseRegion.cpp
     CorpseSnapshot.cpp
     CorpseSymbol.cpp
+    CorpseTargetObject.cpp
+    CorpseTargetType.cpp
     CorpseThread.cpp
 )
 

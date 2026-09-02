@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2026 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -23,60 +24,37 @@
  * THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#pragma once
+#include "config.h"
+#include "CorpseTargetObject.h"
 
 #if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
 
-#include <mach/mach.h>
-#include <sys/types.h>
 #include <wtf/Assertions.h>
-#include <wtf/Ref.h>
-#include <wtf/RefCounted.h>
-#include <wtf/text/CString.h>
+#include <wtf/StdLibExtras.h>
 
 namespace JSC {
 namespace Corpse {
 
-// Represents a target corpse process identified by PID. It manages the Mach task
-// port for that process: attach() acquires it, detach() releases it (but keeps the
-// PID so the same Process can be reattached later).
-class Process final : public RefCounted<Process> {
-public:
-    static Ref<Process> create(pid_t pid) { return adoptRef(*new Process(pid)); }
+TargetObject::TargetObject(Address base, TargetType type, Vector<uint8_t>&& bytes)
+    : m_base(base)
+    , m_type(WTF::move(type))
+    , m_bytes(WTF::move(bytes))
+{
+}
 
-    ~Process() { detach(); }
+std::span<const uint8_t> TargetObject::get(const TargetField& field) const
+{
+    RELEASE_ASSERT(field.byteOffset + field.byteSize <= m_bytes.size());
+    return m_bytes.span().subspan(field.byteOffset, field.byteSize);
+}
 
-    bool attach();
-    void detach();
-
-    pid_t pid() const { return m_pid; }
-    mach_port_t taskPort() const { return m_taskPort; }
-
-    bool isAttached() const { return MACH_PORT_VALID(m_taskPort); }
-
-    // The target process may have terminated while we still hold the port.
-    bool holdsLiveTask() const;
-
-    // True if the target runs under Rosetta translation. Such a process executes as
-    // arm64 whatever its own architecture is, so its thread state describes the
-    // translator rather than the program, and cannot be read as the program's.
-    bool isTranslated() const;
-
-    // The absolute path to the target's executable image, or a null CString if
-    // the OS refuses to report one. The platform mechanism (proc_pidpath on
-    // Darwin, readlink on /proc on Linux) is hidden behind this call.
-    CString executablePath() const;
-
-private:
-    explicit Process(pid_t pid)
-        : m_pid(pid)
-    {
-        RELEASE_ASSERT(pid > 0);
-    }
-
-    pid_t m_pid;
-    mach_port_t m_taskPort { MACH_PORT_NULL };
-};
+std::optional<std::span<const uint8_t>> TargetObject::get(StringView fieldName) const
+{
+    const auto* field = m_type.field(fieldName);
+    if (!field)
+        return std::nullopt;
+    return get(*field);
+}
 
 } // namespace Corpse
 } // namespace JSC
