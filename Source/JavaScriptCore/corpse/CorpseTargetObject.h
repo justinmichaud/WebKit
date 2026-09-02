@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2026 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -27,55 +28,46 @@
 
 #if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
 
-#include <mach/mach.h>
-#include <sys/types.h>
-#include <wtf/Assertions.h>
-#include <wtf/Ref.h>
-#include <wtf/RefCounted.h>
-#include <wtf/text/CString.h>
+#include <JavaScriptCore/CorpseAddress.h>
+#include <JavaScriptCore/CorpseTargetType.h>
+#include <optional>
+#include <span>
+#include <wtf/Vector.h>
+#include <wtf/text/StringView.h>
 
 namespace JSC {
 namespace Corpse {
 
-// Represents a target corpse process identified by PID. It manages the Mach task
-// port for that process: attach() acquires it, detach() releases it (but keeps the
-// PID so the same Process can be reattached later).
-class Process final : public RefCounted<Process> {
+// One object in the target, bound to a type. The bytes at `base` are read once
+// at construction, then sliced by field name. A caller reads the value of a
+// field as a byte span and interprets it by looking at the field's typeName
+// and byteSize; there is no compile-time templating on the target's C++ types.
+//
+// A TargetObject that exists has already cleared the type system's RTTI check:
+// for a polymorphic type, getTargetObject returned nullopt when the vptr in
+// the corpse disagreed with the type's vtable symbol. A non-polymorphic type
+// has no RTTI in memory to check, so its objects only need the bytes to read.
+class TargetObject {
 public:
-    static Ref<Process> create(pid_t pid) { return adoptRef(*new Process(pid)); }
+    TargetObject(Address, TargetType, Vector<uint8_t>&&);
 
-    ~Process() { detach(); }
+    Address base() const { return m_base; }
+    const TargetType& type() const { return m_type; }
+    uint64_t size() const { return m_type.byteSize(); }
+    const Vector<TargetField>& fields() const { return m_type.fields(); }
 
-    bool attach();
-    void detach();
+    // Returns the value of `fieldName` as a span into this object's bytes, or
+    // nullopt when the type has no such field. The span is valid for the
+    // lifetime of the TargetObject.
+    std::optional<std::span<const uint8_t>> get(StringView fieldName) const;
 
-    pid_t pid() const { return m_pid; }
-    mach_port_t taskPort() const { return m_taskPort; }
-
-    bool isAttached() const { return MACH_PORT_VALID(m_taskPort); }
-
-    // The target process may have terminated while we still hold the port.
-    bool holdsLiveTask() const;
-
-    // True if the target runs under Rosetta translation. Such a process executes as
-    // arm64 whatever its own architecture is, so its thread state describes the
-    // translator rather than the program, and cannot be read as the program's.
-    bool isTranslated() const;
-
-    // The absolute path to the target's executable image, or a null CString if
-    // the OS refuses to report one. The platform mechanism (proc_pidpath on
-    // Darwin, readlink on /proc on Linux) is hidden behind this call.
-    CString executablePath() const;
+    // Overload for a caller that already has the TargetField in hand.
+    std::span<const uint8_t> get(const TargetField&) const;
 
 private:
-    explicit Process(pid_t pid)
-        : m_pid(pid)
-    {
-        RELEASE_ASSERT(pid > 0);
-    }
-
-    pid_t m_pid;
-    mach_port_t m_taskPort { MACH_PORT_NULL };
+    Address m_base;
+    TargetType m_type;
+    Vector<uint8_t> m_bytes;
 };
 
 } // namespace Corpse

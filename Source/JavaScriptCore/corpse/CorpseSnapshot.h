@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2026 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -30,17 +31,18 @@
 #include <JavaScriptCore/CorpseAddress.h>
 #include <JavaScriptCore/CorpseProcess.h>
 #include <JavaScriptCore/CorpseSymbol.h>
+#include <JavaScriptCore/CorpseTargetObject.h>
+#include <JavaScriptCore/CorpseTargetType.h>
 #include <JavaScriptCore/CorpseThread.h>
 #include <mach/mach.h>
 #include <memory>
 #include <optional>
-#include <utility>
 #include <wtf/DoublyLinkedList.h>
 #include <wtf/HashMap.h>
 #include <wtf/RefPtr.h>
-#include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMalloc.h>
 #include <wtf/Vector.h>
+#include <wtf/text/CString.h>
 #include <wtf/text/StringHash.h>
 #include <wtf/text/StringView.h>
 #include <wtf/text/WTFString.h>
@@ -79,6 +81,29 @@ public:
     // The address of `name` in this corpse, null if it is not there.
     Address symbol(const char* name);
 
+    // Copies `length` bytes from `address` in the corpse. Returns nullopt on
+    // any short-copy or when the allocation for a length taken from the corpse
+    // does not succeed. Callers reading target objects go through this rather
+    // than the mach primitives so a Linux port only rewrites the body.
+    std::optional<Vector<uint8_t>> readBytes(Address, size_t length) const;
+
+    // The absolute paths of every image loaded into the target's address
+    // space. Used by TypeSystem to bring linked dylibs into the LLDB target.
+    // Cross-process enumeration is not implemented yet; a Snapshot of another
+    // process returns an empty list.
+    Vector<CString> loadedImagePaths() const;
+
+    // Finds the layout the target's debug info gives for `qualifiedName`
+    // (namespaces separated by "::"). Returns nullopt when the target's debug
+    // info does not describe it. The first call spins up the type system,
+    // which is why this is not const.
+    std::optional<TargetType> findType(StringView qualifiedName);
+
+    // Binds an address in the corpse to a type, reading the object's bytes
+    // once. A subsequent get() slices those bytes without more Mach traffic.
+    // Returns nullopt when the corpse read short-copies.
+    std::optional<TargetObject> getTargetObject(Address, const TargetType&);
+
 private:
     static unsigned s_nextId;
 
@@ -88,6 +113,7 @@ private:
 
     std::optional<Vector<Thread>> m_threads;
     HashMap<String, std::unique_ptr<Symbol>> m_symbols;
+    std::unique_ptr<TypeSystem> m_typeSystem;
 
     Snapshot* m_prev { nullptr }; // Required by DoublyLinkedListNode.
     Snapshot* m_next { nullptr }; // Required by DoublyLinkedListNode.

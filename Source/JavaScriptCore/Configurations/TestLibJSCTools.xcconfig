@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Apple Inc. All rights reserved.
+// Copyright (C) 2026 Igalia S.L.
 //
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions
@@ -31,5 +32,16 @@ WK_LIB_JSC_TOOLS_SIMULATOR[sdk=*simulator*] = YES;
 WK_LIB_JSC_TOOLS_SUPPORTED = $(WK_NOT_$(WK_LIB_JSC_TOOLS_UNSUPPORTED));
 WK_LIB_JSC_TOOLS_UNSUPPORTED = $(WK_OR_$(WK_LIB_JSC_TOOLS_SIMULATOR)_$(WK_CHECK_CATALYST));
 
-OTHER_LDFLAGS = $(inherited) $(WK_LIB_JSC_TOOLS_LDFLAGS_$(WK_LIB_JSC_TOOLS_SUPPORTED));
+OTHER_LDFLAGS = $(inherited) $(WK_LIB_JSC_TOOLS_LDFLAGS_$(WK_LIB_JSC_TOOLS_SUPPORTED)) $(WK_LLDB_FRAMEWORK_LDFLAGS);
 WK_LIB_JSC_TOOLS_LDFLAGS_YES = -lJavaScriptCoreTools;
+
+// The typeinfo suite reads the running binary's own type layouts through
+// LLDB.framework, which ships with Xcode. Only linked on the macOS SDK; on
+// other SDKs the typeinfo suite compiles as a skipSuite stub.
+WK_LLDB_FRAMEWORK_LDFLAGS = ;
+WK_LLDB_FRAMEWORK_LDFLAGS[sdk=macosx*] = -F$(DEVELOPER_DIR)/../SharedFrameworks -framework LLDB;
+
+LD_RUNPATH_SEARCH_PATHS[sdk=macosx*] = $(inherited) $(DEVELOPER_DIR)/../SharedFrameworks;
+
+// The typeinfo suite reads its own DWARF at runtime through a companion dSYM.
+DEBUG_INFORMATION_FORMAT = dwarf-with-dsym;

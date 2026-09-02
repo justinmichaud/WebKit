@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2026 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -38,6 +39,7 @@
 #include "CorpseSymbolTest.h"
 #include "CorpseThreadTest.h"
 #include "LibJSCToolsTestUtilities.h"
+#include "TypeinfoTest.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -126,6 +128,8 @@ int main(int argc, char** argv)
         JSCToolsTest::testRegion();
         JSCToolsTest::testThreads();
         JSCToolsTest::testSymbol();
+        JSCToolsTest::testTypeinfo();
+        JSCToolsTest::testCommonTypeLayouts();
     }
 
     dataLogLn("Ran ", JSCToolsTest::assertionsRun, " assertions, ",

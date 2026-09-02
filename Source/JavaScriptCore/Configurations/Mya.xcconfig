@@ -1,4 +1,5 @@
 // Copyright (C) 2026 Apple Inc. All rights reserved.
+// Copyright (C) 2026 Igalia S.L.
 //
 // Redistribution and use in source and binary forms, with or without
 // modification, are permitted provided that the following conditions
@@ -37,7 +38,18 @@ SKIP_INSTALL = $(WK_LIB_JSC_TOOLS_SKIP_INSTALL_$(WK_LIB_JSC_TOOLS_UNSUPPORTED));
 WK_LIB_JSC_TOOLS_SKIP_INSTALL_YES = YES;
 WK_LIB_JSC_TOOLS_SKIP_INSTALL_NO = NO;
 
-OTHER_LDFLAGS = $(inherited) $(WK_LIB_JSC_TOOLS_LDFLAGS_$(WK_LIB_JSC_TOOLS_SUPPORTED));
+OTHER_LDFLAGS = $(inherited) $(WK_LIB_JSC_TOOLS_LDFLAGS_$(WK_LIB_JSC_TOOLS_SUPPORTED)) $(WK_LLDB_FRAMEWORK_LDFLAGS);
 WK_LIB_JSC_TOOLS_LDFLAGS_YES = -lJavaScriptCoreTools;
+
+// mya reads type layouts out of a Mach-O via LLDB.framework, which ships with
+// Xcode under $(DEVELOPER_DIR)/../SharedFrameworks. Linked on the macOS SDK
+// only -- other SDKs do not ship LLDB.framework and the type-layout code is
+// macOS-only. The rpath below is baked as an absolute path to the build
+// machine's Xcode, which is fine for an engineering tool installed under
+// /usr/local/bin.
+WK_LLDB_FRAMEWORK_LDFLAGS = ;
+WK_LLDB_FRAMEWORK_LDFLAGS[sdk=macosx*] = -F$(DEVELOPER_DIR)/../SharedFrameworks -framework LLDB;
+
+LD_RUNPATH_SEARCH_PATHS[sdk=macosx*] = $(inherited) $(DEVELOPER_DIR)/../SharedFrameworks;
 
 OTHER_CODE_SIGN_FLAGS[sdk=iphone*] = -i com.apple.jsc.mya --entitlements ${WK_PROCESSED_XCENT_FILE};

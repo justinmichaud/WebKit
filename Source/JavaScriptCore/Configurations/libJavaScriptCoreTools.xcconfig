@@ -55,3 +55,8 @@ STRIP_INSTALLED_PRODUCT = NO;
 // The sources include "config.h" and their own headers from the source tree,
 // plus JavaScriptCore's generated and private headers.
 HEADER_SEARCH_PATHS = $(SRCROOT) $(SRCROOT)/corpse "$(JAVASCRIPTCORE_FRAMEWORKS_DIR)/JavaScriptCore.framework/PrivateHeaders" $(inherited);
+
+// LLDB.framework is included by CorpseSnapshot.cpp for type introspection on
+// the macOS SDK. Undefined framework symbols are resolved at link time by mya
+// and testLibJSCTools, both of which link -framework LLDB.
+FRAMEWORK_SEARCH_PATHS[sdk=macosx*] = $(inherited) $(DEVELOPER_DIR)/../SharedFrameworks;

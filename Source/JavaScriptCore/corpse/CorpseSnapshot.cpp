@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2026 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -30,8 +31,11 @@
 
 #include "CorpseError.h"
 
+#include <mach-o/dyld.h>
 #include <mach/mach.h>
 #include <mach/mach_error.h>
+#include <mach/mach_vm.h>
+#include <unistd.h>
 #include <wtf/TZoneMallocInlines.h>
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
@@ -88,6 +92,62 @@ Address Snapshot::symbol(const char* name)
     });
 
     return entry.iterator->value->address();
+}
+
+std::optional<Vector<uint8_t>> Snapshot::readBytes(Address address, size_t length) const
+{
+    if (!isValid())
+        return std::nullopt;
+    Vector<uint8_t> buffer;
+    // The length is caller-supplied and may come from a target type's byte
+    // size; tryGrow lets a huge value from broken debug info fail as nullopt
+    // without aborting.
+    if (!buffer.tryGrow(length))
+        return std::nullopt;
+    mach_vm_size_t got = 0;
+    kern_return_t kr = mach_vm_read_overwrite(m_corpsePort, address.toMachVMAddress(),
+        buffer.size(), reinterpret_cast<mach_vm_address_t>(buffer.mutableSpan().data()), &got);
+    if (kr != KERN_SUCCESS || got != buffer.size())
+        return std::nullopt;
+    return buffer;
+}
+
+Vector<CString> Snapshot::loadedImagePaths() const
+{
+    Vector<CString> paths;
+    // Cross-process enumeration would read the target's dyld_all_image_infos
+    // out of the corpse; only self-corpse is wired up so far.
+    if (!m_process || m_process->pid() != getpid())
+        return paths;
+    uint32_t count = _dyld_image_count();
+    paths.reserveInitialCapacity(count);
+    for (uint32_t i = 0; i < count; ++i) {
+        if (const char* p = _dyld_get_image_name(i))
+            paths.append(CString(p));
+    }
+    return paths;
+}
+
+std::optional<TargetType> Snapshot::findType(StringView qualifiedName)
+{
+    if (!isValid())
+        return std::nullopt;
+    if (!m_typeSystem)
+        m_typeSystem = TypeSystem::create(*this);
+    if (!m_typeSystem)
+        return std::nullopt;
+    return m_typeSystem->findType(qualifiedName);
+}
+
+std::optional<TargetObject> Snapshot::getTargetObject(Address base, const TargetType& type)
+{
+    if (!isValid())
+        return std::nullopt;
+    if (!m_typeSystem)
+        m_typeSystem = TypeSystem::create(*this);
+    if (!m_typeSystem)
+        return std::nullopt;
+    return m_typeSystem->getTargetObject(base, type);
 }
 
 } // namespace Corpse
