@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2026 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -25,39 +26,53 @@
 
 #pragma once
 
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#include <JavaScriptCore/CorpsePlatform.h>
+
+#if HAVE(CORPSE_SUPPORT)
 
 #include <JavaScriptCore/CorpseAddress.h>
-#include <mach/mach.h>
+#include <JavaScriptCore/CorpseBackend.h>
 #include <optional>
 #include <stdint.h>
 
 namespace JSC {
 namespace Corpse {
 
-// One mapped region of a task's address space, as the kernel describes it.
+class Snapshot;
+
+// One mapped region of the corpse's address space, as the kernel described it
+// when the corpse was taken.
 class Region {
 public:
-    // The region containing `address`, or nullopt if not found in any region.
-    static std::optional<Region> findContaining(mach_port_t task, Address);
+    Region() = default;
+    explicit Region(const RegionInfo&);
 
-    Address base() const { return m_base; }
-    size_t size() const { return m_size; }
-    Address end() const { return m_base + m_size; }
-    bool contains(Address address) const { return address >= m_base && address < end(); }
+    // The region of `snapshot`'s corpse containing `address`, or nullopt if the
+    // address falls in no region of it. The corpse is asked rather than the
+    // live target, so what comes back describes the address space as it was
+    // when the corpse was taken.
+    static std::optional<Region> findContaining(const Snapshot&, Address);
+
+    Address base() const { return m_info.base; }
+    uint64_t size() const { return m_info.size; }
+    Address end() const { return m_info.end(); }
+    bool contains(Address address) const { return m_info.contains(address); }
 
     uint64_t pageCount() const;
-    uint64_t residentPageCount() const { return m_residentPageCount; }
-    uint64_t dirtyPageCount() const { return m_dirtyPageCount; }
+
+    // Page accounting, where the platform reports it for this mapping.
+    std::optional<uint64_t> residentPageCount() const { return m_info.residentPageCount; }
+    std::optional<uint64_t> dirtyPageCount() const { return m_info.dirtyPageCount; }
+
+    bool isReadable() const { return m_info.isReadable; }
+    bool isWritable() const { return m_info.isWritable; }
+    bool isExecutable() const { return m_info.isExecutable; }
 
 private:
-    Address m_base;
-    size_t m_size { 0 };
-    uint64_t m_residentPageCount { 0 };
-    uint64_t m_dirtyPageCount { 0 };
+    RegionInfo m_info;
 };
 
 } // namespace Corpse
 } // namespace JSC
 
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#endif // HAVE(CORPSE_SUPPORT)

@@ -26,7 +26,9 @@
 
 #pragma once
 
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#include <JavaScriptCore/CorpsePlatform.h>
+
+#if HAVE(CORPSE_SUPPORT)
 
 #include <JavaScriptCore/CorpseAddress.h>
 #include <JavaScriptCore/CorpseTargetType.h>
@@ -34,6 +36,7 @@
 #include <span>
 #include <wtf/Vector.h>
 #include <wtf/text/StringView.h>
+#include <wtf/text/WTFString.h>
 
 namespace JSC {
 namespace Corpse {
@@ -43,16 +46,30 @@ namespace Corpse {
 // field as a byte span and interprets it by looking at the field's typeName
 // and byteSize; there is no compile-time templating on the target's C++ types.
 //
-// A TargetObject that exists has already cleared the type system's RTTI check:
-// for a polymorphic type, getTargetObject returned nullopt when the vptr in
-// the corpse disagreed with the type's vtable symbol. A non-polymorphic type
-// has no RTTI in memory to check, so its objects only need the bytes to read.
+// A TargetObject that exists has already cleared the type system's vptr check:
+// for a polymorphic type, getTargetObject returned nullopt unless the vptr in
+// the corpse belongs to the type asked for or to something derived from it. A
+// non-polymorphic type has no vptr to check, so its objects only need the bytes
+// to read.
 class TargetObject {
 public:
-    TargetObject(Address, TargetType, Vector<uint8_t>&&);
+    TargetObject(Address, TargetType, Vector<uint8_t>&&, String dynamicTypeName = { });
 
     Address base() const { return m_base; }
+
+    // The type this object was read as, whose layout fields() describes.
     const TargetType& type() const { return m_type; }
+
+    // What the object actually is, when the vptr named something more derived
+    // than the type it was read as. Empty when the two are the same, or when
+    // the type is not polymorphic.
+    //
+    // This is what makes a walk over a heap say something: reaching a
+    // `JSC::JSCell*` and being told the object is a `JSC::JSString` is the
+    // answer, and reading it as a JSCell is still correct because a derived
+    // object opens with its base.
+    const String& dynamicTypeName() const { return m_dynamicTypeName; }
+    bool isDerivedType() const { return !m_dynamicTypeName.isEmpty(); }
     uint64_t size() const { return m_type.byteSize(); }
     const Vector<TargetField>& fields() const { return m_type.fields(); }
 
@@ -68,9 +85,10 @@ private:
     Address m_base;
     TargetType m_type;
     Vector<uint8_t> m_bytes;
+    String m_dynamicTypeName;
 };
 
 } // namespace Corpse
 } // namespace JSC
 
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#endif // HAVE(CORPSE_SUPPORT)

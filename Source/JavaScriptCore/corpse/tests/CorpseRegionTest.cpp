@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2026 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -26,31 +27,35 @@
 #include "config.h"
 #include "CorpseRegionTest.h"
 
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#if HAVE(CORPSE_SUPPORT)
 
 #include "LibJSCToolsTestUtilities.h"
 
 #include <JavaScriptCore/CorpseAddress.h>
 #include <JavaScriptCore/CorpseRegion.h>
 #include <JavaScriptCore/CorpseSnapshot.h>
-#include <mach/mach.h>
-#include <mach/mach_vm.h>
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
+#include <wtf/PageBlock.h>
 
 namespace JSCToolsTest {
 
 using JSC::Corpse::Address;
 using JSC::Corpse::Region;
 
+// Builds a mapping of known size with a known hole on either side, then asks
+// the corpse to describe it. Both platforms answer from what their kernel
+// recorded, so what is checked is the shape of the answer rather than how it
+// was obtained: the extent of a mapping, that an address inside it finds it,
+// and that an address in a hole finds nothing.
 void testRegion()
 {
     SuiteTracer tracer("Region");
     if (!tracer.shouldRun())
         return;
 
-    size_t pageSize = static_cast<size_t>(getpagesize());
+    size_t pageSize = WTF::pageSize();
     static constexpr size_t mappedPages = 5;
     static constexpr size_t writtenPages = 2;
     static constexpr size_t readPages = 1; // Exclusive of writtenPages.
@@ -107,70 +112,83 @@ void testRegion()
         unmapPagesStillHeld();
         return;
     }
-    mach_port_t corpsePort = self.snapshot().corpsePort();
+    const auto& snapshot = self.snapshot();
 
     {
-        auto region = Region::findContaining(corpsePort, Address(static_cast<mach_vm_address_t>(base)));
+        auto region = Region::findContaining(snapshot, Address(static_cast<uint64_t>(base)));
         TEST_ASSERT(region, "the region holding a known mapping is found");
         if (region) {
-            TEST_ASSERT_HEX_EQ(region->base().toMachVMAddress(), base, "the region starts where the mapping does");
+            TEST_ASSERT_HEX_EQ(region->base().value(), base, "the region starts where the mapping does");
             TEST_ASSERT_EQ(region->size(), mappedPages * pageSize, "the region is as large as the mapping");
-            TEST_ASSERT_HEX_EQ(region->end().toMachVMAddress(), base + mappedPages * pageSize,
+            TEST_ASSERT_HEX_EQ(region->end().value(), base + mappedPages * pageSize,
                 "the region ends where the mapping does");
-            TEST_ASSERT_EQ(region->pageCount(),
-                static_cast<uint64_t>(mappedPages * pageSize / vm_kernel_page_size),
+            TEST_ASSERT_EQ(region->pageCount(), static_cast<uint64_t>(mappedPages),
                 "the region holds as many pages as were mapped");
             TEST_ASSERT(region->contains(region->base()), "a region contains its first byte");
             TEST_ASSERT(region->contains(region->end() - 1), "a region contains its last byte");
             TEST_ASSERT(!region->contains(region->end()), "a region does not contain the byte past its end");
             TEST_ASSERT(!region->contains(region->base() - 1), "a region does not contain the byte before it");
 
-            uint64_t accessedKernelPages =
-                static_cast<uint64_t>((writtenPages + readPages) * pageSize / vm_kernel_page_size);
-            TEST_ASSERT_EQ(region->residentPageCount(), accessedKernelPages,
-                "the pages that were accessed are the resident ones");
+            TEST_ASSERT(region->isReadable(), "a mapping made readable reports as readable");
+            TEST_ASSERT(region->isWritable(), "a mapping made writable reports as writable");
+
+            // Page accounting is optional, since not every platform reports it
+            // for every mapping. Where it is reported it has to be right.
+            //
+            // A written page is always resident. A page that was only read may
+            // not be: Linux satisfies a read fault on anonymous memory with the
+            // shared zero page and allocates nothing, while Darwin allocates on
+            // either kind of fault. So the pages that were written are the
+            // floor and the pages that were touched at all are the ceiling.
+            uint64_t accessedPages = writtenPages + readPages;
+            if (auto resident = region->residentPageCount()) {
+                TEST_ASSERT(*resident >= writtenPages && *resident <= accessedPages,
+                    "every page that was written is resident and no untouched page is");
+            }
 
             // Dirty does not mean written: an anonymous page has no pager to be re-read
             // from, so it counts as dirty from the moment a fault creates it, whether
             // that fault was a write or a read. The page that was only read is dirty in
             // most runs but not all, so the written pages are what can be counted on.
-            uint64_t writtenKernelPages = static_cast<uint64_t>(writtenPages * pageSize / vm_kernel_page_size);
-            TEST_ASSERT(region->dirtyPageCount() >= writtenKernelPages
-                && region->dirtyPageCount() <= accessedKernelPages,
-                "every page that was written is dirty and no page that was never accessed is");
+            if (auto dirty = region->dirtyPageCount()) {
+                TEST_ASSERT(*dirty >= writtenPages && *dirty <= accessedPages,
+                    "every page that was written is dirty and no page that was never accessed is");
+            }
         }
     }
     {
         // An address in the middle of the mapping still finds the whole region.
-        auto region = Region::findContaining(corpsePort,
-            Address(static_cast<mach_vm_address_t>(base + pageSize + 16)));
+        auto region = Region::findContaining(snapshot,
+            Address(static_cast<uint64_t>(base + pageSize + 16)));
         TEST_ASSERT(region, "an address inside the mapping finds the region");
         if (region)
-            TEST_ASSERT_HEX_EQ(region->base().toMachVMAddress(), base, "any address in a region finds its base");
+            TEST_ASSERT_HEX_EQ(region->base().value(), base, "any address in a region finds its base");
     }
     {
-        // The kernel reports the region at or above the address it is asked about,
-        // so a hole must be reported as a hole rather than as the region above it.
-        auto region = Region::findContaining(corpsePort,
-            Address(static_cast<mach_vm_address_t>(addressAt(holeBelowRegion))));
+        // A hole must be reported as a hole rather than as the region above it,
+        // which is what a search that reports the next region up would do.
+        auto region = Region::findContaining(snapshot,
+            Address(static_cast<uint64_t>(addressAt(holeBelowRegion))));
         TEST_ASSERT(!region, "an address in an unmapped hole finds no region");
     }
     {
         // The same question asked from the other side. An address in this hole sits past
         // the end of the region below it, which must not be reported as containing it.
-        auto region = Region::findContaining(corpsePort,
-            Address(static_cast<mach_vm_address_t>(addressAt(holeAboveRegion))));
+        auto region = Region::findContaining(snapshot,
+            Address(static_cast<uint64_t>(addressAt(holeAboveRegion))));
         TEST_ASSERT(!region, "an address in the hole above a region finds no region");
     }
     {
-        // The shared cache is mapped as a submap, which the search has to descend
-        // into before it can describe what is actually there. A function's address
-        // arrives signed on arm64e, and is an address only once stripped.
-        Address inSharedCache = Address(reinterpret_cast<void*>(&memcpy)).stripped();
-        auto region = Region::findContaining(corpsePort, inSharedCache);
-        TEST_ASSERT(region, "an address in the shared cache finds a region");
-        if (region)
-            TEST_ASSERT(region->size(), "a shared cache region has a size");
+        // Code is mapped too, and is executable where the scratch area is not.
+        // A function's address arrives signed on arm64e, and is an address only
+        // once stripped.
+        Address inCode = Address(reinterpret_cast<void*>(&memcpy)).stripped();
+        auto region = Region::findContaining(snapshot, inCode);
+        TEST_ASSERT(region, "an address in mapped code finds a region");
+        if (region) {
+            TEST_ASSERT(region->size(), "a code region has a size");
+            TEST_ASSERT(region->isExecutable(), "a region holding code is executable");
+        }
     }
 
     unmapPagesStillHeld();
@@ -178,4 +196,4 @@ void testRegion()
 
 } // namespace JSCToolsTest
 
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#endif // HAVE(CORPSE_SUPPORT)

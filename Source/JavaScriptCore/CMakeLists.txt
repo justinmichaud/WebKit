@@ -1627,22 +1627,40 @@ if (USE_INSPECTOR_SOCKET_SERVER)
     )
 endif ()
 
-# The corpse memory-analysis support is built on Mach task and corpse APIs, so
-# its headers have no content off Darwin and there is nothing to build or export.
-if (APPLE)
+# The corpse memory-analysis support is built on whatever the platform gives for
+# reading another process's memory: Mach task and corpse APIs on Darwin, /proc
+# and a copy-on-write fork on Linux. Its headers have no content anywhere else,
+# so there is nothing to build or export there. ENABLE_CORPSE is read again by
+# the corpse and shell subdirectories.
+if (APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(ENABLE_CORPSE ON)
+endif ()
+
+if (ENABLE_CORPSE)
     list(APPEND JavaScriptCore_PRIVATE_INCLUDE_DIRECTORIES
         "${JAVASCRIPTCORE_DIR}/corpse"
     )
     list(APPEND JavaScriptCore_PRIVATE_FRAMEWORK_HEADERS
         corpse/CorpseAddress.h
+        corpse/CorpseBackend.h
         corpse/CorpseByteParser.h
         corpse/CorpseClient.h
+        corpse/CorpseElfImage.h
         corpse/CorpseError.h
         corpse/CorpseExportsTrie.h
+        corpse/CorpsePlatform.h
+        corpse/CorpseProcFile.h
         corpse/CorpseProcess.h
+        corpse/CorpseProcessHandle.h
+        corpse/CorpsePtrace.h
         corpse/CorpseRegion.h
         corpse/CorpseSnapshot.h
         corpse/CorpseSymbol.h
+        corpse/CorpseSymbolResolver.h
+        corpse/CorpseTargetObject.h
+        corpse/CorpseTargetType.h
+        corpse/CorpseTypeInfo.h
+        corpse/CorpseTypeName.h
         corpse/CorpseThread.h
     )
 endif ()
@@ -1901,9 +1919,9 @@ add_dependencies(JavaScriptCoreSharedScripts JSCBuiltins)
 
 # The corpse code is part of JavaScriptCoreTools, which ships as a static library used
 # only by tools for assisting in the development of JavaScriptCore and WebKit. This code
-# is not needed for JavaScriptCore and WebKit functionality as a browser engine. The
-# corpse code rely on Mach APIs which are only available on Apple platforms.
-if (APPLE)
+# is not needed for JavaScriptCore and WebKit functionality as a browser engine. It rests
+# on facilities only some platforms have, which is what ENABLE_CORPSE tracks.
+if (ENABLE_CORPSE)
   add_subdirectory(corpse)
 endif ()
 

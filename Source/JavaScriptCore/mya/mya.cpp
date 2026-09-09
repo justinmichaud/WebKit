@@ -25,7 +25,9 @@
 
 #include "config.h"
 
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#include <JavaScriptCore/CorpsePlatform.h>
+
+#if HAVE(CORPSE_SUPPORT)
 
 #include <JavaScriptCore/CorpseAddress.h>
 #include <JavaScriptCore/CorpseClient.h>
@@ -593,29 +595,38 @@ private:
             row.cells[3] = buffer;
             snprintf(buffer, sizeof(buffer), "%.3f", thread.systemTimeUsec() / 1000.0);
             row.cells[4] = buffer;
-            if (thread.stackPointer()) {
+            if (thread.hasRegisters() && thread.stackPointer()) {
                 snprintf(buffer, sizeof(buffer), "0x%llx",
-                    thread.stackPointer().toMachVMAddress());
+                    static_cast<unsigned long long>(thread.stackPointer().value()));
                 row.cells[5] = buffer;
-            } else
-                row.cells[5] = "-";
+            } else {
+                // A thread with no registers is not a thread with no stack, so
+                // say which of the two this is.
+                row.cells[5] = thread.hasRegisters() ? "-" : "?";
+            }
             if (thread.hasStack()) {
                 const auto& stack = thread.stackRegion();
                 snprintf(buffer, sizeof(buffer), "0x%llx-0x%llx",
-                    stack.base().toMachVMAddress(),
-                    stack.end().toMachVMAddress());
+                    static_cast<unsigned long long>(stack.base().value()),
+                    static_cast<unsigned long long>(stack.end().value()));
                 row.cells[6] = buffer;
                 formatByteSize(stack.size(), buffer, sizeof(buffer));
                 row.cells[7] = buffer;
                 snprintf(buffer, sizeof(buffer), "%llu",
                     static_cast<unsigned long long>(stack.pageCount()));
                 row.cells[8] = buffer;
-                snprintf(buffer, sizeof(buffer), "%llu",
-                    static_cast<unsigned long long>(stack.residentPageCount()));
-                row.cells[9] = buffer;
-                snprintf(buffer, sizeof(buffer), "%llu",
-                    static_cast<unsigned long long>(stack.dirtyPageCount()));
-                row.cells[10] = buffer;
+                if (auto resident = stack.residentPageCount()) {
+                    snprintf(buffer, sizeof(buffer), "%llu",
+                        static_cast<unsigned long long>(*resident));
+                    row.cells[9] = buffer;
+                } else
+                    row.cells[9] = "-";
+                if (auto dirty = stack.dirtyPageCount()) {
+                    snprintf(buffer, sizeof(buffer), "%llu",
+                        static_cast<unsigned long long>(*dirty));
+                    row.cells[10] = buffer;
+                } else
+                    row.cells[10] = "-";
             } else {
                 row.cells[6] = "-";
                 row.cells[7] = "-";
@@ -623,7 +634,8 @@ private:
                 row.cells[9] = "-";
                 row.cells[10] = "-";
             }
-            row.cells[11] = thread.name().empty() ? "-" : thread.name();
+            row.cells[11] = thread.name().isNull() || !thread.name().length()
+                ? "-" : thread.name().data();
 
             rows.append(WTF::move(row));
         }
@@ -716,9 +728,9 @@ private:
             return;
         }
         if (hex)
-            printf("&%s = 0x%llx\n", name.c_str(), address.toMachVMAddress());
+            printf("&%s = 0x%llx\n", name.c_str(), static_cast<unsigned long long>(address.value()));
         else
-            printf("&%s = %llu\n", name.c_str(), address.toMachVMAddress());
+            printf("&%s = %llu\n", name.c_str(), static_cast<unsigned long long>(address.value()));
     }
 
     // Releases resources without extra output. Dropping the current selection
@@ -1392,16 +1404,16 @@ private:
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#endif // HAVE(CORPSE_SUPPORT)
 
 int main(int argc, char** argv)
 {
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#if HAVE(CORPSE_SUPPORT)
     return Mya::Shell().run(argc, argv);
 #else
     UNUSED_PARAM(argc);
     UNUSED_PARAM(argv);
     printf("Not supported platform for mya\n");
     return 1;
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#endif // HAVE(CORPSE_SUPPORT)
 }

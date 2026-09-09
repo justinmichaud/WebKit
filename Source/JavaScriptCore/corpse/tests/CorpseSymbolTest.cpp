@@ -26,7 +26,9 @@
 #include "config.h"
 #include "CorpseSymbolTest.h"
 
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#if HAVE(CORPSE_SUPPORT)
+
+#if OS(DARWIN)
 
 #include "LibJSCToolsTestUtilities.h"
 
@@ -72,7 +74,7 @@ void testSymbol()
         auto expected = reinterpret_cast<uintptr_t>(WebConfig::g_config);
         Address found = snapshot.symbol("g_config");
         TEST_ASSERT(found, "a symbol exported by JavaScriptCore is found");
-        TEST_ASSERT_HEX_EQ(found.toMachVMAddress(), expected,
+        TEST_ASSERT_HEX_EQ(found.value(), expected,
             "g_config resolves to the address this process uses for it");
     }
     {
@@ -84,8 +86,8 @@ void testSymbol()
         TEST_ASSERT(found, "a symbol exported by a shared cache image is found");
         // A function pointer arrives signed on arm64e; only the address it names is
         // being compared here.
-        TEST_ASSERT_HEX_EQ(found.stripped().toMachVMAddress(),
-            Address(expected).stripped().toMachVMAddress(),
+        TEST_ASSERT_HEX_EQ(found.stripped().value(),
+            Address(expected).stripped().value(),
             "tolower resolves to the address this process uses for it");
     }
     {
@@ -96,8 +98,8 @@ void testSymbol()
         else {
             Address found = snapshot.symbol("environ");
             TEST_ASSERT(found, "a data symbol in the shared cache is found");
-            TEST_ASSERT_HEX_EQ(found.stripped().toMachVMAddress(),
-                Address(expected).stripped().toMachVMAddress(),
+            TEST_ASSERT_HEX_EQ(found.stripped().value(),
+                Address(expected).stripped().value(),
                 "environ resolves to the address this process uses for it");
         }
     }
@@ -159,4 +161,128 @@ void testSymbol()
 
 } // namespace JSCToolsTest
 
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#else // !OS(DARWIN)
+
+#include "LibJSCToolsTestUtilities.h"
+
+#include <JavaScriptCore/CorpseAddress.h>
+#include <JavaScriptCore/CorpseSnapshot.h>
+#include <JavaScriptCore/CorpseSymbol.h>
+#include <dlfcn.h>
+#include <stdint.h>
+#include <stdlib.h>
+#include <wtf/MonotonicTime.h>
+
+// Exists in this binary but is not exported, so it never reaches .dynsym. A
+// look up must report that rather than find it some other way.
+extern "C" __attribute__((visibility("hidden"))) int jscToolsTestHiddenGlobal;
+int jscToolsTestHiddenGlobal = 42;
+
+namespace JSCToolsTest {
+
+using JSC::Corpse::Address;
+using JSC::Corpse::Snapshot;
+using JSC::Corpse::Symbol;
+
+// A symbol resolved out of a corpse of this very process must land on the same
+// address this process uses, because the corpse is a copy of this address
+// space. dlsym is the ground truth: it is what the loader itself would answer,
+// and resolving against each image's .dynsym out of the corpse has to agree
+// with it without asking the loader anything.
+void testSymbol()
+{
+    SuiteTracer tracer("Symbol");
+    if (!tracer.shouldRun())
+        return;
+
+    SelfSnapshot self;
+    if (!self.isValid())
+        return;
+    Snapshot& snapshot = self.snapshot();
+
+    auto checkAgainstLoader = [&](const char* name, const char* what) {
+        void* expected = dlsym(RTLD_DEFAULT, name);
+        if (!expected) {
+            skipSuite("Symbol", "this system does not export a symbol the suite needs");
+            return;
+        }
+        Address found = snapshot.symbol(name);
+        TEST_ASSERT(found, what);
+        TEST_ASSERT_HEX_EQ(found.stripped().value(), Address(expected).stripped().value(),
+            "the symbol resolves to the address this process uses for it");
+    };
+
+    // A function and a data symbol out of libc, which is a separate image from
+    // this one, so both check that an image's slide was applied.
+    checkAgainstLoader("tolower", "a function exported by libc is found");
+    checkAgainstLoader("environ", "a data symbol exported by libc is found");
+
+    {
+        TEST_ASSERT(!snapshot.symbol("jscToolsTestNoSuchSymbolAnywhere"),
+            "a name that is not exported anywhere is not found");
+        TEST_ASSERT(!snapshot.symbol(nullptr), "no name resolves to nothing");
+        TEST_ASSERT(!snapshot.symbol(""), "an empty name resolves to nothing");
+    }
+    {
+        // Only dynamically exported symbols reach .dynsym. This one is in the
+        // binary, and still must not be found: saying so is the honest answer.
+        TEST_ASSERT(jscToolsTestHiddenGlobal == 42, "the hidden global is in this binary");
+        TEST_ASSERT(!snapshot.symbol("jscToolsTestHiddenGlobal"),
+            "a symbol hidden from the linker is not found");
+    }
+    {
+        // An ELF symbol name carries no leading underscore, unlike Mach-O, so a
+        // look up must take the name exactly as given rather than decorating
+        // it. glibc happens to export both `tolower` and the legacy `_tolower`
+        // as distinct functions, which is what makes the difference visible:
+        // a look up that added or removed an underscore would answer with one
+        // when asked for the other.
+        Address plain = snapshot.symbol("tolower");
+        Address underscored = snapshot.symbol("_tolower");
+        if (plain && underscored) {
+            TEST_ASSERT(plain != underscored,
+                "two names differing only by a leading underscore resolve separately");
+        }
+    }
+    {
+        // Resolving is expensive, so a snapshot keeps what it has resolved.
+        Address first = snapshot.symbol("tolower");
+        Address second = snapshot.symbol("tolower");
+        TEST_ASSERT(first == second, "resolving the same name twice gives the same address");
+    }
+    {
+        Symbol symbol(snapshot, "tolower");
+        TEST_ASSERT(symbol.name() == "tolower", "a Symbol keeps the name it was asked for");
+        TEST_ASSERT(symbol.isValid(), "a Symbol that resolved is valid");
+        TEST_ASSERT(symbol.address() == snapshot.symbol("tolower"),
+            "a Symbol resolves to what the snapshot reports");
+
+        Symbol missing(snapshot, "jscToolsTestNoSuchSymbolAnywhere");
+        TEST_ASSERT(!missing.isValid(), "a Symbol that did not resolve is not valid");
+        TEST_ASSERT(!missing.address(), "a Symbol that did not resolve has no address");
+        TEST_ASSERT(missing.name() == "jscToolsTestNoSuchSymbolAnywhere",
+            "a Symbol that did not resolve still knows its name");
+
+        Symbol unnamed(snapshot, nullptr);
+        TEST_ASSERT(unnamed.name().empty(), "a Symbol with no name has an empty name");
+        TEST_ASSERT(!unnamed.isValid(), "a Symbol with no name is not valid");
+    }
+    {
+        // A name that is nowhere walks every image in the corpse, which is the
+        // most work a look up can be asked to do. It has to stay bounded.
+        static constexpr double budgetSeconds = 60;
+        MonotonicTime start = MonotonicTime::now();
+        TEST_ASSERT(!snapshot.symbol("jscToolsTestAnotherNameThatIsNowhere"),
+            "an absent name is reported absent");
+        double elapsed = (MonotonicTime::now() - start).seconds();
+        TEST_ASSERT(elapsed < budgetSeconds, "a look up that finds nothing still finishes");
+        if (elapsed >= budgetSeconds)
+            dataLogLn("    the search took ", elapsed, " seconds");
+    }
+}
+
+} // namespace JSCToolsTest
+
+#endif // OS(DARWIN)
+
+#endif // HAVE(CORPSE_SUPPORT)

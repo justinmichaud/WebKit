@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2026 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -25,53 +26,63 @@
 
 #pragma once
 
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#include <JavaScriptCore/CorpsePlatform.h>
+
+#if HAVE(CORPSE_SUPPORT)
 
 #include <JavaScriptCore/CorpseAddress.h>
+#include <JavaScriptCore/CorpseBackend.h>
 #include <JavaScriptCore/CorpseRegion.h>
-#include <mach/mach.h>
 #include <stdint.h>
-#include <string>
 #include <wtf/Vector.h>
+#include <wtf/text/CString.h>
 
 namespace JSC {
 namespace Corpse {
 
 class Snapshot;
 
-// A snapshot of thread values read out of a corpse.
+// A thread as the corpse describes it. Its registers and the memory they point
+// into were captured at one instant, so a stack pointer here always indexes
+// memory of the same moment.
 class Thread {
 public:
-    // The kernel's system-wide unique 64-bit thread id, as reported by lldb and
-    // spindump. This is an identifier, not an address.
-    uint64_t id() const { return m_id; }
+    // A stable identifier for the thread: the kernel's system-wide 64-bit
+    // thread id on Darwin, the TID on Linux. An identifier, not an address.
+    uint64_t id() const { return m_info.id; }
 
-    // The pthread name, empty if the thread was never named.
-    const std::string& name() const { return m_name; }
+    // The thread's name, empty if it was never named.
+    const CString& name() const { return m_info.name; }
 
-    int runState() const { return m_runState; }
-    int suspendCount() const { return m_suspendCount; }
-    uint64_t userTimeUsec() const { return m_userTimeUsec; }
-    uint64_t systemTimeUsec() const { return m_systemTimeUsec; }
+    int runState() const { return m_info.runState; }
+    int suspendCount() const { return m_info.suspendCount; }
+    uint64_t userTimeUsec() const { return m_info.userTimeUsec; }
+    uint64_t systemTimeUsec() const { return m_info.systemTimeUsec; }
 
-    Address stackPointer() const { return m_stackPointer; }
+    // True when the corpse carries this thread's registers. False means the
+    // thread exists but cannot be walked, and registerFailure() says why; it
+    // never means the thread has no stack.
+    bool hasRegisters() const { return m_info.registers.isComplete; }
+    RegisterFailure registerFailure() const { return m_info.registerFailure; }
+
+    Address stackPointer() const { return m_info.registers.stackPointer; }
+    Address programCounter() const { return m_info.registers.programCounter; }
+    Address framePointer() const { return m_info.registers.framePointer; }
 
     const Region& stackRegion() const { return m_stackRegion; }
     bool hasStack() const { return m_stackRegion.size(); }
 
-    const char* runStateDescription() const;
+    const char* runStateDescription() const { return m_runStateDescription; }
 
 private:
     static Vector<Thread> collect(const Snapshot&);
 
-    uint64_t m_id { 0 };
-    std::string m_name;
-    int m_runState { 0 };
-    int m_suspendCount { 0 };
-    uint64_t m_userTimeUsec { 0 };
-    uint64_t m_systemTimeUsec { 0 };
-    Address m_stackPointer;
+    ThreadInfo m_info;
     Region m_stackRegion;
+
+    // Resolved when the thread is collected, since only the backend that
+    // produced the run state can word it.
+    const char* m_runStateDescription { "unknown" };
 
     friend class Snapshot;
 };
@@ -79,4 +90,4 @@ private:
 } // namespace Corpse
 } // namespace JSC
 
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#endif // HAVE(CORPSE_SUPPORT)

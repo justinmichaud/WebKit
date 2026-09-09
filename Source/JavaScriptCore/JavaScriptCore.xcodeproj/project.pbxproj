@@ -1862,10 +1862,31 @@
 		CA47D093D003440A28D15924 /* CorpseSnapshot.h in Headers */ = {isa = PBXBuildFile; fileRef = 94711688984F16F71D615DE5 /* CorpseSnapshot.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		5601486802533982ACC870BE /* CorpseSymbol.h in Headers */ = {isa = PBXBuildFile; fileRef = 8F1FA0900D09DF06EE63F7D2 /* CorpseSymbol.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		377C8C2416AE3DF90650C0E9 /* CorpseSymbol.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E8D1735B28066A3B1D756ECC /* CorpseSymbol.cpp */; };
+		1AB0DEAD00000018000D0001 /* CorpsePlatform.h in Headers */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000019000D0001 /* CorpsePlatform.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		1AB0DEAD00000010000D0001 /* CorpseTargetType.h in Headers */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000011000D0001 /* CorpseTargetType.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		1AB0DEAD00000012000D0001 /* CorpseTargetType.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000013000D0001 /* CorpseTargetType.cpp */; };
+		1AB0DEAD00000070000D0001 /* CorpseTypeInfo.h in Headers */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000071000D0001 /* CorpseTypeInfo.h */; settings = {ATTRIBUTES = (Private, ); }; };
+		1AB0DEAD00000072000D0001 /* CorpseTypeInfo.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000073000D0001 /* CorpseTypeInfo.cpp */; };
+		1AB0DEAD00000080000D0001 /* CorpseTypeName.h in Headers */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000081000D0001 /* CorpseTypeName.h */; settings = {ATTRIBUTES = (Private, ); }; };
+		1AB0DEAD00000082000D0001 /* CorpseTypeName.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000083000D0001 /* CorpseTypeName.cpp */; };
+		1AB0DEAD00000086000D0001 /* CorpseTypeNameTest.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000087000D0001 /* CorpseTypeNameTest.cpp */; };
 		1AB0DEAD00000014000D0001 /* CorpseTargetObject.h in Headers */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000015000D0001 /* CorpseTargetObject.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		1AB0DEAD00000016000D0001 /* CorpseTargetObject.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000017000D0001 /* CorpseTargetObject.cpp */; };
+		1AB0DEAD00000020000D0001 /* CorpseBackend.h in Headers */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000021000D0001 /* CorpseBackend.h */; settings = {ATTRIBUTES = (Private, ); }; };
+		1AB0DEAD00000022000D0001 /* CorpseBackendDarwin.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000023000D0001 /* CorpseBackendDarwin.cpp */; };
+		1AB0DEAD00000024000D0001 /* CorpseBackendLinux.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000025000D0001 /* CorpseBackendLinux.cpp */; };
+		1AB0DEAD00000026000D0001 /* CorpseElfImage.h in Headers */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000027000D0001 /* CorpseElfImage.h */; settings = {ATTRIBUTES = (Private, ); }; };
+		1AB0DEAD00000028000D0001 /* CorpseElfImage.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000029000D0001 /* CorpseElfImage.cpp */; };
+		1AB0DEAD0000002A000D0001 /* CorpseProcFile.h in Headers */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD0000002B000D0001 /* CorpseProcFile.h */; settings = {ATTRIBUTES = (Private, ); }; };
+		1AB0DEAD0000002C000D0001 /* CorpseProcFile.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD0000002D000D0001 /* CorpseProcFile.cpp */; };
+		1AB0DEAD0000002E000D0001 /* CorpsePtrace.h in Headers */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD0000002F000D0001 /* CorpsePtrace.h */; settings = {ATTRIBUTES = (Private, ); }; };
+		1AB0DEAD00000030000D0001 /* CorpsePtrace.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000031000D0001 /* CorpsePtrace.cpp */; };
+		1AB0DEAD00000044000D0001 /* CorpseProcessHandle.h in Headers */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000045000D0001 /* CorpseProcessHandle.h */; settings = {ATTRIBUTES = (Private, ); }; };
+		1AB0DEAD00000046000D0001 /* CorpseSymbolResolver.h in Headers */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000047000D0001 /* CorpseSymbolResolver.h */; settings = {ATTRIBUTES = (Private, ); }; };
+		1AB0DEAD0000004C000D0001 /* CorpseProcessDarwin.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD0000004D000D0001 /* CorpseProcessDarwin.cpp */; };
+		1AB0DEAD0000004E000D0001 /* CorpseProcessLinux.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD0000004F000D0001 /* CorpseProcessLinux.cpp */; };
+		1AB0DEAD00000050000D0001 /* CorpseSymbolElf.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000051000D0001 /* CorpseSymbolElf.cpp */; };
+		1AB0DEAD00000052000D0001 /* CorpseSymbolMachO.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000053000D0001 /* CorpseSymbolMachO.cpp */; };
 		BC18C3E60E16F5CD00B34460 /* ArrayConstructor.h in Headers */ = {isa = PBXBuildFile; fileRef = BC7952070E15E8A800A898AB /* ArrayConstructor.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		BC18C3E70E16F5CD00B34460 /* ArrayPrototype.h in Headers */ = {isa = PBXBuildFile; fileRef = F692A84E0255597D01FF60F7 /* ArrayPrototype.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		BC18C3EC0E16F5CD00B34460 /* BooleanObject.h in Headers */ = {isa = PBXBuildFile; fileRef = 704FD35305697E6D003DBED9 /* BooleanObject.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -4083,10 +4104,32 @@
 		94711688984F16F71D615DE5 /* CorpseSnapshot.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseSnapshot.h; sourceTree = "<group>"; };
 		8F1FA0900D09DF06EE63F7D2 /* CorpseSymbol.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseSymbol.h; sourceTree = "<group>"; };
 		E8D1735B28066A3B1D756ECC /* CorpseSymbol.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseSymbol.cpp; sourceTree = "<group>"; };
+		1AB0DEAD00000019000D0001 /* CorpsePlatform.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpsePlatform.h; sourceTree = "<group>"; };
 		1AB0DEAD00000011000D0001 /* CorpseTargetType.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseTargetType.h; sourceTree = "<group>"; };
 		1AB0DEAD00000013000D0001 /* CorpseTargetType.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseTargetType.cpp; sourceTree = "<group>"; };
+		1AB0DEAD00000071000D0001 /* CorpseTypeInfo.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseTypeInfo.h; sourceTree = "<group>"; };
+		1AB0DEAD00000073000D0001 /* CorpseTypeInfo.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseTypeInfo.cpp; sourceTree = "<group>"; };
+		1AB0DEAD00000081000D0001 /* CorpseTypeName.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseTypeName.h; sourceTree = "<group>"; };
+		1AB0DEAD00000083000D0001 /* CorpseTypeName.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseTypeName.cpp; sourceTree = "<group>"; };
+		1AB0DEAD00000085000D0001 /* CorpseTypeNameTest.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseTypeNameTest.h; sourceTree = "<group>"; };
+		1AB0DEAD00000087000D0001 /* CorpseTypeNameTest.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseTypeNameTest.cpp; sourceTree = "<group>"; };
 		1AB0DEAD00000015000D0001 /* CorpseTargetObject.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseTargetObject.h; sourceTree = "<group>"; };
 		1AB0DEAD00000017000D0001 /* CorpseTargetObject.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseTargetObject.cpp; sourceTree = "<group>"; };
+		1AB0DEAD00000021000D0001 /* CorpseBackend.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseBackend.h; sourceTree = "<group>"; };
+		1AB0DEAD00000023000D0001 /* CorpseBackendDarwin.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseBackendDarwin.cpp; sourceTree = "<group>"; };
+		1AB0DEAD00000025000D0001 /* CorpseBackendLinux.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseBackendLinux.cpp; sourceTree = "<group>"; };
+		1AB0DEAD00000027000D0001 /* CorpseElfImage.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseElfImage.h; sourceTree = "<group>"; };
+		1AB0DEAD00000029000D0001 /* CorpseElfImage.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseElfImage.cpp; sourceTree = "<group>"; };
+		1AB0DEAD0000002B000D0001 /* CorpseProcFile.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseProcFile.h; sourceTree = "<group>"; };
+		1AB0DEAD0000002D000D0001 /* CorpseProcFile.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseProcFile.cpp; sourceTree = "<group>"; };
+		1AB0DEAD0000002F000D0001 /* CorpsePtrace.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpsePtrace.h; sourceTree = "<group>"; };
+		1AB0DEAD00000031000D0001 /* CorpsePtrace.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpsePtrace.cpp; sourceTree = "<group>"; };
+		1AB0DEAD00000045000D0001 /* CorpseProcessHandle.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseProcessHandle.h; sourceTree = "<group>"; };
+		1AB0DEAD00000047000D0001 /* CorpseSymbolResolver.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseSymbolResolver.h; sourceTree = "<group>"; };
+		1AB0DEAD0000004D000D0001 /* CorpseProcessDarwin.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseProcessDarwin.cpp; sourceTree = "<group>"; };
+		1AB0DEAD0000004F000D0001 /* CorpseProcessLinux.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseProcessLinux.cpp; sourceTree = "<group>"; };
+		1AB0DEAD00000051000D0001 /* CorpseSymbolElf.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseSymbolElf.cpp; sourceTree = "<group>"; };
+		1AB0DEAD00000053000D0001 /* CorpseSymbolMachO.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseSymbolMachO.cpp; sourceTree = "<group>"; };
 		68BBF9CBD85C8635B2B8385F /* CorpseProcess.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseProcess.cpp; sourceTree = "<group>"; };
 		C8503B7E641A29DF5B0E3742 /* CorpseRegion.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseRegion.cpp; sourceTree = "<group>"; };
 		5E906BE4CC29012A83A8F299 /* CorpseSnapshot.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseSnapshot.cpp; sourceTree = "<group>"; };
@@ -6960,11 +7003,13 @@
 				7E83C40717D785F3003DC41B /* CorpseSymbolTest.h */,
 				7E83C43217D785F3003DC41B /* CorpseThreadTest.cpp */,
 				7E83C43317D785F3003DC41B /* CorpseThreadTest.h */,
+				1AB0DEAD00000087000D0001 /* CorpseTypeNameTest.cpp */,
+				1AB0DEAD00000085000D0001 /* CorpseTypeNameTest.h */,
 				7E83C40417D785F3003DC41B /* LibJSCToolsTestUtilities.cpp */,
 				7E83C40317D785F3003DC41B /* LibJSCToolsTestUtilities.h */,
+				7E83C40017D785F3003DC41B /* testLibJSCTools.cpp */,
 				1AB0DEAD00000005000D0001 /* TypeinfoTest.cpp */,
 				1AB0DEAD00000006000D0001 /* TypeinfoTest.h */,
-				7E83C40017D785F3003DC41B /* testLibJSCTools.cpp */,
 			);
 			path = tests;
 			sourceTree = "<group>";
@@ -6974,28 +7019,48 @@
 			children = (
 				7E83C41217D785F3003DC41B /* tests */,
 				2C6EB9C72F84ED87DF23277A /* CorpseAddress.h */,
+				1AB0DEAD00000021000D0001 /* CorpseBackend.h */,
+				1AB0DEAD00000023000D0001 /* CorpseBackendDarwin.cpp */,
+				1AB0DEAD00000025000D0001 /* CorpseBackendLinux.cpp */,
 				7E83C42317D785F3003DC41B /* CorpseByteParser.cpp */,
 				7E83C42217D785F3003DC41B /* CorpseByteParser.h */,
 				422D2FE4AA2401EA8C3F2D8F /* CorpseClient.cpp */,
 				9CBE14E70FB474FCFCD6A8B9 /* CorpseClient.h */,
+				1AB0DEAD00000029000D0001 /* CorpseElfImage.cpp */,
+				1AB0DEAD00000027000D0001 /* CorpseElfImage.h */,
 				2AC15166B6F71CD338DD8D6F /* CorpseError.cpp */,
 				8DDA7A78AD90B64B97AE329C /* CorpseError.h */,
 				7E83C43617D785F3003DC41B /* CorpseExportsTrie.cpp */,
 				7E83C43517D785F3003DC41B /* CorpseExportsTrie.h */,
+				1AB0DEAD00000019000D0001 /* CorpsePlatform.h */,
 				68BBF9CBD85C8635B2B8385F /* CorpseProcess.cpp */,
 				55D0F2DD9CA70132D5104B34 /* CorpseProcess.h */,
+				1AB0DEAD0000004D000D0001 /* CorpseProcessDarwin.cpp */,
+				1AB0DEAD00000045000D0001 /* CorpseProcessHandle.h */,
+				1AB0DEAD0000004F000D0001 /* CorpseProcessLinux.cpp */,
+				1AB0DEAD0000002D000D0001 /* CorpseProcFile.cpp */,
+				1AB0DEAD0000002B000D0001 /* CorpseProcFile.h */,
+				1AB0DEAD00000031000D0001 /* CorpsePtrace.cpp */,
+				1AB0DEAD0000002F000D0001 /* CorpsePtrace.h */,
 				C8503B7E641A29DF5B0E3742 /* CorpseRegion.cpp */,
 				9F41D6082A3E4B57C0768DB1 /* CorpseRegion.h */,
 				5E906BE4CC29012A83A8F299 /* CorpseSnapshot.cpp */,
 				94711688984F16F71D615DE5 /* CorpseSnapshot.h */,
 				E8D1735B28066A3B1D756ECC /* CorpseSymbol.cpp */,
 				8F1FA0900D09DF06EE63F7D2 /* CorpseSymbol.h */,
+				1AB0DEAD00000051000D0001 /* CorpseSymbolElf.cpp */,
+				1AB0DEAD00000053000D0001 /* CorpseSymbolMachO.cpp */,
+				1AB0DEAD00000047000D0001 /* CorpseSymbolResolver.h */,
 				1AB0DEAD00000017000D0001 /* CorpseTargetObject.cpp */,
 				1AB0DEAD00000015000D0001 /* CorpseTargetObject.h */,
 				1AB0DEAD00000013000D0001 /* CorpseTargetType.cpp */,
 				1AB0DEAD00000011000D0001 /* CorpseTargetType.h */,
 				960BD2B783EAEBE3233F91BF /* CorpseThread.cpp */,
 				211E3D6CA97F31CEB385A75A /* CorpseThread.h */,
+				1AB0DEAD00000073000D0001 /* CorpseTypeInfo.cpp */,
+				1AB0DEAD00000071000D0001 /* CorpseTypeInfo.h */,
+				1AB0DEAD00000083000D0001 /* CorpseTypeName.cpp */,
+				1AB0DEAD00000081000D0001 /* CorpseTypeName.h */,
 			);
 			path = corpse;
 			sourceTree = "<group>";
@@ -11698,17 +11763,26 @@
 				A57D23F21891B5B40031C7FA /* ContentSearchUtilities.h in Headers */,
 				52678F911A04177C006A306D /* ControlFlowProfiler.h in Headers */,
 				725D045D67B3017EAC56561C /* CorpseAddress.h in Headers */,
+				1AB0DEAD00000020000D0001 /* CorpseBackend.h in Headers */,
 				7E83C42817D785F3003DC41B /* CorpseByteParser.h in Headers */,
 				80B96670131FB9EBB9AD49CC /* CorpseClient.h in Headers */,
+				1AB0DEAD00000026000D0001 /* CorpseElfImage.h in Headers */,
 				85428E7BE0B3557DD2988043 /* CorpseError.h in Headers */,
 				7E83C43717D785F3003DC41B /* CorpseExportsTrie.h in Headers */,
+				1AB0DEAD00000018000D0001 /* CorpsePlatform.h in Headers */,
 				0D9C2E68ACFF010D91916993 /* CorpseProcess.h in Headers */,
+				1AB0DEAD00000044000D0001 /* CorpseProcessHandle.h in Headers */,
+				1AB0DEAD0000002A000D0001 /* CorpseProcFile.h in Headers */,
+				1AB0DEAD0000002E000D0001 /* CorpsePtrace.h in Headers */,
 				3A7C1E5D9B0F4A2681C34D07 /* CorpseRegion.h in Headers */,
 				CA47D093D003440A28D15924 /* CorpseSnapshot.h in Headers */,
 				5601486802533982ACC870BE /* CorpseSymbol.h in Headers */,
+				1AB0DEAD00000046000D0001 /* CorpseSymbolResolver.h in Headers */,
 				1AB0DEAD00000014000D0001 /* CorpseTargetObject.h in Headers */,
 				1AB0DEAD00000010000D0001 /* CorpseTargetType.h in Headers */,
 				56C6C2B7EBDCC63B6ECEA9AD /* CorpseThread.h in Headers */,
+				1AB0DEAD00000070000D0001 /* CorpseTypeInfo.h in Headers */,
+				1AB0DEAD00000080000D0001 /* CorpseTypeName.h in Headers */,
 				C4F4B6F41A05C944005CAB76 /* cpp_generator.py in Headers */,
 				C4F4B6F31A05C944005CAB76 /* cpp_generator_templates.py in Headers */,
 				0F30D7C01D95D6320053089D /* CPU.h in Headers */,
@@ -14377,17 +14451,28 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				1AB0DEAD00000022000D0001 /* CorpseBackendDarwin.cpp in Sources */,
+				1AB0DEAD00000024000D0001 /* CorpseBackendLinux.cpp in Sources */,
 				7E83C42417D785F3003DC41B /* CorpseByteParser.cpp in Sources */,
 				C2EB941F3198AE0BD86A2324 /* CorpseClient.cpp in Sources */,
+				1AB0DEAD00000028000D0001 /* CorpseElfImage.cpp in Sources */,
 				121D90BB8171A66F1922D548 /* CorpseError.cpp in Sources */,
 				7E83C43817D785F3003DC41B /* CorpseExportsTrie.cpp in Sources */,
 				C366EA5039A3B51405995EA6 /* CorpseProcess.cpp in Sources */,
+				1AB0DEAD0000004C000D0001 /* CorpseProcessDarwin.cpp in Sources */,
+				1AB0DEAD0000004E000D0001 /* CorpseProcessLinux.cpp in Sources */,
+				1AB0DEAD0000002C000D0001 /* CorpseProcFile.cpp in Sources */,
+				1AB0DEAD00000030000D0001 /* CorpsePtrace.cpp in Sources */,
 				5E2B94A17C6D40F3B85219CE /* CorpseRegion.cpp in Sources */,
 				0946712DEC51E0E86C4A49E3 /* CorpseSnapshot.cpp in Sources */,
 				377C8C2416AE3DF90650C0E9 /* CorpseSymbol.cpp in Sources */,
+				1AB0DEAD00000050000D0001 /* CorpseSymbolElf.cpp in Sources */,
+				1AB0DEAD00000052000D0001 /* CorpseSymbolMachO.cpp in Sources */,
 				1AB0DEAD00000016000D0001 /* CorpseTargetObject.cpp in Sources */,
 				1AB0DEAD00000012000D0001 /* CorpseTargetType.cpp in Sources */,
 				EF648B9EEAF54C44048B416A /* CorpseThread.cpp in Sources */,
+				1AB0DEAD00000072000D0001 /* CorpseTypeInfo.cpp in Sources */,
+				1AB0DEAD00000082000D0001 /* CorpseTypeName.cpp in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -14765,9 +14850,10 @@
 				7E83C40D17D785F3003DC41B /* CorpseSnapshotTest.cpp in Sources */,
 				7E83C40E17D785F3003DC41B /* CorpseSymbolTest.cpp in Sources */,
 				7E83C43417D785F3003DC41B /* CorpseThreadTest.cpp in Sources */,
+				1AB0DEAD00000086000D0001 /* CorpseTypeNameTest.cpp in Sources */,
 				7E83C40C17D785F3003DC41B /* LibJSCToolsTestUtilities.cpp in Sources */,
-				1AB0DEAD00000004000D0001 /* TypeinfoTest.cpp in Sources */,
 				7E83C40A17D785F3003DC41B /* testLibJSCTools.cpp in Sources */,
+				1AB0DEAD00000004000D0001 /* TypeinfoTest.cpp in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

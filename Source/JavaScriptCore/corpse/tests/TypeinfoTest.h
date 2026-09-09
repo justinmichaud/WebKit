@@ -26,7 +26,9 @@
 
 #pragma once
 
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#include <JavaScriptCore/CorpsePlatform.h>
+
+#if HAVE(CORPSE_SUPPORT)
 
 namespace JSCToolsTest {
 
@@ -35,12 +37,15 @@ namespace JSCToolsTest {
 // fails a named assertion here, so it does not surface as a distant crash.
 void testTypeinfo();
 
-// Sweeps common WTF and JSC types through the TargetType/TargetObject API.
-// A type that fails to resolve under any candidate DWARF name is reported as
-// skipped rather than as a failure, because DWARF spellings for templates
-// vary by compiler configuration.
+// Sweeps common WTF and JSC types through the TargetType/TargetObject API,
+// including a polymorphic one, whose binding is refused unless the vptr in the
+// corpse matches the vtable symbol the type system resolved.
+//
+// Each type is named to the corpse through a pointer declared in the test
+// itself, so that what identifies the type is the test's own debug info rather
+// than a guess at how the compiler spelled it.
 void testCommonTypeLayouts();
 
 } // namespace JSCToolsTest
 
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#endif // HAVE(CORPSE_SUPPORT)

@@ -22,9 +22,9 @@ if (ENABLE_FUZZILLI)
   list(APPEND jsc_SOURCES ../fuzzilli/Fuzzilli.cpp)
 endif ()
 
-# mya analyzes process corpses through Mach task APIs, so it only builds on
-# Apple platforms. Its sources do not compile elsewhere.
-if (APPLE)
+# mya analyzes process corpses, which it can only do where the corpse support
+# builds. Its sources have no content on any other platform.
+if (ENABLE_CORPSE)
     set(mya_SOURCES ../mya/mya.cpp)
     set(mya_FRAMEWORKS
         JavaScriptCore
@@ -37,12 +37,18 @@ if (APPLE)
     )
 
     # The corpse support mya uses lives in the tools static library.
-    set(mya_LIBRARIES JavaScriptCoreTools edit)
+    set(mya_LIBRARIES JavaScriptCoreTools)
+
+    # mya's line editing is libedit, which HAVE(READLINE) covers on Darwin only;
+    # elsewhere it reads lines with fgets and needs nothing linked for it.
+    if (APPLE)
+        list(APPEND mya_LIBRARIES edit)
+    endif ()
 endif ()
 
 WEBKIT_EXECUTABLE_DECLARE(jsc)
 
-if (APPLE)
+if (ENABLE_CORPSE)
     WEBKIT_EXECUTABLE_DECLARE(mya)
 endif ()
 
@@ -104,8 +110,8 @@ if (DEVELOPER_MODE)
     set(testdfg_PRIVATE_INCLUDE_DIRECTORIES ${jsc_PRIVATE_INCLUDE_DIRECTORIES})
     set(testdfg_FRAMEWORKS ${jsc_FRAMEWORKS})
 
-    # The tools library and its tests are only relevant for Apple platforms.
-    if (APPLE)
+    # The tools library and its tests only exist where the corpse support builds.
+    if (ENABLE_CORPSE)
         set(testLibJSCTools_SOURCES
             ../corpse/tests/CorpseAddressTest.cpp
             ../corpse/tests/CorpseByteParserTest.cpp
@@ -115,8 +121,10 @@ if (DEVELOPER_MODE)
             ../corpse/tests/CorpseSnapshotTest.cpp
             ../corpse/tests/CorpseSymbolTest.cpp
             ../corpse/tests/CorpseThreadTest.cpp
+            ../corpse/tests/CorpseTypeNameTest.cpp
             ../corpse/tests/LibJSCToolsTestUtilities.cpp
             ../corpse/tests/testLibJSCTools.cpp
+            ../corpse/tests/TypeinfoTest.cpp
         )
         set(testLibJSCTools_DEFINITIONS ${jsc_PRIVATE_DEFINITIONS})
         set(testLibJSCTools_PRIVATE_INCLUDE_DIRECTORIES
@@ -159,7 +167,7 @@ if (DEVELOPER_MODE)
     WEBKIT_EXECUTABLE_DECLARE(testdfg)
     WEBKIT_EXECUTABLE_DECLARE(testwasmdebugger)
 
-    if (APPLE)
+    if (ENABLE_CORPSE)
         WEBKIT_EXECUTABLE_DECLARE(testLibJSCTools)
     endif ()
 
@@ -178,7 +186,7 @@ if (SHOULD_INSTALL_JS_SHELL)
     install(TARGETS jsc DESTINATION "${LIBEXEC_INSTALL_DIR}")
 endif ()
 
-if (APPLE)
+if (ENABLE_CORPSE)
     WEBKIT_EXECUTABLE(mya)
 
     if (SHOULD_INSTALL_JS_SHELL)
@@ -195,7 +203,7 @@ if (DEVELOPER_MODE)
     WEBKIT_EXECUTABLE(testdfg)
     WEBKIT_EXECUTABLE(testwasmdebugger)
 
-    if (APPLE)
+    if (ENABLE_CORPSE)
         WEBKIT_EXECUTABLE(testLibJSCTools)
     endif ()
 

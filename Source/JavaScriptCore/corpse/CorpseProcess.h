@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2026 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -25,9 +26,11 @@
 
 #pragma once
 
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#include <JavaScriptCore/CorpsePlatform.h>
 
-#include <mach/mach.h>
+#if HAVE(CORPSE_SUPPORT)
+
+#include <memory>
 #include <sys/types.h>
 #include <wtf/Assertions.h>
 #include <wtf/Ref.h>
@@ -37,29 +40,34 @@
 namespace JSC {
 namespace Corpse {
 
-// Represents a target corpse process identified by PID. It manages the Mach task
-// port for that process: attach() acquires it, detach() releases it (but keeps the
-// PID so the same Process can be reattached later).
+// A target process identified by PID. attach() acquires whatever handle the
+// platform needs to speak about it and detach() releases it, keeping the PID so
+// the same Process can be reattached.
+//
+// What that handle is belongs to the platform and is not spelled here: on
+// Darwin it is the Mach task port, on Linux there is none and attach() records
+// the process's start time so a reused PID is not mistaken for this process.
+// Whichever it is lives in Handle, which only the platform's own files define.
 class Process final : public RefCounted<Process> {
 public:
     static Ref<Process> create(pid_t pid) { return adoptRef(*new Process(pid)); }
 
-    ~Process() { detach(); }
+    ~Process();
 
     bool attach();
     void detach();
 
     pid_t pid() const { return m_pid; }
-    mach_port_t taskPort() const { return m_taskPort; }
 
-    bool isAttached() const { return MACH_PORT_VALID(m_taskPort); }
+    bool isAttached() const;
 
-    // The target process may have terminated while we still hold the port.
+    // The target process may have terminated while we still hold the handle.
     bool holdsLiveTask() const;
 
-    // True if the target runs under Rosetta translation. Such a process executes as
-    // arm64 whatever its own architecture is, so its thread state describes the
-    // translator rather than the program, and cannot be read as the program's.
+    // True if the target runs under a binary translator. Such a process
+    // executes as another architecture whatever its own is, so its thread state
+    // describes the translator rather than the program and cannot be read as
+    // the program's. Only Darwin has one; elsewhere this is always false.
     bool isTranslated() const;
 
     // The absolute path to the target's executable image, or a null CString if
@@ -67,18 +75,20 @@ public:
     // Darwin, readlink on /proc on Linux) is hidden behind this call.
     CString executablePath() const;
 
+    // The platform's handle on the target. Defined only by the files of the
+    // platform that owns it, and reached only by them; everything portable uses
+    // the calls above.
+    class Handle;
+    Handle& handle() const { return *m_handle; }
+
 private:
-    explicit Process(pid_t pid)
-        : m_pid(pid)
-    {
-        RELEASE_ASSERT(pid > 0);
-    }
+    explicit Process(pid_t pid);
 
     pid_t m_pid;
-    mach_port_t m_taskPort { MACH_PORT_NULL };
+    std::unique_ptr<Handle> m_handle;
 };
 
 } // namespace Corpse
 } // namespace JSC
 
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#endif // HAVE(CORPSE_SUPPORT)

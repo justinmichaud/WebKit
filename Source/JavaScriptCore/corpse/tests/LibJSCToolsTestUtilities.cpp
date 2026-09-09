@@ -26,17 +26,23 @@
 #include "config.h"
 #include "LibJSCToolsTestUtilities.h"
 
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#include <atomic>
+#include <wtf/FileSystem.h>
+
+#if HAVE(CORPSE_SUPPORT)
 
 #include <JavaScriptCore/CorpseProcess.h>
 #include <JavaScriptCore/CorpseSnapshot.h>
-#include <mach/mach.h>
-#include <mach/mach_vm.h>
 #include <pthread.h>
 #include <string>
 #include <unistd.h>
 #include <wtf/MonotonicTime.h>
 #include <wtf/StdLibExtras.h>
+
+#if OS(DARWIN)
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#endif
 
 namespace JSCToolsTest {
 
@@ -85,6 +91,8 @@ void skipSuite(const char* name, const char* why)
     dataLogLn("SKIP: ", name, ": ", why);
 }
 
+#if OS(DARWIN)
+
 unsigned machPortNameCount()
 {
     mach_port_name_array_t names = nullptr;
@@ -110,6 +118,24 @@ unsigned machPortSendRightCount(mach_port_t port)
     }
     RELEASE_ASSERT(result == KERN_SUCCESS);
     return refs; // Can still be 0 (which still means no send right).
+}
+
+#endif // OS(DARWIN)
+
+unsigned resourceFootprint()
+{
+#if OS(DARWIN)
+    return machPortNameCount();
+#else
+    // Every descriptor this process holds appears here, so a corpse that was
+    // released leaves the count as it found it.
+    unsigned count = 0;
+    for (auto& entry : FileSystem::listDirectory("/proc/self/fd"_s)) {
+        UNUSED_PARAM(entry);
+        ++count;
+    }
+    return count;
+#endif
 }
 
 SelfSnapshot::SelfSnapshot()
@@ -155,7 +181,13 @@ struct ParkedThreads::Thread {
 static void* parkThread(void* argument)
 {
     auto* thread = static_cast<ParkedThreads::Thread*>(argument);
+    // Darwin's pthread_setname_np names the calling thread and takes only the
+    // name; every other pthreads implementation names the thread it is given.
+#if OS(DARWIN)
     pthread_setname_np(thread->name.c_str());
+#else
+    pthread_setname_np(pthread_self(), thread->name.c_str());
+#endif
 
     pthread_mutex_lock(&parkMutex);
     ++parkedCount;
@@ -206,6 +238,92 @@ bool ParkedThreads::waitUntilAllParked()
     return false;
 }
 
+namespace {
+
+// Nothing here may block or enter the kernel: a thread that does would be
+// recorded as stopped in a syscall, which is the case these threads exist to
+// avoid.
+std::atomic<unsigned> spinningCount { 0 };
+std::atomic<bool> spinningStopping { false };
+std::atomic<uint64_t> spinningSink { 0 };
+
+} // anonymous namespace
+
+struct SpinningThreads::Thread {
+    pthread_t handle { };
+    std::string name;
+};
+
+static void* spinThread(void* argument)
+{
+    auto* thread = static_cast<SpinningThreads::Thread*>(argument);
+#if OS(DARWIN)
+    pthread_setname_np(thread->name.c_str());
+#else
+    pthread_setname_np(pthread_self(), thread->name.c_str());
+#endif
+
+    spinningCount.fetch_add(1, std::memory_order_release);
+
+    // Pure computation, with a result nothing can fold away, so the thread
+    // stays on a CPU for as long as the test needs it there.
+    uint64_t accumulator = 1;
+    while (!spinningStopping.load(std::memory_order_relaxed)) {
+        for (unsigned i = 0; i < 4096; ++i)
+            accumulator = accumulator * 6364136223846793005ULL + 1442695040888963407ULL;
+    }
+    spinningSink.fetch_add(accumulator, std::memory_order_relaxed);
+    return nullptr;
+}
+
+SpinningThreads::~SpinningThreads()
+{
+    stopAndJoin();
+}
+
+bool SpinningThreads::spawn(const char* name)
+{
+    auto* thread = new Thread;
+    thread->name = std::string_view(name).substr(0, ParkedThreads::maximumNameLength);
+    if (pthread_create(&thread->handle, nullptr, spinThread, thread)) {
+        delete thread;
+        return false;
+    }
+    m_threads.append(thread);
+    return true;
+}
+
+bool SpinningThreads::waitUntilAllSpinning()
+{
+    // Bounded so that a thread that never starts fails the test rather than
+    // hanging it.
+    for (unsigned attempt = 0; attempt < 5000; ++attempt) {
+        if (spinningCount.load(std::memory_order_acquire) >= m_threads.size()) {
+            // A thread counts itself in just before its first spin, so give it
+            // that moment to actually get there.
+            usleep(50 * 1000);
+            return true;
+        }
+        usleep(1000);
+    }
+    return false;
+}
+
+void SpinningThreads::stopAndJoin()
+{
+    if (m_threads.isEmpty())
+        return;
+
+    spinningStopping.store(true, std::memory_order_relaxed);
+    for (Thread* thread : m_threads) {
+        pthread_join(thread->handle, nullptr);
+        delete thread;
+    }
+    m_threads.clear();
+    spinningStopping.store(false, std::memory_order_relaxed);
+    spinningCount.store(0, std::memory_order_relaxed);
+}
+
 void ParkedThreads::stopAndJoin()
 {
     if (m_threads.isEmpty())
@@ -229,4 +347,4 @@ void ParkedThreads::stopAndJoin()
 
 } // namespace JSCToolsTest
 
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#endif // HAVE(CORPSE_SUPPORT)

@@ -27,14 +27,16 @@
 #include "config.h"
 #include "TypeinfoTest.h"
 
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#if HAVE(CORPSE_SUPPORT)
 
 #include "LibJSCToolsTestUtilities.h"
 
 #include <JavaScriptCore/CorpseAddress.h>
+#include <JavaScriptCore/CorpseError.h>
 #include <JavaScriptCore/CorpseSnapshot.h>
 #include <JavaScriptCore/CorpseTargetObject.h>
 #include <JavaScriptCore/CorpseTargetType.h>
+#include <JavaScriptCore/CorpseTypeInfo.h>
 #include <memory>
 #include <string.h>
 #include <wtf/MediaTime.h>
@@ -42,6 +44,7 @@
 #include <wtf/Ref.h>
 #include <wtf/RefPtr.h>
 #include <wtf/Seconds.h>
+#include <wtf/StringPrintStream.h>
 #include <wtf/Variant.h>
 #include <wtf/Vector.h>
 #include <wtf/WallTime.h>
@@ -60,7 +63,8 @@ using JSC::Corpse::TargetType;
 
 void testTypeinfo()
 {
-    if (!beginSuite("Typeinfo"))
+    SuiteTracer tracer("Typeinfo");
+    if (!tracer.shouldRun())
         return;
 
     // Force the lazy hash so m_hashAndFlags is stable for the comparison below.
@@ -172,46 +176,170 @@ void testTypeinfo()
     }
     TEST_ASSERT(foundDataField, "a data pointer member is present in TargetType::fields()");
     TEST_ASSERT(comparedFields > 0, "at least one StringImplShape member was cross-checked");
+
+    // A member's own type, resolved through the debug info rather than by name.
+    auto lengthType = snapshot.findTypeOfMember("WTF::StringImplShape"_s, "m_length"_s);
+    TEST_ASSERT(lengthType, "corpse describes the type of StringImplShape::m_length");
+    if (lengthType) {
+        TEST_ASSERT_EQ(static_cast<size_t>(lengthType->byteSize()), sizeof(uint32_t),
+            "the type of m_length is four bytes wide");
+    }
+
+    // Reachable for the same reason it is reachable in fields().
+    auto dataType = snapshot.findTypeOfMember("WTF::StringImplShape"_s, "m_data8"_s);
+    TEST_ASSERT(dataType, "corpse describes the type of StringImplShape::m_data8");
+    if (dataType) {
+        TEST_ASSERT_EQ(static_cast<size_t>(dataType->byteSize()), sizeof(uintptr_t),
+            "m_data8 is pointer-sized");
+    }
+
+    // m_length is StringImpl's only by inheritance, so this covers the search
+    // looking through base classes.
+    auto inheritedType = snapshot.findTypeOfMember("WTF::StringImpl"_s, "m_length"_s);
+    TEST_ASSERT(inheritedType, "a member inherited from a base is found by name");
+    if (inheritedType) {
+        TEST_ASSERT_EQ(static_cast<size_t>(inheritedType->byteSize()), sizeof(uint32_t),
+            "the inherited m_length is four bytes wide");
+    }
+
+    // A member that does not exist is not answered for either.
+    TEST_ASSERT(!snapshot.findTypeOfMember("WTF::StringImplShape"_s, "m_notAMember"_s),
+        "a member the type does not have reports no type");
 }
+
+// A hierarchy of the suite's own, so that reading a derived object through its
+// base is checked against types whose shape the suite controls rather than
+// against whatever WTF happens to derive today. The virtual destructors are out
+// of line so that each class has a key function, and so exactly one vtable is
+// emitted for each.
+class WalkBase {
+public:
+    WalkBase();
+    virtual ~WalkBase();
+    virtual int kind() const;
+
+    uint32_t m_baseField { 0xba5e };
+};
+
+class WalkDerived : public WalkBase {
+public:
+    WalkDerived();
+    ~WalkDerived() override;
+    int kind() const override;
+
+    uint32_t m_derivedField { 0xde21 };
+};
+
+// Templated classes, which is where a hand-written mangler would have given up:
+// the ABI spells template arguments and non-type arguments with encodings and
+// substitutions that only a real demangler covers. One with a type argument and
+// one with a non-type argument as well.
+template<typename T>
+class WalkTemplate : public WalkBase {
+public:
+    ~WalkTemplate() override = default;
+    int kind() const override { return 3; }
+
+    T m_templateField { };
+};
+
+template<typename T, unsigned count>
+class WalkFixedArray : public WalkBase {
+public:
+    ~WalkFixedArray() override = default;
+    int kind() const override { return 4; }
+
+    T m_values[count] { };
+};
+
+WalkBase::WalkBase() = default;
+WalkBase::~WalkBase() = default;
+int WalkBase::kind() const { return 1; }
+
+WalkDerived::WalkDerived() = default;
+WalkDerived::~WalkDerived() = default;
+int WalkDerived::kind() const { return 2; }
+
+namespace TypeAnchors {
+
+// One anchor per type the suite checks, so that findTypeOfPointee gets the
+// compiler's own spelling of it and a type whose template parameters change
+// cannot quietly stop being checked. Nothing dereferences them; they are not
+// static so that their pointees are certain to be described.
+WTF::Seconds* seconds;
+WTF::MonotonicTime* monotonicTime;
+WTF::WallTime* wallTime;
+WTF::MediaTime* mediaTime;
+WTF::CString* cString;
+WTF::String* string;
+WTF::AtomString* atomString;
+Ref<WTF::StringImpl>* ref;
+RefPtr<WTF::StringImpl>* refPtr;
+WTF::Vector<int>* vector;
+WTF::Variant<uint32_t, uint64_t>* variant;
+WTF::StringPrintStream* stringPrintStream;
+WalkBase* walkBase;
+WalkDerived* walkDerived;
+WalkTemplate<int>* walkTemplate;
+WalkFixedArray<uint64_t, 4>* walkFixedArray;
+
+} // namespace TypeAnchors
 
 namespace {
 
-// Locates the target's DWARF description of T against candidate qualified
-// names (templates surface under whichever fully instantiated spelling clang
-// emitted). Verifies byteSize matches sizeof and that getTargetObject can bind
-// the instance. Returns true when both hold; a miss is reported as a skip
-// because the type may simply be spelled a way we did not anticipate.
+// A type that does not resolve is a failure rather than a skip: the anchor is
+// in this translation unit, so not finding it means the type system is not
+// reading the debug info at all.
 template<typename T>
-bool checkTypeLayout(Snapshot& snapshot, const T& instance,
-    std::initializer_list<StringView> nameCandidates)
+bool checkTypeLayout(Snapshot& snapshot, const T& instance, StringView anchorName)
 {
-    std::optional<TargetType> type;
-    StringView foundName;
-    for (StringView candidate : nameCandidates) {
-        type = snapshot.findType(candidate);
-        if (type) {
-            foundName = candidate;
-            break;
-        }
-    }
-    if (!type) {
-        dataLogLn("    skipped: no DWARF match for ", *nameCandidates.begin());
+    auto type = snapshot.findTypeOfPointee(anchorName);
+    TEST_ASSERT(type, anchorName);
+    if (!type)
         return false;
-    }
 
-    TEST_ASSERT_EQ(static_cast<size_t>(type->byteSize()), sizeof(T), foundName);
+    TEST_ASSERT_EQ(static_cast<size_t>(type->byteSize()), sizeof(T), anchorName);
 
-    auto obj = snapshot.getTargetObject(Address { std::addressof(instance) }, *type);
-    TEST_ASSERT(obj, foundName);
-    return obj.has_value();
+    auto object = snapshot.getTargetObject(Address { std::addressof(instance) }, *type);
+    TEST_ASSERT(object, anchorName);
+    return object.has_value();
 }
 
 } // anonymous namespace
 
 void testCommonTypeLayouts()
 {
-    if (!beginSuite("CommonTypeLayouts"))
+    SuiteTracer tracer("CommonTypeLayouts");
+    if (!tracer.shouldRun())
         return;
+
+    // Built before the corpse is taken: a corpse is frozen at that moment, so
+    // an object made after it reads back as whatever held that memory before.
+    WTF::Seconds seconds { 3.5 };
+    WTF::MonotonicTime monotonic = WTF::MonotonicTime::now();
+    WTF::WallTime wall = WTF::WallTime::now();
+    WTF::MediaTime media { 100, 25 };
+    WTF::CString cstr { "test-cstring" };
+    WTF::String str { "test-string"_s };
+    WTF::AtomString atomStr { "test-atom"_s };
+    Ref<WTF::StringImpl> ref = WTF::StringImpl::create("ref-test"_span);
+    RefPtr<WTF::StringImpl> refPtr = WTF::StringImpl::create("refptr-test"_span);
+    WTF::Vector<int> vec;
+    vec.append(42);
+    WTF::Variant<uint32_t, uint64_t> variant { static_cast<uint64_t>(0xDEADBEEFCAFEBABEull) };
+    WTF::StringPrintStream stream;
+    stream.print("polymorphic-under-test");
+
+    // For the negative case below, built here for the same reason.
+    alignas(WTF::StringPrintStream) uint8_t notAStream[sizeof(WTF::StringPrintStream)] = { };
+
+    // For the derived-object case below. Like everything above, these have to
+    // exist before the corpse is taken: the corpse freezes the memory, so an
+    // object constructed afterwards is not in it.
+    WalkBase walkBase;
+    WalkDerived walkDerived;
+    WalkTemplate<int> walkTemplate;
+    WalkFixedArray<uint64_t, 4> walkFixedArray;
 
     SelfSnapshot self;
     if (!self.isValid())
@@ -220,88 +348,240 @@ void testCommonTypeLayouts()
 
     unsigned typesChecked = 0;
 
-    // Time and duration wrappers -- single-member structs.
-    WTF::Seconds seconds { 3.5 };
-    if (checkTypeLayout(snapshot, seconds, { "WTF::Seconds"_s }))
+    // Time and duration wrappers, whose one member lives in a base class.
+    if (checkTypeLayout(snapshot, seconds, "JSCToolsTest::TypeAnchors::seconds"_s))
         ++typesChecked;
-
-    WTF::MonotonicTime monotonic = WTF::MonotonicTime::now();
-    if (checkTypeLayout(snapshot, monotonic, { "WTF::MonotonicTime"_s }))
+    if (checkTypeLayout(snapshot, monotonic, "JSCToolsTest::TypeAnchors::monotonicTime"_s))
         ++typesChecked;
-
-    WTF::WallTime wall = WTF::WallTime::now();
-    if (checkTypeLayout(snapshot, wall, { "WTF::WallTime"_s }))
+    if (checkTypeLayout(snapshot, wall, "JSCToolsTest::TypeAnchors::wallTime"_s))
         ++typesChecked;
 
     // MediaTime -- rational time (numerator + denominator + flags).
-    WTF::MediaTime media { 100, 25 };
-    if (checkTypeLayout(snapshot, media, { "WTF::MediaTime"_s }))
+    if (checkTypeLayout(snapshot, media, "JSCToolsTest::TypeAnchors::mediaTime"_s))
         ++typesChecked;
 
     // String family -- each wraps a refcounted impl.
-    WTF::CString cstr { "test-cstring" };
-    if (checkTypeLayout(snapshot, cstr, { "WTF::CString"_s }))
+    if (checkTypeLayout(snapshot, cstr, "JSCToolsTest::TypeAnchors::cString"_s))
+        ++typesChecked;
+    if (checkTypeLayout(snapshot, str, "JSCToolsTest::TypeAnchors::string"_s))
+        ++typesChecked;
+    if (checkTypeLayout(snapshot, atomStr, "JSCToolsTest::TypeAnchors::atomString"_s))
         ++typesChecked;
 
-    WTF::String str { "test-string"_s };
-    if (checkTypeLayout(snapshot, str, { "WTF::String"_s }))
+    // Templates whose defaulted parameters are part of the name in the debug info.
+    if (checkTypeLayout(snapshot, ref, "JSCToolsTest::TypeAnchors::ref"_s))
+        ++typesChecked;
+    if (checkTypeLayout(snapshot, refPtr, "JSCToolsTest::TypeAnchors::refPtr"_s))
+        ++typesChecked;
+    if (checkTypeLayout(snapshot, vec, "JSCToolsTest::TypeAnchors::vector"_s))
         ++typesChecked;
 
-    WTF::AtomString atomStr { "test-atom"_s };
-    if (checkTypeLayout(snapshot, atomStr, { "WTF::AtomString"_s }))
-        ++typesChecked;
-
-    // Ref / RefPtr -- template instantiations with default trait parameters
-    // that DWARF sometimes spells in full.
-    Ref<WTF::StringImpl> ref = WTF::StringImpl::create("ref-test"_span);
-    if (checkTypeLayout(snapshot, ref, {
-        "WTF::Ref<WTF::StringImpl>"_s,
-        "WTF::Ref<WTF::StringImpl, WTF::RawPtrTraits<WTF::StringImpl> >"_s,
-    }))
-        ++typesChecked;
-
-    RefPtr<WTF::StringImpl> refPtr = WTF::StringImpl::create("refptr-test"_span);
-    if (checkTypeLayout(snapshot, refPtr, {
-        "WTF::RefPtr<WTF::StringImpl>"_s,
-        "WTF::RefPtr<WTF::StringImpl, WTF::RawPtrTraits<WTF::StringImpl>, WTF::DefaultRefDerefTraits<WTF::StringImpl> >"_s,
-    }))
-        ++typesChecked;
-
-    // Vector -- default inline capacity and overflow-handling parameters.
-    WTF::Vector<int> vec;
-    vec.append(42);
-    if (checkTypeLayout(snapshot, vec, {
-        "WTF::Vector<int>"_s,
-        "WTF::Vector<int, 0>"_s,
-        "WTF::Vector<int, 0, WTF::CrashOnOverflow, 16, WTF::FastMalloc>"_s,
-    }))
-        ++typesChecked;
-
-    // Variant -- tests the anonymous-union-flattening path since a variant's
+    // Variant -- covers the anonymous-union-flattening path, since a variant's
     // storage is a tagged union.
-    WTF::Variant<uint32_t, uint64_t> variant { static_cast<uint64_t>(0xDEADBEEFCAFEBABEull) };
-    if (checkTypeLayout(snapshot, variant, {
-        "WTF::Variant<unsigned int, unsigned long>"_s,
-        "mpark::variant<unsigned int, unsigned long>"_s,
-        "WTF::Variant<unsigned int, unsigned long long>"_s,
-        "mpark::variant<unsigned int, unsigned long long>"_s,
-    }))
+    if (checkTypeLayout(snapshot, variant, "JSCToolsTest::TypeAnchors::variant"_s))
         ++typesChecked;
 
-    // JSC::JSObject -- lives in JSC and cannot be default-constructed without
-    // a VM, so check only that DWARF describes it and reports fields. A live
-    // instance is not needed to validate that the type system reaches JSC
-    // headers.
-    if (auto jsObjectType = snapshot.findType("JSC::JSObject"_s)) {
+    // A polymorphic type is where getTargetObject has something to check. The
+    // vptr only matches if the image was placed at the address the corpse has
+    // it at, so this covers the load addresses as well.
+    auto streamType = snapshot.findTypeOfPointee("JSCToolsTest::TypeAnchors::stringPrintStream"_s);
+    TEST_ASSERT(streamType, "corpse describes WTF::StringPrintStream");
+    if (streamType) {
+        TEST_ASSERT(streamType->isPolymorphic(), "WTF::StringPrintStream is polymorphic");
+        TEST_ASSERT_EQ(static_cast<size_t>(streamType->byteSize()), sizeof(WTF::StringPrintStream),
+            "TargetType byte size matches sizeof(StringPrintStream)");
+
+        auto streamObject = snapshot.getTargetObject(Address { std::addressof(stream) }, *streamType);
+        TEST_ASSERT(streamObject, "the vptr in the corpse matches the vtable symbol");
+
+        // Shows the check does work rather than accepting what it is handed.
+        // The refusal reports why, which is the point of it, but this one was
+        // asked for and so is not news.
+        JSC::Corpse::Error::Quiet quiet;
+        auto refused = snapshot.getTargetObject(Address { notAStream }, *streamType);
+        TEST_ASSERT(!refused, "a zeroed block is refused as a StringPrintStream");
+        ++typesChecked;
+    }
+
+    // Reading a derived object through its base. This is what a walk over a
+    // heap does constantly: a pointer to a base almost always addresses
+    // something more derived, and refusing that would make the walk useless.
+    {
+        auto baseType = snapshot.findTypeOfPointee("JSCToolsTest::TypeAnchors::walkBase"_s);
+        TEST_ASSERT(baseType, "corpse describes the base class");
+        if (baseType) {
+            TEST_ASSERT(baseType->isPolymorphic(), "the base class is polymorphic");
+
+            // The exact class: no dynamic type to report, since it is the one
+            // that was asked for.
+            auto exact = snapshot.getTargetObject(Address { std::addressof(walkBase) }, *baseType);
+            TEST_ASSERT(exact, "an object of the base class is read as its own class");
+            if (exact) {
+                TEST_ASSERT(!exact->isDerivedType(),
+                    "an object of the exact class reports no derived type");
+            }
+
+            // The derived class, read through the base's layout.
+            auto asBase = snapshot.getTargetObject(Address { std::addressof(walkDerived) }, *baseType);
+            TEST_ASSERT(asBase, "an object of a derived class is read through its base");
+            if (asBase) {
+                TEST_ASSERT(asBase->isDerivedType(),
+                    "reading a derived object through its base reports that it is derived");
+                TEST_ASSERT_EQ(asBase->dynamicTypeName(), "JSCToolsTest::WalkDerived"_s,
+                    "the object names the class it actually is");
+
+                // The base's own fields still read correctly out of it, which
+                // is what makes reading it through the base sound.
+                if (auto span = asBase->get("m_baseField"_s)) {
+                    TEST_ASSERT_EQ(span->size(), sizeof(uint32_t), "m_baseField is 4 bytes");
+                    if (span->size() == sizeof(uint32_t)) {
+                        uint32_t value = 0;
+                        memcpy(&value, span->data(), sizeof(value));
+                        TEST_ASSERT_HEX_EQ(value, walkDerived.m_baseField,
+                            "the base field of a derived object reads back");
+                    }
+                }
+            }
+
+            // A templated class, read as itself and read through its base.
+            // Naming one of these is exactly what a mangler built by hand could
+            // not do, and what taking the name from the demangler settles.
+            struct TemplateCase {
+                ASCIILiteral anchor;
+                ASCIILiteral name;
+                const void* object;
+            };
+            TemplateCase templateCases[] = {
+                { "JSCToolsTest::TypeAnchors::walkTemplate"_s,
+                  "JSCToolsTest::WalkTemplate<int>"_s, std::addressof(walkTemplate) },
+                { "JSCToolsTest::TypeAnchors::walkFixedArray"_s,
+                  "JSCToolsTest::WalkFixedArray<unsigned long, 4>"_s,
+                  std::addressof(walkFixedArray) },
+            };
+            for (const auto& testCase : templateCases) {
+                auto templateType = snapshot.findTypeOfPointee(testCase.anchor);
+                TEST_ASSERT(templateType, "corpse describes a templated polymorphic class");
+                if (!templateType)
+                    continue;
+                TEST_ASSERT(templateType->isPolymorphic(), "the templated class is polymorphic");
+
+                auto exactTemplate = snapshot.getTargetObject(Address { testCase.object },
+                    *templateType);
+                TEST_ASSERT(exactTemplate, "an object of the templated class is read as itself");
+
+                // ...and through its base, which is what names it.
+                auto throughBase = snapshot.getTargetObject(Address { testCase.object }, *baseType);
+                TEST_ASSERT(throughBase, "a templated object is read through its base");
+                if (throughBase) {
+                    TEST_ASSERT_EQ(throughBase->dynamicTypeName(), testCase.name,
+                        "the templated object names the class it actually is");
+                }
+                ++typesChecked;
+            }
+
+            // What the object itself says, read straight out of the corpse.
+            // Against an RTTI build this is where identification comes from,
+            // and nothing here consults an image file or the debug info.
+#if defined(__cpp_rtti) || defined(__GXX_RTTI)
+            {
+                JSC::Corpse::TypeInfoReader reader(snapshot);
+
+                uint64_t vptr = 0;
+                bool readVPtr = snapshot.readInto(
+                    Address { std::addressof(walkDerived) }, vptr);
+                TEST_ASSERT(readVPtr, "the object's vptr reads out of the corpse");
+
+                if (readVPtr) {
+                    Address stripped = Address { vptr }.stripped();
+                    TEST_ASSERT_EQ(reader.mangledNameForVPtr(stripped),
+                        "N12JSCToolsTest11WalkDerivedE"_str,
+                        "an object's type_info names the class it is");
+
+                    // The bases come from the type_info too, so a hierarchy is
+                    // answerable without debug info.
+                    auto hierarchy = reader.mangledHierarchyForVPtr(stripped);
+                    TEST_ASSERT(hierarchy.contains("N12JSCToolsTest11WalkDerivedE"_str),
+                        "the hierarchy opens with the class itself");
+                    TEST_ASSERT(hierarchy.contains("N12JSCToolsTest8WalkBaseE"_str),
+                        "the hierarchy reaches the base class");
+
+                    // A value that is not a vptr is reported as unidentified
+                    // rather than guessed at.
+                    TEST_ASSERT(reader.mangledNameForVPtr(Address { 0x1234 }).isEmpty(),
+                        "an address that is not a vtable identifies nothing");
+                    TEST_ASSERT(reader.mangledNameForVPtr(Address { }).isEmpty(),
+                        "a null vptr identifies nothing");
+                }
+            }
+#endif
+
+            // An unrelated polymorphic object is still refused: accepting a
+            // derived class must not mean accepting anything with a vptr.
+            if (streamType) {
+                JSC::Corpse::Error::Quiet quiet;
+                auto unrelated = snapshot.getTargetObject(Address { std::addressof(walkDerived) },
+                    *streamType);
+                TEST_ASSERT(!unrelated,
+                    "an object of an unrelated class is refused");
+            }
+            ++typesChecked;
+        }
+    }
+
+    // One step of a walk over the heap. Neither WTF::StringImpl nor WTF::Ref's
+    // instantiation is spelled here; both come out of the debug info.
+    auto refType = snapshot.findTypeOfPointee("JSCToolsTest::TypeAnchors::ref"_s);
+    TEST_ASSERT(refType, "corpse describes the Ref instantiation");
+    if (refType) {
+        auto refObject = snapshot.getTargetObject(Address { std::addressof(ref) }, *refType);
+        TEST_ASSERT(refObject, "TargetObject bound to the Ref");
+
+        const auto* pointerField = refType->field("m_ptr"_s);
+        TEST_ASSERT(pointerField, "WTF::Ref exposes m_ptr");
+
+        if (refObject && pointerField) {
+            TEST_ASSERT(pointerField->isPointer, "Ref::m_ptr is reported as a pointer");
+
+            auto implObject = snapshot.follow(*refObject, *pointerField);
+            TEST_ASSERT(implObject, "following Ref::m_ptr binds an object");
+            if (implObject) {
+                TEST_ASSERT(implObject->base() == Address { ref.ptr() },
+                    "the followed object is at the Ref's target");
+                TEST_ASSERT_EQ(static_cast<size_t>(implObject->size()), sizeof(WTF::StringImpl),
+                    "the followed object is the size of a StringImpl");
+
+                const auto* lengthField = implObject->type().field("m_length"_s);
+                TEST_ASSERT(lengthField, "the followed object exposes m_length");
+                if (lengthField) {
+                    auto lengthBytes = implObject->get(*lengthField);
+                    if (lengthBytes.size() == sizeof(uint32_t)) {
+                        uint32_t length = 0;
+                        memcpy(&length, lengthBytes.data(), sizeof(uint32_t));
+                        TEST_ASSERT_EQ(length, ref->length(),
+                            "the followed object's m_length is the string's length");
+                    }
+                    TEST_ASSERT(!snapshot.follow(*implObject, *lengthField),
+                        "a member that is not a pointer is not followed");
+                }
+            }
+        }
+        ++typesChecked;
+    }
+
+    // JSC::JSObject cannot be constructed without a VM, so there is no instance
+    // to bind and no anchor for one. Its name needs no guessing, which leaves it
+    // as the case that covers looking a type up by name in a JSC header.
+    auto jsObjectType = snapshot.findType("JSC::JSObject"_s);
+    TEST_ASSERT(jsObjectType, "corpse describes JSC::JSObject");
+    if (jsObjectType) {
         TEST_ASSERT(jsObjectType->byteSize() > 0, "JSC::JSObject byteSize is nonzero");
         TEST_ASSERT(!jsObjectType->fields().isEmpty(), "JSC::JSObject has fields in DWARF");
         ++typesChecked;
-    } else
-        dataLogLn("    skipped: no DWARF match for JSC::JSObject");
+    }
 
     TEST_ASSERT(typesChecked > 0, "at least one common type layout was cross-checked");
 }
 
 } // namespace JSCToolsTest
 
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#endif // HAVE(CORPSE_SUPPORT)

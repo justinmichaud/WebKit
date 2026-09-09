@@ -27,7 +27,7 @@
 #include "config.h"
 #include "CorpseTargetObject.h"
 
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#if HAVE(CORPSE_SUPPORT)
 
 #include <wtf/Assertions.h>
 #include <wtf/StdLibExtras.h>
@@ -35,10 +35,12 @@
 namespace JSC {
 namespace Corpse {
 
-TargetObject::TargetObject(Address base, TargetType type, Vector<uint8_t>&& bytes)
+TargetObject::TargetObject(Address base, TargetType type, Vector<uint8_t>&& bytes,
+    String dynamicTypeName)
     : m_base(base)
     , m_type(WTF::move(type))
     , m_bytes(WTF::move(bytes))
+    , m_dynamicTypeName(WTF::move(dynamicTypeName))
 {
 }
 
@@ -59,4 +61,4 @@ std::optional<std::span<const uint8_t>> TargetObject::get(StringView fieldName) 
 } // namespace Corpse
 } // namespace JSC
 
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#endif // HAVE(CORPSE_SUPPORT)

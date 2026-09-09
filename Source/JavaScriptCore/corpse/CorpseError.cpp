@@ -26,7 +26,7 @@
 #include "config.h"
 #include "CorpseError.h"
 
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#if HAVE(CORPSE_SUPPORT)
 
 #include "CorpseClient.h"
 
@@ -38,8 +38,23 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 namespace JSC {
 namespace Corpse {
 
+thread_local unsigned Error::s_quietDepth = 0;
+
+Error::Quiet::Quiet()
+{
+    ++Error::s_quietDepth;
+}
+
+Error::Quiet::~Quiet()
+{
+    --Error::s_quietDepth;
+}
+
 void Error::report(const char* format, ...)
 {
+    if (s_quietDepth)
+        return;
+
     fprintf(stderr, "%s: ", Client::name().characters());
 
     va_list args;
@@ -55,4 +70,4 @@ void Error::report(const char* format, ...)
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#endif // HAVE(CORPSE_SUPPORT)

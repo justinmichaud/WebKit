@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2026 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -26,50 +27,32 @@
 #include "config.h"
 #include "CorpseRegion.h"
 
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#if HAVE(CORPSE_SUPPORT)
 
-#include <mach/mach_vm.h>
+#include "CorpseSnapshot.h"
+
+#include <wtf/PageBlock.h>
 
 namespace JSC {
 namespace Corpse {
 
-uint64_t Region::pageCount() const
+Region::Region(const RegionInfo& info)
+    : m_info(info)
 {
-    return vm_kernel_page_size ? m_size / vm_kernel_page_size : 0;
 }
 
-std::optional<Region> Region::findContaining(mach_port_t task, Address address)
+uint64_t Region::pageCount() const
 {
-    // mach_vm_region_recurse reports the region at or above the address it is given,
-    // so the result only describes `address` if it turns out to contain it.
-    mach_vm_address_t regionAddress = 0;
-    mach_vm_size_t regionSize = 0;
-    vm_region_submap_info_data_64_t info;
-    for (natural_t depth = 0; ; ++depth) {
-        regionAddress = address.toMachVMAddress();
-        regionSize = 0;
-        natural_t depthLimit = depth; // We tell the kernel how deep we want to go. Kernel tells us how deep it can go.
-        mach_msg_type_number_t infoCount = VM_REGION_SUBMAP_INFO_COUNT_64;
-        kern_return_t kr = mach_vm_region_recurse(task, &regionAddress, &regionSize,
-            &depthLimit, reinterpret_cast<vm_region_recurse_info_t>(&info), &infoCount);
-        if (kr != KERN_SUCCESS)
-            return std::nullopt;
-        if (!info.is_submap)
-            break;
-    }
+    size_t pageSize = WTF::pageSize();
+    return pageSize ? m_info.size / pageSize : 0;
+}
 
-    Region region;
-    region.m_base = Address(regionAddress);
-    region.m_size = static_cast<size_t>(regionSize);
-    if (!region.contains(address))
-        return std::nullopt;
-
-    region.m_residentPageCount = info.pages_resident;
-    region.m_dirtyPageCount = info.pages_dirtied;
-    return region;
+std::optional<Region> Region::findContaining(const Snapshot& snapshot, Address address)
+{
+    return snapshot.regionContaining(address);
 }
 
 } // namespace Corpse
 } // namespace JSC
 
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#endif // HAVE(CORPSE_SUPPORT)

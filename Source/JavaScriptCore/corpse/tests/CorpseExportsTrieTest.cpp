@@ -26,7 +26,9 @@
 #include "config.h"
 #include "CorpseExportsTrieTest.h"
 
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#if HAVE(CORPSE_SUPPORT)
+
+#if OS(DARWIN)
 
 #include "LibJSCToolsTestUtilities.h"
 
@@ -810,4 +812,26 @@ void fuzzExportsTrie(uint64_t seed, unsigned iterations)
 
 } // namespace JSCToolsTest
 
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#else // !OS(DARWIN)
+
+#include "LibJSCToolsTestUtilities.h"
+
+#include <stdint.h>
+
+namespace JSCToolsTest {
+
+void testExportsTrie()
+{
+    skipSuite("ExportsTrie", "the dyld exports trie is a Mach-O construct, and no image in a corpse here has one");
+}
+
+void fuzzExportsTrie(uint64_t, unsigned)
+{
+    skipSuite("ExportsTrie fuzz", "the dyld exports trie is a Mach-O construct, and no image in a corpse here has one");
+}
+
+} // namespace JSCToolsTest
+
+#endif // OS(DARWIN)
+
+#endif // HAVE(CORPSE_SUPPORT)

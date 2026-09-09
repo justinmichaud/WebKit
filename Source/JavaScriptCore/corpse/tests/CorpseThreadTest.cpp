@@ -26,7 +26,7 @@
 #include "config.h"
 #include "CorpseThreadTest.h"
 
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#if HAVE(CORPSE_SUPPORT)
 
 #include "LibJSCToolsTestUtilities.h"
 
@@ -111,8 +111,47 @@ void testThreads()
     TEST_ASSERT(&again == &threads, "the threads of a snapshot are read once and kept");
 
     parked.stopAndJoin();
+
+    // A thread on a CPU has no kernel-recorded stack pointer to read, and it is
+    // the thread a crash report most needs. Capturing one means stopping it and
+    // reading its registers, which is what this checks; a corpse that reported
+    // these threads without stacks would look exactly like a corpse of a
+    // process whose threads were all idle.
+    static constexpr const char* spinnerName = "jsctools spin";
+
+    SpinningThreads spinning;
+    TEST_ASSERT(spinning.spawn(spinnerName), "a spinning thread starts");
+    TEST_ASSERT(spinning.spawn(spinnerName), "a second spinning thread starts");
+    if (!spinning.waitUntilAllSpinning()) {
+        TEST_ASSERT(false, "the spawned threads reached their spin loops");
+        return;
+    }
+
+    SelfSnapshot busy;
+    if (!busy.isValid())
+        return;
+
+    unsigned spinnersSeen = 0;
+    for (const Thread& thread : busy.snapshot().threads()) {
+        if (thread.name() != spinnerName)
+            continue;
+        ++spinnersSeen;
+        TEST_ASSERT(thread.hasRegisters(),
+            "a thread running on a CPU has its registers captured");
+        if (!thread.hasRegisters())
+            continue;
+        TEST_ASSERT(thread.stackPointer(), "a running thread has a stack pointer");
+        TEST_ASSERT(thread.hasStack(), "a running thread's stack pointer names a region");
+        if (thread.hasStack()) {
+            TEST_ASSERT(thread.stackRegion().contains(thread.stackPointer()),
+                "a running thread's stack pointer lies inside its stack region");
+        }
+    }
+    TEST_ASSERT_EQ(spinnersSeen, 2u, "both spinning threads appear in the corpse");
+
+    spinning.stopAndJoin();
 }
 
 } // namespace JSCToolsTest
 
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#endif // HAVE(CORPSE_SUPPORT)

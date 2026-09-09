@@ -25,12 +25,13 @@
 
 #pragma once
 
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#include <JavaScriptCore/CorpsePlatform.h>
+
+#if HAVE(CORPSE_SUPPORT)
 
 #include <bit>
 #include <compare>
 #include <cstddef>
-#include <mach/mach.h>
 #include <stdint.h>
 
 #if CPU(ARM64E)
@@ -45,16 +46,20 @@ namespace Corpse {
 class Address {
 public:
     Address() = default;
-    explicit Address(mach_vm_address_t value)
+    explicit Address(uint64_t value)
         : m_value(value)
     {
     }
     explicit Address(const void* pointer)
-        : m_value(reinterpret_cast<mach_vm_address_t>(pointer))
+        : m_value(reinterpret_cast<uintptr_t>(pointer))
     {
     }
 
-    mach_vm_address_t toMachVMAddress() const { return m_value; }
+    // The address as a plain integer. Named for what it is rather than for the
+    // type one platform's read primitive happens to take: a corpse address is
+    // handed to mach_vm_read_overwrite on Darwin and to process_vm_readv on
+    // Linux, and it is 64 bits wide either way.
+    uint64_t value() const { return m_value; }
     explicit operator bool() const { return m_value; }
     template<typename T> explicit operator T() const = delete;
 
@@ -91,10 +96,10 @@ public:
     uint64_t operator-(Address other) const { return m_value - other.m_value; }
 
 private:
-    mach_vm_address_t m_value { 0 };
+    uint64_t m_value { 0 };
 };
 
 } // namespace Corpse
 } // namespace JSC
 
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#endif // HAVE(CORPSE_SUPPORT)

@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2026 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -25,17 +26,13 @@
 
 #pragma once
 
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#include <JavaScriptCore/CorpsePlatform.h>
+
+#if HAVE(CORPSE_SUPPORT)
 
 #include <JavaScriptCore/CorpseAddress.h>
-#include <mach/mach.h>
-#include <stdint.h>
 #include <string>
-#include <string_view>
 #include <wtf/TZoneMalloc.h>
-
-// Enable for more detailed error messages on what may have caused a symbol lookup failure.
-#define CORPSE_SYMBOL_LOOKUP_DIAGNOSTICS 0
 
 namespace JSC {
 namespace Corpse {
@@ -44,15 +41,12 @@ class Snapshot;
 
 // A symbol looked up in a corpse by name. The lookup happens on construction.
 //
-// Only regular and absolute exports are read out of an image's trie. A re-export is
-// skipped rather than followed, so a name that one image re-exports resolves in the
-// image that defines it, as long as that image is loaded in the corpse. A
-// thread-local is not found at all.
-//
-// A re-export may also rename, and then no image exports the name at all: memcpy
-// exists only as libsystem_c's re-export of __platform_memmove from
-// libsystem_platform, so a lookup of memcpy finds nothing while a lookup of
-// __platform_memmove succeeds.
+// What a lookup can reach is the object-file format's business, and
+// ImageSymbolResolver is where that is written down. Either way it reaches
+// what the loader itself would resolve and no more: the dynamic symbols of an
+// ELF image, the exports trie of a Mach-O one. A symbol the linker hid is not
+// found, and saying so is the honest answer rather than reaching for it by some
+// other route.
 class Symbol {
     WTF_MAKE_TZONE_ALLOCATED(Symbol);
 public:
@@ -65,49 +59,12 @@ public:
 
 private:
     Address lookUpName(const Snapshot&);
-    Address resolveInImage(mach_port_t, Address loadAddress, std::string_view name);
-    bool hasReadBudget(size_t length);
-
-#if CORPSE_SYMBOL_LOOKUP_DIAGNOSTICS
-    // How far a search got, so a failure can name the stage that fell short.
-    struct Diagnostics {
-        bool readDyldInfo { false };
-        Address allImageInfosAddress;
-        bool readAllImageInfos { false };
-        uint32_t version { 0 };                 // dyld_all_image_infos::version.
-        Address rawImageArrayAddress;           // As stored, possibly signed.
-        Address imageArrayAddress;              // ...with any signature stripped.
-        unsigned images { 0 };                  // Images dyld reported.
-        bool implausibleImageCount { false };   // ...but too many to be believed.
-        unsigned examined { 0 };                // ...whose Mach header we read.
-        unsigned inSharedCache { 0 };           // ...of those, in the shared cache.
-        unsigned unreadableInfo { 0 };          // dyld_image_info unreadable.
-        unsigned unreadableHeader { 0 };        // Header missing or not 64-bit.
-        unsigned implausibleCommandsSize { 0 }; // sizeofcmds too large to believe.
-        unsigned unreadableCommands { 0 };      // Load commands unreadable.
-        unsigned withoutTrie { 0 };             // No trie, or no __TEXT/__LINKEDIT.
-        unsigned implausibleTrieSize { 0 };     // Trie size too large to believe.
-        unsigned trieOutsideLinkedit { 0 };     // Trie not within __LINKEDIT.
-        unsigned unreadableTrie { 0 };          // Trie located but not readable.
-        unsigned readBudgetExhausted { 0 };     // Gave up: the lookup hit its read budget.
-        unsigned searched { 0 };                // Tries actually walked.
-        unsigned reExports { 0 };               // Matched, but re-exported.
-        unsigned unsupportedKind { 0 };         // Matched, but not an export kind with one address.
-    };
-
-    void reportFailure(const Snapshot&) const;
-
-    Diagnostics m_diagnostics;
-#endif
 
     std::string m_name;
     Address m_address;
-
-    // What this lookup may still copy out of the corpse. Set when the search starts.
-    size_t m_readBudget { 0 };
 };
 
 } // namespace Corpse
 } // namespace JSC
 
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#endif // HAVE(CORPSE_SUPPORT)

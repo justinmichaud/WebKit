@@ -26,9 +26,11 @@
 
 #include "config.h"
 
+#include <JavaScriptCore/CorpsePlatform.h>
+
 #include <wtf/DataLog.h>
 
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#if HAVE(CORPSE_SUPPORT)
 
 #include "CorpseAddressTest.h"
 #include "CorpseByteParserTest.h"
@@ -38,6 +40,7 @@
 #include "CorpseSnapshotTest.h"
 #include "CorpseSymbolTest.h"
 #include "CorpseThreadTest.h"
+#include "CorpseTypeNameTest.h"
 #include "LibJSCToolsTestUtilities.h"
 #include "TypeinfoTest.h"
 
@@ -128,6 +131,7 @@ int main(int argc, char** argv)
         JSCToolsTest::testRegion();
         JSCToolsTest::testThreads();
         JSCToolsTest::testSymbol();
+        JSCToolsTest::testTypeName();
         JSCToolsTest::testTypeinfo();
         JSCToolsTest::testCommonTypeLayouts();
     }
@@ -161,4 +165,4 @@ int main(int, char**)
     return 0;
 }
 
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#endif // HAVE(CORPSE_SUPPORT)

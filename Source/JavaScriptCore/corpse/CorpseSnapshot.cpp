@@ -27,18 +27,15 @@
 #include "config.h"
 #include "CorpseSnapshot.h"
 
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#if HAVE(CORPSE_SUPPORT)
 
 #include "CorpseError.h"
 
-#include <mach-o/dyld.h>
-#include <mach/mach.h>
-#include <mach/mach_error.h>
-#include <mach/mach_vm.h>
-#include <unistd.h>
+#include <algorithm>
+#include <string.h>
+#include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMallocInlines.h>
-
-WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
+#include <wtf/text/StringHash.h>
 
 namespace JSC {
 namespace Corpse {
@@ -54,26 +51,21 @@ Snapshot::Snapshot(RefPtr<Process> process)
     if (!m_process || !m_process->isAttached())
         return;
 
-    // Snapshot the target into a corpse; only a read port is required from here
-    // on, and the corpse is independent of the live target.
-    kern_return_t kr = task_generate_corpse(m_process->taskPort(), &m_corpsePort);
-    if (kr != KERN_SUCCESS) {
-        m_corpsePort = MACH_PORT_NULL;
-        if (!m_process->holdsLiveTask()) {
-            Error::report("Could not snapshot PID %d: the process has terminated",
-                static_cast<int>(m_process->pid()));
-        } else {
-            Error::report("Could not snapshot PID %d: %s (0x%x)",
-                static_cast<int>(m_process->pid()), mach_error_string(kr), kr);
-        }
-    }
+    m_backend = Backend::capture(*m_process);
+    if (!m_backend)
+        return;
+
+    // The map and the image list are read once, with the corpse, so that every
+    // later lookup sees one consistent address space rather than re-reading a
+    // corpse that a caller might expect to have changed.
+    m_regions = m_backend->regions();
+    std::sort(m_regions.begin(), m_regions.end(), [](const auto& a, const auto& b) {
+        return a.base < b.base;
+    });
+    m_images = m_backend->images();
 }
 
-Snapshot::~Snapshot()
-{
-    if (isValid())
-        mach_port_deallocate(mach_task_self(), m_corpsePort);
-}
+Snapshot::~Snapshot() = default;
 
 const Vector<Thread>& Snapshot::threads()
 {
@@ -94,65 +86,106 @@ Address Snapshot::symbol(const char* name)
     return entry.iterator->value->address();
 }
 
+bool Snapshot::read(Address address, std::span<uint8_t> into) const
+{
+    return m_backend && m_backend->read(address, into);
+}
+
 std::optional<Vector<uint8_t>> Snapshot::readBytes(Address address, size_t length) const
 {
-    if (!isValid())
+    if (!m_backend)
         return std::nullopt;
+
     Vector<uint8_t> buffer;
     // The length is caller-supplied and may come from a target type's byte
     // size; tryGrow lets a huge value from broken debug info fail as nullopt
     // without aborting.
     if (!buffer.tryGrow(length))
         return std::nullopt;
-    mach_vm_size_t got = 0;
-    kern_return_t kr = mach_vm_read_overwrite(m_corpsePort, address.toMachVMAddress(),
-        buffer.size(), reinterpret_cast<mach_vm_address_t>(buffer.mutableSpan().data()), &got);
-    if (kr != KERN_SUCCESS || got != buffer.size())
+    if (!length)
+        return buffer;
+
+    if (!m_backend->read(address, buffer.mutableSpan()))
         return std::nullopt;
     return buffer;
 }
 
-Vector<CString> Snapshot::loadedImagePaths() const
+// The regions are sorted and taken once, so this is a binary search rather than
+// a re-parse of the corpse's map. A walk over a heap does one of these per
+// pointer it considers, which is why it has to be cheap.
+std::optional<Region> Snapshot::regionContaining(Address address) const
 {
-    Vector<CString> paths;
-    // Cross-process enumeration would read the target's dyld_all_image_infos
-    // out of the corpse; only self-corpse is wired up so far.
-    if (!m_process || m_process->pid() != getpid())
-        return paths;
-    uint32_t count = _dyld_image_count();
-    paths.reserveInitialCapacity(count);
-    for (uint32_t i = 0; i < count; ++i) {
-        if (const char* p = _dyld_get_image_name(i))
-            paths.append(CString(p));
-    }
-    return paths;
+    // The first region whose base is past the address; the one before it is the
+    // only one that can contain it.
+    auto it = std::upper_bound(m_regions.begin(), m_regions.end(), address,
+        [](Address value, const RegionInfo& region) {
+            return value < region.base;
+        });
+    if (it == m_regions.begin())
+        return std::nullopt;
+    --it;
+    if (!it->contains(address))
+        return std::nullopt;
+    return Region { *it };
+}
+
+TypeSystem* Snapshot::typeSystem()
+{
+    if (!isValid())
+        return nullptr;
+    if (!m_typeSystem)
+        m_typeSystem = TypeSystem::create(*this);
+    return m_typeSystem.get();
 }
 
 std::optional<TargetType> Snapshot::findType(StringView qualifiedName)
 {
-    if (!isValid())
-        return std::nullopt;
-    if (!m_typeSystem)
-        m_typeSystem = TypeSystem::create(*this);
-    if (!m_typeSystem)
-        return std::nullopt;
-    return m_typeSystem->findType(qualifiedName);
+    auto* types = typeSystem();
+    return types ? types->findType(qualifiedName) : std::nullopt;
+}
+
+std::optional<TargetType> Snapshot::findTypeOfPointee(StringView variableName)
+{
+    auto* types = typeSystem();
+    return types ? types->findTypeOfPointee(variableName) : std::nullopt;
+}
+
+std::optional<TargetType> Snapshot::findTypeOfMember(StringView qualifiedTypeName,
+    StringView memberName)
+{
+    auto* types = typeSystem();
+    return types ? types->findTypeOfMember(qualifiedTypeName, memberName) : std::nullopt;
 }
 
 std::optional<TargetObject> Snapshot::getTargetObject(Address base, const TargetType& type)
 {
-    if (!isValid())
+    auto* types = typeSystem();
+    return types ? types->getTargetObject(base, type) : std::nullopt;
+}
+
+std::optional<TargetObject> Snapshot::follow(const TargetObject& object, const TargetField& field)
+{
+    if (!field.isPointer)
         return std::nullopt;
-    if (!m_typeSystem)
-        m_typeSystem = TypeSystem::create(*this);
-    if (!m_typeSystem)
+
+    auto bytes = object.get(field);
+    if (bytes.size() != sizeof(uint64_t))
         return std::nullopt;
-    return m_typeSystem->getTargetObject(base, type);
+    uint64_t pointer = 0;
+    memcpy(&pointer, bytes.data(), sizeof(pointer));
+    if (!pointer)
+        return std::nullopt;
+
+    auto* types = typeSystem();
+    if (!types)
+        return std::nullopt;
+    auto type = types->findTypeOfMemberPointee(object.type().name(), field.name);
+    if (!type)
+        return std::nullopt;
+    return types->getTargetObject(Address { pointer }, *type);
 }
 
 } // namespace Corpse
 } // namespace JSC
 
-WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
-
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#endif // HAVE(CORPSE_SUPPORT)

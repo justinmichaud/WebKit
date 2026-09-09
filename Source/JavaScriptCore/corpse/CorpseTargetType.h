@@ -26,7 +26,9 @@
 
 #pragma once
 
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#include <JavaScriptCore/CorpsePlatform.h>
+
+#if HAVE(CORPSE_SUPPORT)
 
 #include <JavaScriptCore/CorpseAddress.h>
 #include <cstdint>
@@ -50,31 +52,25 @@ struct TargetField {
     String typeName;
     uint64_t byteOffset { 0 };
     uint64_t byteSize { 0 };
+
+    // Whether the member is worth following, without picking `typeName` apart.
+    bool isPointer { false };
 };
 
-// A class or struct in the target, with its byte size and every data member
-// flattened past anonymous unions and structs so members show up at their
-// enclosing offset. Once built, the value carries no reference to any debug
-// info handle.
+// A class or struct in the target. Members of anonymous unions and structs and
+// members inherited from bases are flattened in, each under its own name at the
+// offset it occupies. Once built, the value holds no debug info handle.
 class TargetType {
 public:
-    TargetType(String name, uint64_t byteSize, Vector<TargetField>&&,
-        bool isPolymorphic, Address expectedVTableAddress);
+    TargetType(String name, uint64_t byteSize, Vector<TargetField>&&, bool isPolymorphic);
 
     const String& name() const { return m_name; }
     uint64_t byteSize() const { return m_byteSize; }
     const Vector<TargetField>& fields() const { return m_fields; }
 
-    // True if the type has a vtable at offset 0. A caller confirms an object's
-    // runtime type by reading the vptr and matching it against this type's
-    // expected vtable address.
+    // True if the type has a vtable at offset 0, and so whether an object of
+    // it carries a type_info that says what it actually is.
     bool isPolymorphic() const { return m_isPolymorphic; }
-
-    // The address of `vtable for T` in the target. Set exactly when
-    // isPolymorphic() is true; findType refuses to build a TargetType for a
-    // polymorphic class whose vtable symbol does not resolve, so a valid
-    // TargetType never carries isPolymorphic() && !expectedVTableAddress().
-    Address expectedVTableAddress() const { return m_expectedVTableAddress; }
 
     // Returns the field named `name`, or nullptr if the type has no such member.
     const TargetField* field(StringView name) const;
@@ -84,7 +80,6 @@ private:
     uint64_t m_byteSize { 0 };
     Vector<TargetField> m_fields;
     bool m_isPolymorphic { false };
-    Address m_expectedVTableAddress;
 };
 
 // Looks up types in a target's debug info and binds addresses to those types.
@@ -93,9 +88,13 @@ private:
 // hidden behind the Corpse API.
 class TypeSystem {
 public:
-    // The Snapshot's target must be the current process (self-corpse). Cross-
-    // process type introspection is not wired up yet and calling create()
-    // against any other pid trips a RELEASE_ASSERT.
+    // Reads the target's debug info from the images the corpse reports, placed
+    // at the addresses the corpse says they loaded at. Nothing is attached to
+    // and no process is created: mya owns the target's lifecycle, and every
+    // address a caller gets back is one the corpse supplied.
+    //
+    // Returns nullptr where this build has no type system, or where the
+    // target's images carry no debug info.
     static std::unique_ptr<TypeSystem> create(Snapshot&);
     ~TypeSystem();
 
@@ -103,6 +102,10 @@ public:
     TypeSystem& operator=(const TypeSystem&) = delete;
 
     std::optional<TargetType> findType(StringView qualifiedName);
+    std::optional<TargetType> findTypeOfPointee(StringView variableName);
+    std::optional<TargetType> findTypeOfMember(StringView qualifiedTypeName, StringView memberName);
+    std::optional<TargetType> findTypeOfMemberPointee(StringView qualifiedTypeName,
+        StringView memberName);
     std::optional<TargetObject> getTargetObject(Address, const TargetType&);
 
 private:
@@ -114,4 +117,4 @@ private:
 } // namespace Corpse
 } // namespace JSC
 
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#endif // HAVE(CORPSE_SUPPORT)

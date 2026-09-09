@@ -202,6 +202,10 @@ if (COMPILER_IS_GCC_OR_CLANG)
     # we do not add -fno-rtti or -fno-exceptions for clang-cl
     if (NOT COMPILER_IS_CLANG_CL)
         WEBKIT_APPEND_GLOBAL_COMPILER_FLAGS(-fno-exceptions)
+        # WebKit does not use dynamic_cast, so RTTI is off unless a port asks
+        # for it. ENABLE_CPP_RTTI does not exist yet here -- the port's options
+        # are read further on -- so a port that wants it appends -frtti after
+        # Options${PORT}, and the later flag is the one the compiler honours.
         WEBKIT_APPEND_GLOBAL_CXX_FLAGS(-fno-rtti)
         WEBKIT_APPEND_GLOBAL_CXX_FLAGS(-fcoroutines)
         if (NOT APPLE)

@@ -26,17 +26,21 @@
 
 #pragma once
 
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#include <JavaScriptCore/CorpsePlatform.h>
+
+#if HAVE(CORPSE_SUPPORT)
 
 #include <JavaScriptCore/CorpseAddress.h>
+#include <JavaScriptCore/CorpseBackend.h>
 #include <JavaScriptCore/CorpseProcess.h>
+#include <JavaScriptCore/CorpseRegion.h>
 #include <JavaScriptCore/CorpseSymbol.h>
 #include <JavaScriptCore/CorpseTargetObject.h>
 #include <JavaScriptCore/CorpseTargetType.h>
 #include <JavaScriptCore/CorpseThread.h>
-#include <mach/mach.h>
 #include <memory>
 #include <optional>
+#include <span>
 #include <wtf/DoublyLinkedList.h>
 #include <wtf/HashMap.h>
 #include <wtf/RefPtr.h>
@@ -50,7 +54,12 @@
 namespace JSC {
 namespace Corpse {
 
-// Owns a corpse (a read-only Mach snapshot of a process)
+// Owns a corpse: a frozen, read-only copy of a process's address space taken
+// together with the register state of every thread in it. What the platform
+// does to produce one is the Backend's business; nothing here knows.
+//
+// Neither platform copies the memory itself, so the cost does not grow with it
+// and the target is not stopped for the length of a copy.
 // Check isValid() to see whether acquisition succeeded.
 //
 // Snapshots are linked into a DoublyLinkedList by their owner. The list is
@@ -66,16 +75,20 @@ public:
     Snapshot& operator=(const Snapshot&) = delete;
     Snapshot(Snapshot&& other) = delete;
 
-    bool isValid() const { return MACH_PORT_VALID(m_corpsePort); }
+    bool isValid() const { return !!m_backend; }
 
     // A monotonically increasing identifier assigned at construction. IDs are
     // never reused, so they stay stable as snapshots are added and removed.
     unsigned id() const { return m_id; }
 
     Process* process() const { return m_process.get(); }
-    mach_port_t corpsePort() const { return m_corpsePort; }
 
-    // The threads captured in this corpse, read and cached on the first call.
+    // The platform half of this corpse, null when acquisition failed. Callers
+    // inside the library use this; callers outside should not need it.
+    const Backend* backend() const { return m_backend.get(); }
+
+    // The threads captured in this corpse, paired with their stacks on the
+    // first call.
     const Vector<Thread>& threads();
 
     // The address of `name` in this corpse, null if it is not there.
@@ -83,15 +96,39 @@ public:
 
     // Copies `length` bytes from `address` in the corpse. Returns nullopt on
     // any short-copy or when the allocation for a length taken from the corpse
-    // does not succeed. Callers reading target objects go through this rather
-    // than the mach primitives so a Linux port only rewrites the body.
+    // does not succeed.
     std::optional<Vector<uint8_t>> readBytes(Address, size_t length) const;
 
-    // The absolute paths of every image loaded into the target's address
-    // space. Used by TypeSystem to bring linked dylibs into the LLDB target.
-    // Cross-process enumeration is not implemented yet; a Snapshot of another
-    // process returns an empty list.
-    Vector<CString> loadedImagePaths() const;
+    // Copies into a caller's buffer, so a read on a hot path need not allocate.
+    // Returns false on any short copy, leaving `into` unspecified.
+    bool read(Address, std::span<uint8_t> into) const;
+
+    // Reads one trivially-copyable value out of the corpse.
+    template<typename T> bool readInto(Address address, T& out) const
+    {
+        return m_backend && m_backend->readInto(address, out);
+    }
+
+    // A NUL-terminated string out of the corpse, null if it does not end within
+    // `maxLength`.
+    CString readCString(Address address, size_t maxLength = 4 * KB) const
+    {
+        return m_backend ? m_backend->readCString(address, maxLength) : CString { };
+    }
+
+    // The mappings of the corpse, in ascending address order, as they were when
+    // it was taken.
+    const Vector<RegionInfo>& regions() const { return m_regions; }
+
+    // The mapping containing `address`, or nullopt if it falls in none. This is
+    // the check that makes a walk over a corrupt heap safe: an address that
+    // lands in no mapping is not worth reading, and one that lands in the wrong
+    // kind of mapping is not worth believing.
+    std::optional<Region> regionContaining(Address) const;
+
+    // The images mapped into the corpse. Read from the corpse itself, so this
+    // describes the target whether or not the target is this process.
+    const Vector<ImageInfo>& loadedImages() const { return m_images; }
 
     // Finds the layout the target's debug info gives for `qualifiedName`
     // (namespaces separated by "::"). Returns nullopt when the target's debug
@@ -99,17 +136,41 @@ public:
     // which is why this is not const.
     std::optional<TargetType> findType(StringView qualifiedName);
 
+    // The layout of what the target's global pointer `variableName` points to:
+    // how a caller names a type without spelling it. The debug info knows a
+    // template by every argument its instantiation has, defaulted ones
+    // included, so naming a pointer leaves that spelling to the compiler. The
+    // pointer need not point anywhere.
+    std::optional<TargetType> findTypeOfPointee(StringView variableName);
+
+    // The layout of the type of `memberName` within `qualifiedTypeName`. Every
+    // member TargetType::fields() reports is reachable here, bases and
+    // anonymous unions included.
+    std::optional<TargetType> findTypeOfMember(StringView qualifiedTypeName, StringView memberName);
+
     // Binds an address in the corpse to a type, reading the object's bytes
-    // once. A subsequent get() slices those bytes without more Mach traffic.
+    // once. A subsequent get() slices those bytes without reading again.
     // Returns nullopt when the corpse read short-copies.
     std::optional<TargetObject> getTargetObject(Address, const TargetType&);
+
+    // One step of a walk over a graph of objects. Reports nothing for a member
+    // that is not a pointer, holds a null one, or addresses something the debug
+    // info does not describe.
+    std::optional<TargetObject> follow(const TargetObject&, const TargetField&);
 
 private:
     static unsigned s_nextId;
 
+    TypeSystem* typeSystem();
+
     RefPtr<Process> m_process;
-    mach_port_t m_corpsePort { MACH_PORT_NULL };
+    std::unique_ptr<Backend> m_backend;
     unsigned m_id;
+
+    // Taken once with the corpse, so every lookup sees the same address space
+    // and no lookup costs a re-parse. Sorted by base address.
+    Vector<RegionInfo> m_regions;
+    Vector<ImageInfo> m_images;
 
     std::optional<Vector<Thread>> m_threads;
     HashMap<String, std::unique_ptr<Symbol>> m_symbols;
@@ -124,4 +185,4 @@ private:
 } // namespace Corpse
 } // namespace JSC
 
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#endif // HAVE(CORPSE_SUPPORT)

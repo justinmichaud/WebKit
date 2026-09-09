@@ -18,6 +18,11 @@ set(PROJECT_VERSION ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}.${PROJECT_
 WEBKIT_OPTION_BEGIN()
 WEBKIT_OPTION_DEFINE(ENABLE_STATIC_JSC "Whether to build JavaScriptCore as a static library." PUBLIC OFF)
 WEBKIT_OPTION_DEFINE(USE_LIBBACKTRACE "Whether to enable usage of libbacktrace." PUBLIC OFF)
+# Emits the typeinfo an object needs to say what class it is. The corpse tools
+# read identity and inheritance straight out of a frozen address space, and
+# type_info is where both are recorded; without it a polymorphic object cannot
+# be identified at all, so this is on by default.
+WEBKIT_OPTION_DEFINE(ENABLE_CPP_RTTI "Whether to build with C++ RTTI." PUBLIC ON)
 WEBKIT_OPTION_DEFAULT_PORT_VALUE(ENABLE_REMOTE_INSPECTOR PRIVATE OFF)
 if (NOT WIN32)
     WEBKIT_OPTION_DEFINE(ENABLE_FUZZILLI "Whether to build JavaScriptCore with support for Fuzzilli." PUBLIC OFF)

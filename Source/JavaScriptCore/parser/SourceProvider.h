@@ -60,7 +60,11 @@ enum class SourceProviderSourceType : uint8_t {
 
 using BytecodeCacheGenerator = Function<RefPtr<CachedBytecode>()>;
 
-class SourceProvider : public ThreadSafeRefCounted<SourceProvider> {
+// Exported at class scope, not only member by member: with RTTI the typeinfo
+// is emitted beside the vtable in the translation unit holding the key
+// function, and a class that is not itself exported keeps both hidden inside
+// the library. Anything outside that names the type then cannot link.
+class JS_EXPORT_PRIVATE SourceProvider : public ThreadSafeRefCounted<SourceProvider> {
 public:
     static const intptr_t nullID = 1;
 

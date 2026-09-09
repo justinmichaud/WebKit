@@ -25,9 +25,10 @@
 
 #pragma once
 
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#include <JavaScriptCore/CorpsePlatform.h>
 
-#include <mach/mach.h>
+#if HAVE(CORPSE_SUPPORT)
+
 #include <memory>
 #include <span>
 #include <stdint.h>
@@ -38,6 +39,10 @@
 #include <wtf/RefPtr.h>
 #include <wtf/Seconds.h>
 #include <wtf/Vector.h>
+
+#if OS(DARWIN)
+#include <mach/mach.h>
+#endif
 
 namespace JSC {
 namespace Corpse {
@@ -119,6 +124,19 @@ Seconds totalSuiteTime();
         } \
     } while (0)
 
+// What this process is holding from the OS, in whatever unit the platform
+// counts such things: Mach port names on Darwin, open file descriptors
+// elsewhere.
+//
+// A corpse costs the analysing process a handle either way -- a port onto the
+// frozen task on Darwin, a pipe keeping the forked child alive on Linux -- and
+// the leak a test wants to rule out is the same one in both cases: a sequence
+// of operations that ends where it started must leave the count where it
+// started. What is being counted differs, so the test asks for the count rather
+// than for the mechanism.
+unsigned resourceFootprint();
+
+#if OS(DARWIN)
 // The number of names in this task's Mach port name space. Used to show that a
 // sequence of operations leaves no port behind.
 unsigned machPortNameCount();
@@ -128,6 +146,7 @@ unsigned machPortNameCount();
 // under that same name rather than a new name, so a right that is taken and never
 // given back shows up here and not in machPortNameCount().
 unsigned machPortSendRightCount(mach_port_t);
+#endif
 
 // Attaches to this process and takes a corpse of it. That is what lets a test
 // check what a corpse reports against what this process already knows about
@@ -159,8 +178,14 @@ public:
     struct Thread;
 
     // pthread keeps a thread name in a fixed buffer, so a longer name arrives cut
-    // to this length.
+    // to this length. Linux's buffer is TASK_COMM_LEN, which is much the smaller
+    // of the two, so a name that survives whole on one platform need not on the
+    // other.
+#if OS(DARWIN)
     static constexpr size_t maximumNameLength = 63;
+#else
+    static constexpr size_t maximumNameLength = 15;
+#endif
 
     ~ParkedThreads();
 
@@ -179,6 +204,32 @@ private:
     Vector<Thread*> m_threads;
 };
 
+// Threads that stay on a CPU instead of blocking. A parked thread is the easy
+// case: the kernel recorded where it stopped, so its stack pointer can be read
+// out of its bookkeeping. A thread that is running has no such record, and is
+// also the thread a crash report most needs, so a corpse has to capture its
+// registers directly.
+class SpinningThreads {
+public:
+    struct Thread;
+
+    ~SpinningThreads();
+
+    // Returns false if the thread could not be created.
+    bool spawn(const char* name);
+
+    // Blocks until every spawned thread is spinning, so that a snapshot taken
+    // afterwards catches them on a CPU.
+    bool waitUntilAllSpinning();
+
+    void stopAndJoin();
+
+    size_t count() const { return m_threads.size(); }
+
+private:
+    Vector<Thread*> m_threads;
+};
+
 } // namespace JSCToolsTest
 
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#endif // HAVE(CORPSE_SUPPORT)

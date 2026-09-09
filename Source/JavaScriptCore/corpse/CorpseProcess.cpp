@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2026 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -26,94 +27,28 @@
 #include "config.h"
 #include "CorpseProcess.h"
 
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#if HAVE(CORPSE_SUPPORT)
 
-#include "CorpseError.h"
-
-#include <errno.h>
-#include <libproc.h>
-#include <mach/mach.h>
-#include <mach/mach_error.h>
-#include <mach/mach_traps.h>
-#include <signal.h>
-#include <sys/proc.h>
-#include <sys/sysctl.h>
-
-WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
+#include "CorpseProcessHandle.h"
 
 namespace JSC {
 namespace Corpse {
 
-// A task port name outlives the task it named: when the target exits, the right we
-// hold becomes a dead name while the name itself is unchanged. MACH_PORT_VALID only
-// looks at the name, so it keeps reporting the port as good. Asking the kernel which
-// pid the port names is what tells a still-attached process apart from one that has
-// since exited -- and, because the answer is compared against m_pid, from a later
-// process that inherited the same pid.
-bool Process::holdsLiveTask() const
+// Out of line, and here rather than in the header, because Handle is only
+// complete in the platform's own files and destroying the unique_ptr needs it.
+Process::Process(pid_t pid)
+    : m_pid(pid)
+    , m_handle(makeUnique<Handle>())
 {
-    if (!MACH_PORT_VALID(m_taskPort))
-        return false;
-    int pid = -1;
-    return pid_for_task(m_taskPort, &pid) == KERN_SUCCESS && pid == m_pid;
+    RELEASE_ASSERT(pid > 0);
 }
 
-bool Process::isTranslated() const
+Process::~Process()
 {
-    struct kinfo_proc info;
-    size_t length = sizeof info;
-    int selector[4] = { CTL_KERN, KERN_PROC, KERN_PROC_PID, m_pid };
-    // A pid that no longer exists is not an error here: sysctl succeeds and reports
-    // that it wrote nothing, so the size has to be checked rather than the result.
-    if (sysctl(selector, 4, &info, &length, nullptr, 0) || length < sizeof info)
-        return false;
-    return info.kp_proc.p_flag & P_TRANSLATED;
-}
-
-bool Process::attach()
-{
-    if (isAttached()) {
-        if (holdsLiveTask())
-            return true;
-        // The target exited while we held its port.
-        detach();
-    }
-
-    mach_port_t taskPort = MACH_PORT_NULL;
-    kern_return_t kr = task_for_pid(mach_task_self(), m_pid, &taskPort);
-    if (kr == KERN_SUCCESS) {
-        m_taskPort = taskPort;
-        return true;
-    }
-
-    if (kill(m_pid, 0) && errno == ESRCH)
-        Error::report("No process with PID %d", static_cast<int>(m_pid));
-    else {
-        Error::report("Could not attach to PID %u: %s (0x%x) -- may need to run as root "
-            "or add the appropriate debugger entitlement",
-            static_cast<unsigned>(m_pid), mach_error_string(kr), kr);
-    }
-    return false;
-}
-
-void Process::detach()
-{
-    if (MACH_PORT_VALID(m_taskPort))
-        mach_port_deallocate(mach_task_self(), m_taskPort);
-    m_taskPort = MACH_PORT_NULL;
-}
-
-CString Process::executablePath() const
-{
-    char buffer[PROC_PIDPATHINFO_MAXSIZE];
-    if (proc_pidpath(m_pid, buffer, sizeof(buffer)) <= 0)
-        return { };
-    return CString(buffer);
+    detach();
 }
 
 } // namespace Corpse
 } // namespace JSC
 
-WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
-
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#endif // HAVE(CORPSE_SUPPORT)

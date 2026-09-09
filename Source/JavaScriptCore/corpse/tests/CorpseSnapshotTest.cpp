@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2026 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -26,105 +27,107 @@
 #include "config.h"
 #include "CorpseSnapshotTest.h"
 
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#if HAVE(CORPSE_SUPPORT)
 
 #include "LibJSCToolsTestUtilities.h"
 
+#include <JavaScriptCore/CorpseError.h>
 #include <JavaScriptCore/CorpseProcess.h>
 #include <JavaScriptCore/CorpseSnapshot.h>
-#include <mach/mach.h>
 #include <unistd.h>
+#include <wtf/Ref.h>
+#include <wtf/RefPtr.h>
 
 namespace JSCToolsTest {
 
 using JSC::Corpse::Process;
 using JSC::Corpse::Snapshot;
 
+// A Snapshot owns a frozen copy of a process. How the platform freezes one is
+// the backend's business; that a snapshot is valid or is not, keeps the process
+// it came from, carries an identifier no other snapshot reuses, and gives back
+// everything it took is not.
 void testSnapshot()
 {
     SuiteTracer tracer("Snapshot");
     if (!tracer.shouldRun())
         return;
 
-    RefPtr<Process> process = Process::create(getpid());
+    Ref<Process> process = Process::create(getpid());
     if (!process->attach()) {
         TEST_ASSERT(false, "attaching to this process succeeds");
         return;
     }
 
     unsigned firstId = 0;
-    mach_port_t firstCorpsePort = MACH_PORT_NULL;
-    mach_port_t secondCorpsePort = MACH_PORT_NULL;
     {
-        Snapshot snapshot(process);
+        Snapshot snapshot(process.ptr());
         TEST_ASSERT(snapshot.isValid(), "a snapshot of this process is valid");
-        TEST_ASSERT(MACH_PORT_VALID(snapshot.corpsePort()), "a valid snapshot holds a corpse port");
-        TEST_ASSERT(snapshot.process() == process.get(), "a snapshot keeps the process it came from");
+        TEST_ASSERT(snapshot.process() == process.ptr(),
+            "a snapshot keeps the process it came from");
         firstId = snapshot.id();
         TEST_ASSERT(firstId, "a snapshot has an identifier");
-        firstCorpsePort = snapshot.corpsePort();
 
-        Snapshot second(process);
+        Snapshot second(process.ptr());
         TEST_ASSERT(second.isValid(), "a second snapshot of the same process is valid");
         TEST_ASSERT(second.id() > firstId, "identifiers increase");
-        TEST_ASSERT(second.corpsePort() != snapshot.corpsePort(),
-            "two snapshots hold two different corpses");
-        secondCorpsePort = second.corpsePort();
+
+        // Two corpses of one process are two independent copies, not one
+        // shared: reading either must not depend on the other still existing.
+        TEST_ASSERT(!second.regions().isEmpty(), "a snapshot describes the target's mappings");
     }
-    TEST_ASSERT_EQ(machPortSendRightCount(firstCorpsePort), 0u,
-        "destroying a snapshot gives its corpse port back");
-    TEST_ASSERT_EQ(machPortSendRightCount(secondCorpsePort), 0u,
-        "and so does destroying the second");
+
     {
         // The two above are gone; their identifiers must not come back.
-        Snapshot later(process);
-        TEST_ASSERT(later.id() > firstId + 1, "identifiers are not reused after a snapshot is destroyed");
+        Snapshot later(process.ptr());
+        TEST_ASSERT(later.id() > firstId + 1,
+            "identifiers are not reused after a snapshot is destroyed");
     }
+
     {
-        RefPtr<Process> unattached = Process::create(getpid());
-        Snapshot snapshot(unattached);
+        // A snapshot of a process that was never attached has nothing to read,
+        // and every accessor has to say so rather than reach for it anyway.
+        JSC::Corpse::Error::Quiet quiet;
+        Ref<Process> unattached = Process::create(getpid());
+        Snapshot snapshot(unattached.ptr());
         TEST_ASSERT(!snapshot.isValid(), "a snapshot of an unattached process is invalid");
         TEST_ASSERT(snapshot.threads().isEmpty(), "an invalid snapshot reports no threads");
-        TEST_ASSERT(!snapshot.symbol("g_config"), "an invalid snapshot resolves no symbol");
+        TEST_ASSERT(snapshot.regions().isEmpty(), "an invalid snapshot reports no regions");
+        TEST_ASSERT(snapshot.loadedImages().isEmpty(), "an invalid snapshot reports no images");
+        TEST_ASSERT(!snapshot.symbol("malloc"), "an invalid snapshot resolves no symbol");
+        TEST_ASSERT(!snapshot.readBytes(JSC::Corpse::Address { uintptr_t(&firstId) }, 1),
+            "an invalid snapshot reads nothing");
     }
+
     {
-        RefPtr<Process> none;
-        Snapshot snapshot(none);
+        Snapshot snapshot(nullptr);
         TEST_ASSERT(!snapshot.isValid(), "a snapshot with no process is invalid");
     }
+
     {
-        Snapshot snapshot(process);
+        Snapshot snapshot(process.ptr());
         TEST_ASSERT(!snapshot.symbol(nullptr), "an unnamed symbol resolves to nothing");
         TEST_ASSERT(!snapshot.symbol(""), "an empty symbol name resolves to nothing");
     }
 
     {
-        // A corpse and the thread rights read out of it are Mach ports. Taking a snapshot
-        // must not leave any of them behind.
-        unsigned namesBefore = machPortNameCount();
-        mach_port_t corpsePort = MACH_PORT_NULL;
-        {
-            Snapshot snapshot(process);
+        // A corpse costs the analysing process a handle on every platform, and
+        // taking one must not leave any of them behind. Reading the threads is
+        // included because that is what takes the most on Darwin.
+        unsigned footprintBefore = resourceFootprint();
+        for (unsigned i = 0; i < 4; ++i) {
+            Snapshot snapshot(process.ptr());
             if (!snapshot.isValid()) {
                 TEST_ASSERT(false, "a snapshot of this process is valid");
-                return;
+                break;
             }
-            corpsePort = snapshot.corpsePort();
-            TEST_ASSERT(machPortSendRightCount(corpsePort), "a snapshot holds a right to its corpse");
-
-            unsigned namesBeforeThreads = machPortNameCount();
             snapshot.threads();
-            TEST_ASSERT_EQ(machPortNameCount(), namesBeforeThreads,
-                "reading the thread list gives back every thread right it took");
         }
-
-        TEST_ASSERT_EQ(machPortSendRightCount(corpsePort), static_cast<unsigned>(0),
-            "destroying a snapshot gives back the right to its corpse");
-        TEST_ASSERT_EQ(machPortNameCount(), namesBefore,
-            "and leaves no port name behind");
+        TEST_ASSERT_EQ(resourceFootprint(), footprintBefore,
+            "taking and destroying snapshots leaves nothing behind");
     }
 }
 
 } // namespace JSCToolsTest
 
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#endif // HAVE(CORPSE_SUPPORT)

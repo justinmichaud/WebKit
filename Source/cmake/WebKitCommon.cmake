@@ -343,6 +343,13 @@ if (NOT HAS_RUN_WEBKIT_COMMON)
         WEBKIT_PREPEND_GLOBAL_CXX_FLAGS(-Wthread-safety)
     endif ()
 
+    # Likewise for ENABLE_CPP_RTTI. -fno-rtti was appended already; appending
+    # -frtti after it is what turns RTTI back on, since the compiler honours
+    # whichever of the two comes last.
+    if (ENABLE_CPP_RTTI AND NOT COMPILER_IS_CLANG_CL)
+        WEBKIT_APPEND_GLOBAL_CXX_FLAGS(-frtti)
+    endif ()
+
     # Check gperf after including OptionsXXX.cmake since gperf is required only when ENABLE_WEBCORE is true,
     # and ENABLE_WEBCORE is configured in OptionsXXX.cmake.
     if (ENABLE_WEBCORE)

@@ -25,7 +25,9 @@
 
 #pragma once
 
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#include <JavaScriptCore/CorpsePlatform.h>
+
+#if HAVE(CORPSE_SUPPORT)
 
 #include <wtf/Assertions.h>
 
@@ -37,9 +39,31 @@ namespace Corpse {
 class Error {
 public:
     static void report(const char* format, ...) WTF_ATTRIBUTE_PRINTF(1, 2);
+
+    // Suppresses reports for as long as one of these is alive on this thread.
+    //
+    // A walk over a heap asks many questions whose answer is no: whether an
+    // address holds an object of some type, whether a pointer is worth
+    // following. Those are ordinary outcomes of the walk, not things to tell
+    // the user about, and reporting each one would bury the findings that
+    // matter. A caller that is probing takes one of these; a caller that is
+    // answering a question the user asked does not.
+    class Quiet {
+    public:
+        Quiet();
+        ~Quiet();
+
+        Quiet(const Quiet&) = delete;
+        Quiet& operator=(const Quiet&) = delete;
+    };
+
+private:
+    // Nesting is counted rather than flagged, so an inner scope does not turn
+    // reporting back on for the outer one.
+    static thread_local unsigned s_quietDepth;
 };
 
 } // namespace Corpse
 } // namespace JSC
 
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#endif // HAVE(CORPSE_SUPPORT)
