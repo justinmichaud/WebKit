@@ -26,41 +26,12 @@
 
 #pragma once
 
-#include <JavaScriptCore/CorpsePlatform.h>
+namespace JSCToolsTest {
 
-#if HAVE(MYA)
+// Checks what HAVE(MYA_TYPEINFO) claims: that this binary carries the type_info
+// a polymorphic object is identified by, and that LLDB's SB API is linked and
+// reads WTF::StringImpl's layout back out of the debug info. Neither takes a
+// snapshot, so this runs on every platform mya is built for.
+void testTypeinfo();
 
-#include <JavaScriptCore/CorpseAddress.h>
-#include <mach/mach.h>
-#include <optional>
-#include <stdint.h>
-
-namespace JSC {
-namespace Corpse {
-
-// One mapped region of a task's address space, as the kernel describes it.
-class Region {
-public:
-    // The region containing `address`, or nullopt if not found in any region.
-    static std::optional<Region> findContaining(mach_port_t task, Address);
-
-    Address base() const { return m_base; }
-    size_t size() const { return m_size; }
-    Address end() const { return m_base + m_size; }
-    bool contains(Address address) const { return address >= m_base && address < end(); }
-
-    uint64_t pageCount() const;
-    uint64_t residentPageCount() const { return m_residentPageCount; }
-    uint64_t dirtyPageCount() const { return m_dirtyPageCount; }
-
-private:
-    Address m_base;
-    size_t m_size { 0 };
-    uint64_t m_residentPageCount { 0 };
-    uint64_t m_dirtyPageCount { 0 };
-};
-
-} // namespace Corpse
-} // namespace JSC
-
-#endif // HAVE(MYA)
+} // namespace JSCToolsTest

@@ -1627,9 +1627,27 @@ if (USE_INSPECTOR_SOCKET_SERVER)
     )
 endif ()
 
-# The corpse memory-analysis support is built on Mach task and corpse APIs, so
-# its headers have no content off Darwin and there is nothing to build or export.
-if (APPLE)
+# mya is built wherever there is a process for it to read and on Linux besides,
+# where it is the main that says it cannot yet -- so that the build is exercised.
+#
+# Saying what an address holds takes LLDB and the RTTI that goes with it, which
+# is one switch and a debug build's: neither belongs in a shipping binary. Not
+# finding LLDB costs a debug build the typeinfo suite, which says so, and costs
+# the build itself nothing.
+if (APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    set(ENABLE_MYA ON)
+    if (CMAKE_BUILD_TYPE STREQUAL "Debug")
+        find_package(LLDB)
+        if (NOT LLDB_FOUND)
+            message(STATUS "liblldb was not found, so mya will not be able to say what an "
+                "address holds. Install liblldb-dev (Debian, Ubuntu), lldb-devel (Fedora) "
+                "or lldb (Homebrew), or set LLDB_ROOT to an LLVM install.")
+        endif ()
+    endif ()
+endif ()
+set(ENABLE_MYA_TYPEINFO ${LLDB_FOUND})
+
+if (ENABLE_MYA)
     list(APPEND JavaScriptCore_PRIVATE_INCLUDE_DIRECTORIES
         "${JAVASCRIPTCORE_DIR}/corpse"
     )
@@ -1639,6 +1657,8 @@ if (APPLE)
         corpse/CorpseClient.h
         corpse/CorpseError.h
         corpse/CorpseExportsTrie.h
+        corpse/CorpseLLDB.h
+        corpse/CorpsePlatform.h
         corpse/CorpseProcess.h
         corpse/CorpseRegion.h
         corpse/CorpseSnapshot.h
@@ -1901,9 +1921,9 @@ add_dependencies(JavaScriptCoreSharedScripts JSCBuiltins)
 
 # The corpse code is part of JavaScriptCoreTools, which ships as a static library used
 # only by tools for assisting in the development of JavaScriptCore and WebKit. This code
-# is not needed for JavaScriptCore and WebKit functionality as a browser engine. The
-# corpse code rely on Mach APIs which are only available on Apple platforms.
-if (APPLE)
+# is not needed for JavaScriptCore and WebKit functionality as a browser engine. It rests
+# on facilities only some platforms have, which is what ENABLE_MYA tracks.
+if (ENABLE_MYA)
   add_subdirectory(corpse)
 endif ()
 

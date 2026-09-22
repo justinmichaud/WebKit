@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2026 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -25,9 +26,7 @@
 
 #pragma once
 
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
-
-#include <mach/mach.h>
+#include <JavaScriptCore/CorpsePlatform.h>
 #include <memory>
 #include <span>
 #include <stdint.h>
@@ -39,12 +38,16 @@
 #include <wtf/Seconds.h>
 #include <wtf/Vector.h>
 
+#if HAVE(MYA)
+#include <mach/mach.h>
+
 namespace JSC {
 namespace Corpse {
 class Process;
 class Snapshot;
 }
 }
+#endif
 
 namespace JSCToolsTest {
 
@@ -119,6 +122,8 @@ Seconds totalSuiteTime();
         } \
     } while (0)
 
+#if HAVE(MYA)
+
 // The number of names in this task's Mach port name space. Used to show that a
 // sequence of operations leaves no port behind.
 unsigned machPortNameCount();
@@ -179,6 +184,6 @@ private:
     Vector<Thread*> m_threads;
 };
 
-} // namespace JSCToolsTest
+#endif // HAVE(MYA)
 
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+} // namespace JSCToolsTest

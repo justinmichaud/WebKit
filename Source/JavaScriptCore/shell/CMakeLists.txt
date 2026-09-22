@@ -22,9 +22,9 @@ if (ENABLE_FUZZILLI)
   list(APPEND jsc_SOURCES ../fuzzilli/Fuzzilli.cpp)
 endif ()
 
-# mya analyzes process corpses through Mach task APIs, so it only builds on
-# Apple platforms. Its sources do not compile elsewhere.
-if (APPLE)
+# mya reads a process where HAVE(MYA) says it can, and is a main that says it
+# cannot everywhere else it is built.
+if (ENABLE_MYA)
     set(mya_SOURCES ../mya/mya.cpp)
     set(mya_FRAMEWORKS
         JavaScriptCore
@@ -37,12 +37,18 @@ if (APPLE)
     )
 
     # The corpse support mya uses lives in the tools static library.
-    set(mya_LIBRARIES JavaScriptCoreTools edit)
+    set(mya_LIBRARIES JavaScriptCoreTools)
+
+    # The line editing mya uses is libedit, which HAVE(READLINE) covers on
+    # Darwin only.
+    if (APPLE)
+        list(APPEND mya_LIBRARIES edit)
+    endif ()
 endif ()
 
 WEBKIT_EXECUTABLE_DECLARE(jsc)
 
-if (APPLE)
+if (ENABLE_MYA)
     WEBKIT_EXECUTABLE_DECLARE(mya)
 endif ()
 
@@ -104,8 +110,8 @@ if (DEVELOPER_MODE)
     set(testdfg_PRIVATE_INCLUDE_DIRECTORIES ${jsc_PRIVATE_INCLUDE_DIRECTORIES})
     set(testdfg_FRAMEWORKS ${jsc_FRAMEWORKS})
 
-    # The tools library and its tests are only relevant for Apple platforms.
-    if (APPLE)
+    # The tools library and its tests only exist where the corpse support builds.
+    if (ENABLE_MYA)
         set(testLibJSCTools_SOURCES
             ../corpse/tests/CorpseAddressTest.cpp
             ../corpse/tests/CorpseByteParserTest.cpp
@@ -116,6 +122,7 @@ if (DEVELOPER_MODE)
             ../corpse/tests/CorpseSymbolTest.cpp
             ../corpse/tests/CorpseThreadTest.cpp
             ../corpse/tests/LibJSCToolsTestUtilities.cpp
+            ../corpse/tests/TypeinfoTest.cpp
             ../corpse/tests/testLibJSCTools.cpp
         )
         set(testLibJSCTools_DEFINITIONS ${jsc_PRIVATE_DEFINITIONS})
@@ -125,6 +132,13 @@ if (DEVELOPER_MODE)
         )
         set(testLibJSCTools_FRAMEWORKS ${jsc_FRAMEWORKS})
         set(testLibJSCTools_LIBRARIES JavaScriptCoreTools)
+
+        # The typeinfo suite includes LLDB's headers itself. The tools library
+        # keeps its own include directories private, so they come from here.
+        if (ENABLE_MYA_TYPEINFO)
+            list(APPEND testLibJSCTools_SYSTEM_INCLUDE_DIRECTORIES ${LLDB_INCLUDE_DIRS})
+            list(APPEND testLibJSCTools_LIBRARIES ${LLDB_LIBRARIES})
+        endif ()
     endif ()
 
     set(testwasmdebugger_SOURCES
@@ -159,7 +173,7 @@ if (DEVELOPER_MODE)
     WEBKIT_EXECUTABLE_DECLARE(testdfg)
     WEBKIT_EXECUTABLE_DECLARE(testwasmdebugger)
 
-    if (APPLE)
+    if (ENABLE_MYA)
         WEBKIT_EXECUTABLE_DECLARE(testLibJSCTools)
     endif ()
 
@@ -178,8 +192,11 @@ if (SHOULD_INSTALL_JS_SHELL)
     install(TARGETS jsc DESTINATION "${LIBEXEC_INSTALL_DIR}")
 endif ()
 
-if (APPLE)
+if (ENABLE_MYA)
     WEBKIT_EXECUTABLE(mya)
+    if (ENABLE_MYA_TYPEINFO)
+        WEBKIT_ADD_TARGET_CXX_FLAGS(mya -frtti)
+    endif ()
 
     if (SHOULD_INSTALL_JS_SHELL)
         install(TARGETS mya DESTINATION "${LIBEXEC_INSTALL_DIR}")
@@ -195,8 +212,11 @@ if (DEVELOPER_MODE)
     WEBKIT_EXECUTABLE(testdfg)
     WEBKIT_EXECUTABLE(testwasmdebugger)
 
-    if (APPLE)
+    if (ENABLE_MYA)
         WEBKIT_EXECUTABLE(testLibJSCTools)
+        if (ENABLE_MYA_TYPEINFO)
+            WEBKIT_ADD_TARGET_CXX_FLAGS(testLibJSCTools -frtti)
+        endif ()
     endif ()
 
     WEBKIT_ADD_PREFIX_HEADER(testapi ../JavaScriptCorePrefix.h PREFIX_NO_CODEGEN PREFIX_LANGUAGES CXX)

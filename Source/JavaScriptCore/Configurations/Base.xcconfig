@@ -156,6 +156,32 @@ WK_PROCESSED_XCENT_FILE=$(TEMP_FILE_DIR)/$(FULL_PRODUCT_NAME).entitlements
 WK_USE_RESTRICTED_ENTITLEMENTS = $(USE_INTERNAL_SDK);
 WK_USE_FATAL_EXCEPTIONS = $(OVERRIDE_WK_USE_FATAL_EXCEPTIONS:default=YES);
 
+// Whether mya is built able to say what an address in a target holds. That
+// takes LLDB's SB API to read the target's debug info and RTTI to identify an
+// object by its own type_info, and it is one switch: a debug build gets both, a
+// shipping build neither. Everything below derives from it, and so does
+// HAVE(MYA_TYPEINFO), which every target compiling that guard has to agree on.
+WK_MYA_TYPEINFO = NO;
+WK_MYA_TYPEINFO[config=Debug] = YES;
+
+// The library is always Xcode's own LLDB.framework. Its headers are there under
+// the internal SDK only, so a public Xcode takes them from an LLVM install:
+// "brew install lldb". System search paths, because LLDB's headers do not build
+// clean under WebKit's warnings.
+WK_LLDB_BREW_PREFIX = /opt/homebrew/opt/lldb;
+WK_LLDB_BREW_PREFIX[arch=x86_64] = /usr/local/opt/lldb;
+
+WK_LLDB_SYSTEM_HEADER_SEARCH_PATHS = $(WK_LLDB_SYSTEM_HEADER_SEARCH_PATHS_$(WK_MYA_TYPEINFO));
+WK_LLDB_SYSTEM_HEADER_SEARCH_PATHS_YES = $(WK_LLDB_BREW_PREFIX)/include;
+
+WK_LLDB_SYSTEM_FRAMEWORK_SEARCH_PATHS = ;
+WK_LLDB_SYSTEM_FRAMEWORK_SEARCH_PATHS[sdk=macosx*] = $(WK_LLDB_SYSTEM_FRAMEWORK_SEARCH_PATHS_$(WK_MYA_TYPEINFO));
+WK_LLDB_SYSTEM_FRAMEWORK_SEARCH_PATHS_YES = $(DEVELOPER_DIR)/../SharedFrameworks;
+
+WK_LLDB_LDFLAGS = ;
+WK_LLDB_LDFLAGS[sdk=macosx*] = $(WK_LLDB_LDFLAGS_$(WK_MYA_TYPEINFO));
+WK_LLDB_LDFLAGS_YES = -F$(DEVELOPER_DIR)/../SharedFrameworks -framework LLDB;
+
 // Shared variables used for dynamic or static linking of JavaScriptCore and jsc.
 
 JSC_SEC_LD_FLAGS[sdk=iphoneos*] = -weak_framework BrowserEngineCore;

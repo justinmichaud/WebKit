@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2026 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -26,8 +27,10 @@
 #include "config.h"
 #include "LibJSCToolsTestUtilities.h"
 
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#include <wtf/MonotonicTime.h>
+#include <wtf/StdLibExtras.h>
 
+#if HAVE(MYA)
 #include <JavaScriptCore/CorpseProcess.h>
 #include <JavaScriptCore/CorpseSnapshot.h>
 #include <mach/mach.h>
@@ -35,8 +38,7 @@
 #include <pthread.h>
 #include <string>
 #include <unistd.h>
-#include <wtf/MonotonicTime.h>
-#include <wtf/StdLibExtras.h>
+#endif
 
 namespace JSCToolsTest {
 
@@ -84,6 +86,8 @@ void skipSuite(const char* name, const char* why)
     ++suitesSkipped;
     dataLogLn("SKIP: ", name, ": ", why);
 }
+
+#if HAVE(MYA)
 
 unsigned machPortNameCount()
 {
@@ -227,6 +231,6 @@ void ParkedThreads::stopAndJoin()
     pthread_mutex_unlock(&parkMutex);
 }
 
-} // namespace JSCToolsTest
+#endif // HAVE(MYA)
 
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+} // namespace JSCToolsTest

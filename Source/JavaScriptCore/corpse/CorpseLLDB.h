@@ -28,39 +28,15 @@
 
 #include <JavaScriptCore/CorpsePlatform.h>
 
-#if HAVE(MYA)
+#if HAVE(MYA_TYPEINFO)
 
-#include <JavaScriptCore/CorpseAddress.h>
-#include <mach/mach.h>
-#include <optional>
-#include <stdint.h>
+// The one place that reaches LLDB's SB API. Xcode's LLDB.framework spells its
+// headers <LLDB/LLDB.h> and an LLVM install spells them <lldb/API/LLDB.h>;
+// CorpsePlatform.h has already established that one of the two is there.
+#if __has_include(<LLDB/LLDB.h>)
+#include <LLDB/LLDB.h>
+#else
+#include <lldb/API/LLDB.h>
+#endif
 
-namespace JSC {
-namespace Corpse {
-
-// One mapped region of a task's address space, as the kernel describes it.
-class Region {
-public:
-    // The region containing `address`, or nullopt if not found in any region.
-    static std::optional<Region> findContaining(mach_port_t task, Address);
-
-    Address base() const { return m_base; }
-    size_t size() const { return m_size; }
-    Address end() const { return m_base + m_size; }
-    bool contains(Address address) const { return address >= m_base && address < end(); }
-
-    uint64_t pageCount() const;
-    uint64_t residentPageCount() const { return m_residentPageCount; }
-    uint64_t dirtyPageCount() const { return m_dirtyPageCount; }
-
-private:
-    Address m_base;
-    size_t m_size { 0 };
-    uint64_t m_residentPageCount { 0 };
-    uint64_t m_dirtyPageCount { 0 };
-};
-
-} // namespace Corpse
-} // namespace JSC
-
-#endif // HAVE(MYA)
+#endif // HAVE(MYA_TYPEINFO)

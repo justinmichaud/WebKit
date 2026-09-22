@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2026 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -25,7 +26,9 @@
 
 #include "config.h"
 
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#include <JavaScriptCore/CorpsePlatform.h>
+
+#if HAVE(MYA)
 
 #include <JavaScriptCore/CorpseAddress.h>
 #include <JavaScriptCore/CorpseClient.h>
@@ -1392,16 +1395,16 @@ private:
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#endif // HAVE(MYA)
 
 int main(int argc, char** argv)
 {
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#if HAVE(MYA)
     return Mya::Shell().run(argc, argv);
 #else
     UNUSED_PARAM(argc);
     UNUSED_PARAM(argv);
-    printf("Not supported platform for mya\n");
+    printf("mya cannot read a process on this platform yet.\n");
     return 1;
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#endif // HAVE(MYA)
 }

@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2026 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -25,10 +26,17 @@
 
 #include "config.h"
 
+#include <JavaScriptCore/CorpsePlatform.h>
 #include <wtf/DataLog.h>
 
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+// mya is built for macOS and Linux, and a run on either that tests nothing is a
+// run that has lost coverage, so it fails rather than reporting success.
+#if HAVE(MYA) || OS(LINUX)
 
+#include "LibJSCToolsTestUtilities.h"
+#include "TypeinfoTest.h"
+
+#if HAVE(MYA)
 #include "CorpseAddressTest.h"
 #include "CorpseByteParserTest.h"
 #include "CorpseExportsTrieTest.h"
@@ -37,7 +45,7 @@
 #include "CorpseSnapshotTest.h"
 #include "CorpseSymbolTest.h"
 #include "CorpseThreadTest.h"
-#include "LibJSCToolsTestUtilities.h"
+#endif
 
 #include <stdlib.h>
 #include <string.h>
@@ -75,13 +83,35 @@ bool parseUint64(std::string_view text, uint64_t& out)
     return true;
 }
 
+// Every suite that reads a process, which is all of them but the typeinfo one.
+#if HAVE(MYA)
+void runCorpseSuites(bool fuzzOnly, uint64_t fuzzSeed, unsigned fuzzIterations)
+{
+    if (fuzzOnly) {
+        JSCToolsTest::fuzzExportsTrie(fuzzSeed, fuzzIterations);
+        return;
+    }
+    JSCToolsTest::testByteParser();
+    JSCToolsTest::testExportsTrie();
+    JSCToolsTest::fuzzExportsTrie(fuzzSeed, fuzzIterations);
+    JSCToolsTest::testAddress();
+    JSCToolsTest::testProcess();
+    JSCToolsTest::testSnapshot();
+    JSCToolsTest::testRegion();
+    JSCToolsTest::testThreads();
+    JSCToolsTest::testSymbol();
+}
+#else
+void runCorpseSuites(bool, uint64_t, unsigned) { }
+#endif
+
 } // anonymous namespace
 
 int main(int argc, char** argv)
 {
+    bool fuzzOnly = false;
     uint64_t fuzzSeed = defaultFuzzSeed;
     uint64_t fuzzIterations = defaultFuzzIterations;
-    bool fuzzOnly = false;
 
     // argv is wrapped in a span so that nothing here walks off the end of it.
     auto arguments = unsafeMakeSpan(argv, static_cast<size_t>(argc));
@@ -114,19 +144,9 @@ int main(int argc, char** argv)
 
     dataLogLn("Starting libJavaScriptCoreTools tests");
 
-    if (fuzzOnly)
-        JSCToolsTest::fuzzExportsTrie(fuzzSeed, static_cast<unsigned>(fuzzIterations));
-    else {
-        JSCToolsTest::testByteParser();
-        JSCToolsTest::testExportsTrie();
-        JSCToolsTest::fuzzExportsTrie(fuzzSeed, static_cast<unsigned>(fuzzIterations));
-        JSCToolsTest::testAddress();
-        JSCToolsTest::testProcess();
-        JSCToolsTest::testSnapshot();
-        JSCToolsTest::testRegion();
-        JSCToolsTest::testThreads();
-        JSCToolsTest::testSymbol();
-    }
+    if (!fuzzOnly)
+        JSCToolsTest::testTypeinfo();
+    runCorpseSuites(fuzzOnly, fuzzSeed, static_cast<unsigned>(fuzzIterations));
 
     dataLogLn("Ran ", JSCToolsTest::assertionsRun, " assertions, ",
         JSCToolsTest::assertionsFailed, " failed, ",
@@ -146,15 +166,13 @@ int main(int argc, char** argv)
     return 0;
 }
 
-#else // libJavaScriptCoreTools support unavailable
+#else // A platform mya is not built for.
 
 int main(int, char**)
 {
-    // The corpse support is built on Mach task APIs, so there is nothing to test
-    // on other platforms. Simulators and MacCatalyst are also not supported.
     // Report success so that a run here is not a failure.
     printf("Not supported platform for testLibJSCTools\n");
     return 0;
 }
 
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+#endif // HAVE(MYA) || OS(LINUX)
