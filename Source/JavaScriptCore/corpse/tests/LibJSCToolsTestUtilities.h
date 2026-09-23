@@ -38,7 +38,7 @@
 #include <wtf/Seconds.h>
 #include <wtf/Vector.h>
 
-#if HAVE(MYA)
+#if OS(DARWIN)
 #include <mach/mach.h>
 
 namespace JSC {
@@ -122,7 +122,7 @@ Seconds totalSuiteTime();
         } \
     } while (0)
 
-#if HAVE(MYA)
+#if OS(DARWIN)
 
 // The number of names in this task's Mach port name space. Used to show that a
 // sequence of operations leaves no port behind.
@@ -184,6 +184,6 @@ private:
     Vector<Thread*> m_threads;
 };
 
-#endif // HAVE(MYA)
+#endif // OS(DARWIN)
 
 } // namespace JSCToolsTest

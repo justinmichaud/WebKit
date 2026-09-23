@@ -30,7 +30,6 @@
 
 #if HAVE(MYA)
 
-#include <mach/mach.h>
 #include <sys/types.h>
 #include <wtf/Assertions.h>
 #include <wtf/Ref.h>
@@ -52,9 +51,9 @@ public:
     void detach();
 
     pid_t pid() const { return m_pid; }
-    mach_port_t taskPort() const { return m_taskPort; }
+    TaskHandle taskPort() const { return m_taskPort; }
 
-    bool isAttached() const { return MACH_PORT_VALID(m_taskPort); }
+    bool isAttached() const { return isValidTaskHandle(m_taskPort); }
 
     // The target process may have terminated while we still hold the port.
     bool holdsLiveTask() const;
@@ -72,7 +71,7 @@ private:
     }
 
     pid_t m_pid;
-    mach_port_t m_taskPort { MACH_PORT_NULL };
+    TaskHandle m_taskPort { invalidTaskHandle };
 };
 
 } // namespace Corpse

@@ -39,17 +39,15 @@
 
 # Newest first, so that a machine with several LLVM installs gets the one whose
 # headers and library are most likely to match the rest of the toolchain.
-set(LLDB_VERSIONED_PREFIXES)
-foreach (_lldb_version RANGE 22 15 -1)
-    list(APPEND LLDB_VERSIONED_PREFIXES "/usr/lib/llvm-${_lldb_version}")
-endforeach ()
+file(GLOB LLDB_VERSIONED_PREFIXES "/usr/lib/llvm-*")
+list(SORT LLDB_VERSIONED_PREFIXES COMPARE NATURAL ORDER DESCENDING)
 
 # Homebrew's lldb is keg-only, so it is not in the default search paths either.
 list(APPEND LLDB_VERSIONED_PREFIXES "/opt/homebrew/opt/lldb" "/usr/local/opt/lldb")
 
+# LLDB_ROOT is searched ahead of these by find_path itself, under CMP0074.
 find_path(LLDB_INCLUDE_DIR
     NAMES lldb/API/LLDB.h
-    HINTS ${LLDB_ROOT}
     PATHS ${LLDB_VERSIONED_PREFIXES}
     PATH_SUFFIXES include
 )

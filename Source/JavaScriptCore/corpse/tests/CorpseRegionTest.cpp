@@ -34,13 +34,17 @@
 #include <JavaScriptCore/CorpseAddress.h>
 #include <JavaScriptCore/CorpseRegion.h>
 #include <JavaScriptCore/CorpseSnapshot.h>
+#if OS(DARWIN)
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#endif
 #include <string.h>
 #include <sys/mman.h>
 #include <unistd.h>
 
 namespace JSCToolsTest {
+
+#if OS(DARWIN)
 
 using JSC::Corpse::Address;
 using JSC::Corpse::Region;
@@ -176,6 +180,22 @@ void testRegion()
 
     unmapPagesStillHeld();
 }
+
+#else // A platform whose implementation is still to be written.
+
+void testRegion()
+{
+    SuiteTracer tracer("Region");
+    if (!tracer.shouldRun())
+        return;
+
+    // The stub this suite would run against attaches to nothing, so there is
+    // nothing here that can pass until the implementation lands.
+    TEST_ASSERT(false, "reading a process is not implemented on this platform yet: "
+        "https://bugs.webkit.org/show_bug.cgi?id=324772");
+}
+
+#endif // OS(DARWIN)
 
 } // namespace JSCToolsTest
 

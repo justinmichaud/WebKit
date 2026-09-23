@@ -28,10 +28,29 @@
 
 #include <wtf/Platform.h>
 
-// Whether a process can be read here, which is what mya is for. So far that
-// means Darwin's Mach task and corpse APIs; MacCatalyst and the simulators are
-// out because task_for_pid is not usable there. mya is built on Linux too, as
-// the main that says so, so that the build is exercised.
+// Whether mya can say what a native object on the heap it reads is. That takes
+// LLDB's SB API to read the target's debug info, and RTTI in the target itself so
+// that an object carries the type_info identifying it. ENABLE_MYA_HEAP is the one
+// that decides, and CorpseLLDB.h is what includes the SB API.
+//
+// A development build's, both of them: neither a dependency on LLDB nor the
+// metadata RTTI emits belongs in a shipping binary.
+//
+// Xcode ships LLDB.framework with its headers under the internal SDK only, so a
+// public Xcode takes them from an LLVM install: "brew install lldb" on macOS,
+// liblldb-dev or lldb-devel on Linux. An xcconfig cannot ask whether a header is
+// installed, so the probe is what narrows an Xcode build that has no SB API.
+#if !defined(HAVE_MYA_HEAP)
+#if ENABLE(MYA_HEAP) && (__has_include(<LLDB/LLDB.h>) || __has_include(<lldb/API/LLDB.h>))
+#define HAVE_MYA_HEAP 1
+#endif
+#endif
+
+// Whether mya is built here. Reading a process is Darwin's Mach task and corpse
+// APIs so far; MacCatalyst and the simulators are out because task_for_pid is not
+// usable there. Linux builds the same classes against stubs that attach to
+// nothing, so that the shape the Linux implementation has to fill is already
+// here and already compiled.
 //
 // FIXME: Read a process on Linux by stopping every thread through WTF's
 // signal-based Thread::suspend(), forking, and reading the child.
@@ -39,25 +58,34 @@
 #if !defined(HAVE_MYA)
 #if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
 #define HAVE_MYA 1
+#elif OS(LINUX)
+#define HAVE_MYA 1
 #endif
 #endif
 
-// Whether mya can say what an address holds. That takes LLDB's SB API to read
-// the target's debug info, and RTTI so that an object's own type_info is there
-// to identify it by. CorpseLLDB.h is what includes the SB API.
-//
-// Debug builds only: a dependency on LLDB and the metadata RTTI emits are not
-// things a shipping build carries. The build gives a debug build the SB API
-// headers and -frtti, so anything missing here is a debug build that was set up
-// wrong, and the typeinfo suite says so.
-//
-// Xcode ships LLDB.framework with its headers under the internal SDK only, so a
-// public Xcode takes them from an LLVM install: "brew install lldb" on macOS,
-// liblldb-dev or lldb-devel on Linux.
-#if !defined(HAVE_MYA_TYPEINFO)
-#if ASSERT_ENABLED \
-    && (__has_include(<LLDB/LLDB.h>) || __has_include(<lldb/API/LLDB.h>)) \
-    && (defined(__cpp_rtti) || defined(__GXX_RTTI))
-#define HAVE_MYA_TYPEINFO 1
+#if HAVE(MYA)
+
+#if OS(DARWIN)
+#include <mach/mach.h>
 #endif
+
+namespace JSC {
+namespace Corpse {
+
+// What a target process is held by. A Mach task or corpse port on Darwin; on a
+// platform whose implementation is still a stub there is nothing to hold, and
+// every handle is the invalid one.
+#if OS(DARWIN)
+using TaskHandle = mach_port_t;
+constexpr TaskHandle invalidTaskHandle = MACH_PORT_NULL;
+inline bool isValidTaskHandle(TaskHandle handle) { return MACH_PORT_VALID(handle); }
+#else
+using TaskHandle = int;
+constexpr TaskHandle invalidTaskHandle = -1;
+inline bool isValidTaskHandle(TaskHandle handle) { return handle >= 0; }
 #endif
+
+} // namespace Corpse
+} // namespace JSC
+
+#endif // HAVE(MYA)

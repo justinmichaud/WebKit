@@ -28,7 +28,7 @@
 
 #include <JavaScriptCore/CorpsePlatform.h>
 
-#if HAVE(MYA)
+#if HAVE(MYA) && OS(DARWIN)
 
 #include <JavaScriptCore/CorpseByteParser.h>
 #include <expected>
@@ -69,4 +69,4 @@ public:
 } // namespace Corpse
 } // namespace JSC
 
-#endif // HAVE(MYA)
+#endif // HAVE(MYA) && OS(DARWIN)

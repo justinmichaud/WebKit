@@ -31,7 +31,6 @@
 #if HAVE(MYA)
 
 #include <JavaScriptCore/CorpseAddress.h>
-#include <mach/mach.h>
 #include <stdint.h>
 #include <string>
 #include <string_view>
@@ -68,7 +67,7 @@ public:
 
 private:
     Address lookUpName(const Snapshot&);
-    Address resolveInImage(mach_port_t, Address loadAddress, std::string_view name);
+    Address resolveInImage(TaskHandle, Address loadAddress, std::string_view name);
     bool hasReadBudget(size_t length);
 
 #if CORPSE_SYMBOL_LOOKUP_DIAGNOSTICS

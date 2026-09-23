@@ -35,7 +35,9 @@
 #include <JavaScriptCore/CorpseSnapshot.h>
 #include <JavaScriptCore/CorpseSymbol.h>
 #include <dlfcn.h>
+#if OS(DARWIN)
 #include <mach/mach.h>
+#endif
 #include <stdlib.h>
 #include <unistd.h>
 #include <wtf/MonotonicTime.h>
@@ -47,6 +49,8 @@ extern "C" __attribute__((visibility("hidden"))) int jscToolsTestHiddenGlobal;
 int jscToolsTestHiddenGlobal = 42;
 
 namespace JSCToolsTest {
+
+#if OS(DARWIN)
 
 using JSC::Corpse::Address;
 using JSC::Corpse::Snapshot;
@@ -157,6 +161,22 @@ void testSymbol()
             dataLogLn("    the search took ", elapsed, " seconds");
     }
 }
+
+#else // A platform whose implementation is still to be written.
+
+void testSymbol()
+{
+    SuiteTracer tracer("Symbol");
+    if (!tracer.shouldRun())
+        return;
+
+    // The stub this suite runs against attaches to nothing, so nothing here can
+    // pass until the implementation lands.
+    TEST_ASSERT(false, "reading a process is not implemented on this platform yet: "
+        "https://bugs.webkit.org/show_bug.cgi?id=324772");
+}
+
+#endif // OS(DARWIN)
 
 } // namespace JSCToolsTest
 

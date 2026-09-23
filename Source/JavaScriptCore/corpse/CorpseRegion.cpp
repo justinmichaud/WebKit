@@ -29,10 +29,14 @@
 
 #if HAVE(MYA)
 
+#if OS(DARWIN)
 #include <mach/mach_vm.h>
+#endif
 
 namespace JSC {
 namespace Corpse {
+
+#if OS(DARWIN)
 
 uint64_t Region::pageCount() const
 {
@@ -69,6 +73,17 @@ std::optional<Region> Region::findContaining(mach_port_t task, Address address)
     region.m_dirtyPageCount = info.pages_dirtied;
     return region;
 }
+
+#else // A platform whose implementation is still to be written.
+
+// FIXME: Read a process on Linux by stopping every thread through WTF's
+// signal-based Thread::suspend(), forking, and reading the child.
+// https://bugs.webkit.org/show_bug.cgi?id=324772
+uint64_t Region::pageCount() const { return 0; }
+
+std::optional<Region> Region::findContaining(TaskHandle, Address) { return std::nullopt; }
+
+#endif // OS(DARWIN)
 
 } // namespace Corpse
 } // namespace JSC

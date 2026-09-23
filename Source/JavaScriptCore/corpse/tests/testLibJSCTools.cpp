@@ -29,14 +29,8 @@
 #include <JavaScriptCore/CorpsePlatform.h>
 #include <wtf/DataLog.h>
 
-// mya is built for macOS and Linux, and a run on either that tests nothing is a
-// run that has lost coverage, so it fails rather than reporting success.
-#if HAVE(MYA) || OS(LINUX)
-
-#include "LibJSCToolsTestUtilities.h"
-#include "TypeinfoTest.h"
-
 #if HAVE(MYA)
+
 #include "CorpseAddressTest.h"
 #include "CorpseByteParserTest.h"
 #include "CorpseExportsTrieTest.h"
@@ -45,7 +39,8 @@
 #include "CorpseSnapshotTest.h"
 #include "CorpseSymbolTest.h"
 #include "CorpseThreadTest.h"
-#endif
+#include "LibJSCToolsTestUtilities.h"
+#include "TypeinfoTest.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -84,7 +79,6 @@ bool parseUint64(std::string_view text, uint64_t& out)
 }
 
 // Every suite that reads a process, which is all of them but the typeinfo one.
-#if HAVE(MYA)
 void runCorpseSuites(bool fuzzOnly, uint64_t fuzzSeed, unsigned fuzzIterations)
 {
     if (fuzzOnly) {
@@ -101,9 +95,6 @@ void runCorpseSuites(bool fuzzOnly, uint64_t fuzzSeed, unsigned fuzzIterations)
     JSCToolsTest::testThreads();
     JSCToolsTest::testSymbol();
 }
-#else
-void runCorpseSuites(bool, uint64_t, unsigned) { }
-#endif
 
 } // anonymous namespace
 
@@ -157,7 +148,9 @@ int main(int argc, char** argv)
         dataLogLn("Some libJavaScriptCoreTools tests FAILED!");
         return 1;
     }
-    if (!JSCToolsTest::assertionsRun) {
+    // Nothing run and nothing skipped means a filter that matched no suite at all;
+    // a suite that skipped itself found there was nothing here to test.
+    if (!JSCToolsTest::assertionsRun && !JSCToolsTest::suitesSkipped) {
         dataLogLn("No tests ran!");
         return 1;
     }
@@ -175,4 +168,4 @@ int main(int, char**)
     return 0;
 }
 
-#endif // HAVE(MYA) || OS(LINUX)
+#endif // HAVE(MYA)

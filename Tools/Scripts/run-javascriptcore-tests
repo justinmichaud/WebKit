@@ -570,9 +570,12 @@ $runTestLibJSCTools = enableTestOrNot($runTestLibJSCTools);
 $runJSCStress = enableTestOrNot($runJSCStress);
 $runMozillaTests = enableTestOrNot($runMozillaTests);
 
-# libJavaScriptCoreTools and its test is built on Mach APIs and only available on Apple platforms.
-if ($runTestLibJSCTools && $^O ne "darwin") {
-    print "Not running testLibJSCTools: it is only available on Apple platforms.\n";
+# libJavaScriptCoreTools is built wherever mya is: the Apple ports, and the CMake
+# ports when they target Linux. Both halves are needed -- a PlayStation or a
+# Windows cross build is $^O eq "linux" too, and JSCOnly also builds for Windows.
+if ($runTestLibJSCTools && !isAppleCocoaWebKit()
+    && !((isGtk() || isWPE() || isJSCOnly()) && isLinux())) {
+    print "Not running testLibJSCTools: it is not built on this platform.\n";
     $runTestLibJSCTools = DONT_RUN;
 }
 

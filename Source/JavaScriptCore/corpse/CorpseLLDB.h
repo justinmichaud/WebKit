@@ -28,7 +28,7 @@
 
 #include <JavaScriptCore/CorpsePlatform.h>
 
-#if HAVE(MYA_TYPEINFO)
+#if HAVE(MYA_HEAP)
 
 // The one place that reaches LLDB's SB API. Xcode's LLDB.framework spells its
 // headers <LLDB/LLDB.h> and an LLVM install spells them <lldb/API/LLDB.h>;
@@ -39,4 +39,4 @@
 #include <lldb/API/LLDB.h>
 #endif
 
-#endif // HAVE(MYA_TYPEINFO)
+#endif // HAVE(MYA_HEAP)

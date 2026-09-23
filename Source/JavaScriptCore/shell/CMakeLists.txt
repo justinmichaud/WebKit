@@ -133,9 +133,9 @@ if (DEVELOPER_MODE)
         set(testLibJSCTools_FRAMEWORKS ${jsc_FRAMEWORKS})
         set(testLibJSCTools_LIBRARIES JavaScriptCoreTools)
 
-        # The typeinfo suite includes LLDB's headers itself. The tools library
-        # keeps its own include directories private, so they come from here.
-        if (ENABLE_MYA_TYPEINFO)
+        # The typeinfo suite is what calls the SB API, so it is what links it.
+        # The tools library keeps its include directories private.
+        if (ENABLE_MYA_HEAP)
             list(APPEND testLibJSCTools_SYSTEM_INCLUDE_DIRECTORIES ${LLDB_INCLUDE_DIRS})
             list(APPEND testLibJSCTools_LIBRARIES ${LLDB_LIBRARIES})
         endif ()
@@ -194,9 +194,6 @@ endif ()
 
 if (ENABLE_MYA)
     WEBKIT_EXECUTABLE(mya)
-    if (ENABLE_MYA_TYPEINFO)
-        WEBKIT_ADD_TARGET_CXX_FLAGS(mya -frtti)
-    endif ()
 
     if (SHOULD_INSTALL_JS_SHELL)
         install(TARGETS mya DESTINATION "${LIBEXEC_INSTALL_DIR}")
@@ -214,9 +211,6 @@ if (DEVELOPER_MODE)
 
     if (ENABLE_MYA)
         WEBKIT_EXECUTABLE(testLibJSCTools)
-        if (ENABLE_MYA_TYPEINFO)
-            WEBKIT_ADD_TARGET_CXX_FLAGS(testLibJSCTools -frtti)
-        endif ()
     endif ()
 
     WEBKIT_ADD_PREFIX_HEADER(testapi ../JavaScriptCorePrefix.h PREFIX_NO_CODEGEN PREFIX_LANGUAGES CXX)

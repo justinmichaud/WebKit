@@ -156,13 +156,22 @@ WK_PROCESSED_XCENT_FILE=$(TEMP_FILE_DIR)/$(FULL_PRODUCT_NAME).entitlements
 WK_USE_RESTRICTED_ENTITLEMENTS = $(USE_INTERNAL_SDK);
 WK_USE_FATAL_EXCEPTIONS = $(OVERRIDE_WK_USE_FATAL_EXCEPTIONS:default=YES);
 
-// Whether mya is built able to say what an address in a target holds. That
-// takes LLDB's SB API to read the target's debug info and RTTI to identify an
-// object by its own type_info, and it is one switch: a debug build gets both, a
-// shipping build neither. Everything below derives from it, and so does
-// HAVE(MYA_TYPEINFO), which every target compiling that guard has to agree on.
-WK_MYA_TYPEINFO = NO;
-WK_MYA_TYPEINFO[config=Debug] = YES;
+// Whether mya is built able to say what a native object on the heap it reads is.
+// That takes LLDB's SB API to read the target's debug info and RTTI to identify
+// an object by its own type_info, and it is one switch: a development build gets
+// both, a shipping build neither. Everything below derives from it.
+WK_MYA_HEAP = NO;
+WK_MYA_HEAP[config=Debug] = YES;
+
+// The CMake build exposes ENABLE_MYA and ENABLE_MYA_HEAP through cmakeconfig.h.
+// There is no such file here, so the targets that compile the corpse code state
+// them, and every one of them has to say the same thing: HAVE(MYA_HEAP) guards
+// class definitions the tools library and the tools that link it share.
+WK_MYA_HEAP_ENABLED = $(WK_MYA_HEAP_ENABLED_$(WK_MYA_HEAP));
+WK_MYA_HEAP_ENABLED_YES = 1;
+WK_MYA_HEAP_ENABLED_NO = 0;
+
+WK_MYA_PREPROCESSOR_DEFINITIONS = ENABLE_MYA=1 ENABLE_MYA_HEAP=$(WK_MYA_HEAP_ENABLED);
 
 // The library is always Xcode's own LLDB.framework. Its headers are there under
 // the internal SDK only, so a public Xcode takes them from an LLVM install:
@@ -171,16 +180,16 @@ WK_MYA_TYPEINFO[config=Debug] = YES;
 WK_LLDB_BREW_PREFIX = /opt/homebrew/opt/lldb;
 WK_LLDB_BREW_PREFIX[arch=x86_64] = /usr/local/opt/lldb;
 
-WK_LLDB_SYSTEM_HEADER_SEARCH_PATHS = $(WK_LLDB_SYSTEM_HEADER_SEARCH_PATHS_$(WK_MYA_TYPEINFO));
+WK_LLDB_SYSTEM_HEADER_SEARCH_PATHS = $(WK_LLDB_SYSTEM_HEADER_SEARCH_PATHS_$(WK_MYA_HEAP));
 WK_LLDB_SYSTEM_HEADER_SEARCH_PATHS_YES = $(WK_LLDB_BREW_PREFIX)/include;
 
 WK_LLDB_SYSTEM_FRAMEWORK_SEARCH_PATHS = ;
-WK_LLDB_SYSTEM_FRAMEWORK_SEARCH_PATHS[sdk=macosx*] = $(WK_LLDB_SYSTEM_FRAMEWORK_SEARCH_PATHS_$(WK_MYA_TYPEINFO));
+WK_LLDB_SYSTEM_FRAMEWORK_SEARCH_PATHS[sdk=macosx*] = $(WK_LLDB_SYSTEM_FRAMEWORK_SEARCH_PATHS_$(WK_MYA_HEAP));
 WK_LLDB_SYSTEM_FRAMEWORK_SEARCH_PATHS_YES = $(DEVELOPER_DIR)/../SharedFrameworks;
 
 WK_LLDB_LDFLAGS = ;
-WK_LLDB_LDFLAGS[sdk=macosx*] = $(WK_LLDB_LDFLAGS_$(WK_MYA_TYPEINFO));
-WK_LLDB_LDFLAGS_YES = -F$(DEVELOPER_DIR)/../SharedFrameworks -framework LLDB;
+WK_LLDB_LDFLAGS[sdk=macosx*] = $(WK_LLDB_LDFLAGS_$(WK_MYA_HEAP));
+WK_LLDB_LDFLAGS_YES = -F$(WK_LLDB_SYSTEM_FRAMEWORK_SEARCH_PATHS_YES) -framework LLDB;
 
 // Shared variables used for dynamic or static linking of JavaScriptCore and jsc.
 

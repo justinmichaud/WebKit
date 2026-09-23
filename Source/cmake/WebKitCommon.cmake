@@ -350,6 +350,22 @@ if (NOT HAS_RUN_WEBKIT_COMMON)
     include(OptionsCommon)
     include(Options${PORT})
 
+    # This has to come after Options${PORT} to see ENABLE_MYA_HEAP: identifying a
+    # native object by its own type_info takes RTTI in every target that owns one,
+    # since mya reads those objects out of a process it does not run in.
+    #
+    # RTTI also puts every polymorphic class's type_info on the library's ABI. A
+    # class derived outside the library its base lives in references that base's
+    # type_info, which the ports' curated export list does not carry, so a
+    # heap-naming build stops hiding symbols as well.
+    if (ENABLE_MYA_HEAP)
+        set(CMAKE_C_VISIBILITY_PRESET default)
+        set(CMAKE_CXX_VISIBILITY_PRESET default)
+        set(CMAKE_VISIBILITY_INLINES_HIDDEN OFF)
+    elseif (NOT COMPILER_IS_CLANG_CL)
+        WEBKIT_APPEND_GLOBAL_CXX_FLAGS(-fno-rtti)
+    endif ()
+
     # This has to come after Options${PORT} to see any ENABLE_THREAD_SAFETY_WARNING.
     if (ENABLE_THREAD_SAFETY_WARNING)
         WEBKIT_PREPEND_GLOBAL_CXX_FLAGS(-Wthread-safety)

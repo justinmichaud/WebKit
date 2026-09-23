@@ -43,6 +43,8 @@
 
 namespace JSCToolsTest {
 
+#if OS(DARWIN)
+
 using JSC::Corpse::Process;
 
 // A pid that is certainly not in use: a child that has been reaped. Returns 0 if no
@@ -209,6 +211,22 @@ void testProcess()
     }
 #endif // CPU(ARM64)
 }
+
+#else // A platform whose implementation is still to be written.
+
+void testProcess()
+{
+    SuiteTracer tracer("Process");
+    if (!tracer.shouldRun())
+        return;
+
+    // The stub this suite would run against attaches to nothing, so there is
+    // nothing here that can pass until the implementation lands.
+    TEST_ASSERT(false, "reading a process is not implemented on this platform yet: "
+        "https://bugs.webkit.org/show_bug.cgi?id=324772");
+}
+
+#endif // OS(DARWIN)
 
 } // namespace JSCToolsTest
 

@@ -1404,7 +1404,7 @@ int main(int argc, char** argv)
 #else
     UNUSED_PARAM(argc);
     UNUSED_PARAM(argv);
-    printf("mya cannot read a process on this platform yet.\n");
+    SAFE_PRINTF("mya cannot read a process on this platform yet.\n");
     return 1;
 #endif // HAVE(MYA)
 }

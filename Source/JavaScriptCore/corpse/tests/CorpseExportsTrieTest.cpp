@@ -34,13 +34,18 @@
 #include <JavaScriptCore/CorpseExportsTrie.h>
 #include <array>
 #include <limits>
-#include <mach-o/loader.h>
 #include <pthread.h>
 #include <string>
 #include <unistd.h>
 #include <wtf/Atomics.h>
 
+#if OS(DARWIN)
+#include <mach-o/loader.h>
+#endif
+
 namespace JSCToolsTest {
+
+#if OS(DARWIN)
 
 using JSC::Corpse::ExportsTrie;
 
@@ -808,6 +813,28 @@ void fuzzExportsTrie(uint64_t seed, unsigned iterations)
     if (watching)
         pthread_join(watchdog, nullptr);
 }
+
+#else // the exports trie is a Mach-O construct
+
+void testExportsTrie()
+{
+    SuiteTracer tracer("ExportsTrie");
+    if (!tracer.shouldRun())
+        return;
+
+    skipSuite("ExportsTrie", "the exports trie is a Mach-O construct");
+}
+
+void fuzzExportsTrie(uint64_t, unsigned)
+{
+    SuiteTracer tracer("ExportsTrieFuzz");
+    if (!tracer.shouldRun())
+        return;
+
+    skipSuite("ExportsTrieFuzz", "the exports trie is a Mach-O construct");
+}
+
+#endif // OS(DARWIN)
 
 } // namespace JSCToolsTest
 

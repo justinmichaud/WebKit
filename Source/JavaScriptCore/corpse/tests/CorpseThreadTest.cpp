@@ -39,6 +39,8 @@
 
 namespace JSCToolsTest {
 
+#if OS(DARWIN)
+
 using JSC::Corpse::Thread;
 
 void testThreads()
@@ -113,6 +115,22 @@ void testThreads()
 
     parked.stopAndJoin();
 }
+
+#else // A platform whose implementation is still to be written.
+
+void testThreads()
+{
+    SuiteTracer tracer("Threads");
+    if (!tracer.shouldRun())
+        return;
+
+    // The stub this suite runs against attaches to nothing, so nothing here can
+    // pass until the implementation lands.
+    TEST_ASSERT(false, "reading a process is not implemented on this platform yet: "
+        "https://bugs.webkit.org/show_bug.cgi?id=324772");
+}
+
+#endif // OS(DARWIN)
 
 } // namespace JSCToolsTest
 

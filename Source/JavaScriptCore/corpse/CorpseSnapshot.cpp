@@ -31,8 +31,10 @@
 
 #include "CorpseError.h"
 
+#if OS(DARWIN)
 #include <mach/mach.h>
 #include <mach/mach_error.h>
+#endif
 #include <wtf/TZoneMallocInlines.h>
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
@@ -41,6 +43,8 @@ namespace JSC {
 namespace Corpse {
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(Snapshot);
+
+#if OS(DARWIN)
 
 unsigned Snapshot::s_nextId = 1;
 
@@ -90,6 +94,32 @@ Address Snapshot::symbol(const char* name)
 
     return entry.iterator->value->address();
 }
+
+#else // A platform whose implementation is still to be written.
+
+// FIXME: Read a process on Linux by stopping every thread through WTF's
+// signal-based Thread::suspend(), forking, and reading the child.
+// https://bugs.webkit.org/show_bug.cgi?id=324772
+unsigned Snapshot::s_nextId = 1;
+
+Snapshot::Snapshot(RefPtr<Process> process)
+    : m_process(WTF::move(process))
+    , m_id(s_nextId++)
+{
+}
+
+Snapshot::~Snapshot() = default;
+
+const Vector<Thread>& Snapshot::threads()
+{
+    if (!m_threads)
+        m_threads = Thread::collect(*this);
+    return *m_threads;
+}
+
+Address Snapshot::symbol(const char*) { return { }; }
+
+#endif // OS(DARWIN)
 
 } // namespace Corpse
 } // namespace JSC

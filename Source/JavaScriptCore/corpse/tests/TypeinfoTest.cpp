@@ -30,7 +30,7 @@
 
 #include <JavaScriptCore/CorpsePlatform.h>
 
-#if HAVE(MYA_TYPEINFO)
+#if HAVE(MYA_HEAP)
 
 #include <JavaScriptCore/CorpseLLDB.h>
 #include <array>
@@ -45,11 +45,11 @@
 #include <unistd.h>
 #endif
 
-#endif // HAVE(MYA_TYPEINFO)
+#endif // HAVE(MYA_HEAP)
 
 namespace JSCToolsTest {
 
-#if HAVE(MYA_TYPEINFO)
+#if HAVE(MYA_HEAP)
 
 namespace {
 
@@ -144,7 +144,7 @@ void testTypeSystem()
     TEST_ASSERT(debugger.IsValid(), "liblldb creates a debugger");
     if (debugger.IsValid()) {
         lldb::SBError error;
-        lldb::SBTarget target = debugger.CreateTarget(path.data(), nullptr, nullptr, true, error);
+        lldb::SBTarget target = debugger.CreateTarget(path.data(), nullptr, nullptr, false, error);
         TEST_ASSERT(target.IsValid(), "liblldb opens this executable as a target");
 
         // The target is built from files and is never attached to or launched:
@@ -184,7 +184,7 @@ void testTypeinfo()
     testTypeSystem();
 }
 
-#else // Neither LLDB's headers nor RTTI, so there is nothing to ask.
+#else // No SB API, so there is nothing to ask.
 
 void testTypeinfo()
 {
@@ -192,18 +192,17 @@ void testTypeinfo()
     if (!tracer.shouldRun())
         return;
 
-    // Only a debug build gets here with something missing, and on a platform mya
-    // is developed on that is a build set up wrong rather than a build that was
-    // never meant to read types.
-#if ASSERT_ENABLED && (OS(DARWIN) || OS(LINUX))
-    TEST_ASSERT(false, "this build is missing LLDB's SB API headers or RTTI, which mya "
-        "needs to say what an address holds: install lldb (\"brew install lldb\", "
-        "liblldb-dev or lldb-devel) and build with RTTI");
+    // A debug build defaults ENABLE_MYA_HEAP on and only loses it when liblldb is
+    // not installed. Reporting that as a skip would leave a bot unable to tell a
+    // build with no SB API from one whose typeinfo support still works.
+#if ASSERT_ENABLED && ENABLE(MYA)
+    TEST_ASSERT(false, "this build cannot name a native object, so nothing here is "
+        "covered: install lldb (\"brew install lldb\", liblldb-dev or lldb-devel)");
 #else
-    skipSuite("Typeinfo", "reading types takes a debug build, with LLDB and RTTI");
+    skipSuite("Typeinfo", "naming a native object takes a development build, with LLDB and RTTI");
 #endif
 }
 
-#endif // HAVE(MYA_TYPEINFO)
+#endif // HAVE(MYA_HEAP)
 
 } // namespace JSCToolsTest

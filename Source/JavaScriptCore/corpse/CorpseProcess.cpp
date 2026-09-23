@@ -31,6 +31,7 @@
 
 #include "CorpseError.h"
 
+#if OS(DARWIN)
 #include <errno.h>
 #include <mach/mach.h>
 #include <mach/mach_error.h>
@@ -38,11 +39,14 @@
 #include <signal.h>
 #include <sys/proc.h>
 #include <sys/sysctl.h>
+#endif
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
 namespace JSC {
 namespace Corpse {
+
+#if OS(DARWIN)
 
 // A task port name outlives the task it named: when the target exits, the right we
 // hold becomes a dead name while the name itself is unchanged. MACH_PORT_VALID only
@@ -102,6 +106,25 @@ void Process::detach()
         mach_port_deallocate(mach_task_self(), m_taskPort);
     m_taskPort = MACH_PORT_NULL;
 }
+
+#else // A platform whose implementation is still to be written.
+
+// FIXME: Read a process on Linux by stopping every thread through WTF's
+// signal-based Thread::suspend(), forking, and reading the child.
+// https://bugs.webkit.org/show_bug.cgi?id=324772
+bool Process::holdsLiveTask() const { return false; }
+bool Process::isTranslated() const { return false; }
+
+bool Process::attach()
+{
+    Error::report("Could not attach to PID %d: reading a process is not implemented "
+        "on this platform yet", static_cast<int>(m_pid));
+    return false;
+}
+
+void Process::detach() { }
+
+#endif // OS(DARWIN)
 
 } // namespace Corpse
 } // namespace JSC

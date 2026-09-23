@@ -33,8 +33,10 @@
 #if HAVE(MYA)
 #include <JavaScriptCore/CorpseProcess.h>
 #include <JavaScriptCore/CorpseSnapshot.h>
+#if OS(DARWIN)
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#endif
 #include <pthread.h>
 #include <string>
 #include <unistd.h>
@@ -87,7 +89,7 @@ void skipSuite(const char* name, const char* why)
     dataLogLn("SKIP: ", name, ": ", why);
 }
 
-#if HAVE(MYA)
+#if OS(DARWIN)
 
 unsigned machPortNameCount()
 {
@@ -231,6 +233,6 @@ void ParkedThreads::stopAndJoin()
     pthread_mutex_unlock(&parkMutex);
 }
 
-#endif // HAVE(MYA)
+#endif // OS(DARWIN)
 
 } // namespace JSCToolsTest

@@ -176,6 +176,35 @@ macro(WEBKIT_OPTION_BEGIN)
         set(ENABLE_BACK_FORWARD_LIST_SWIFT_DEFAULT ${_swift_features_default})
     endif ()
 
+    # mya reads a process it does not run in. Naming the native objects on that
+    # process's heap takes LLDB, to read the target's debug info, and RTTI in the
+    # target itself, so that an object carries the type_info that identifies it.
+    # Both are a development build's; neither belongs in a shipping one.
+    if (NOT DEFINED ENABLE_MYA_DEFAULT)
+        if (APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            set(ENABLE_MYA_DEFAULT ON)
+        else ()
+            set(ENABLE_MYA_DEFAULT OFF)
+        endif ()
+    endif ()
+
+    # A machine without liblldb still builds; the typeinfo suite is what reports
+    # that this build cannot name anything, so a bot cannot read the silence as
+    # coverage.
+    if (NOT DEFINED ENABLE_MYA_HEAP_DEFAULT)
+        set(ENABLE_MYA_HEAP_DEFAULT OFF)
+        if (ENABLE_MYA_DEFAULT AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+            find_package(LLDB)
+            if (LLDB_FOUND)
+                set(ENABLE_MYA_HEAP_DEFAULT ON)
+            else ()
+                message(STATUS "liblldb was not found, so mya cannot name a native object. "
+                    "Install liblldb-dev (Debian, Ubuntu), lldb-devel (Fedora) or lldb "
+                    "(Homebrew), or set LLDB_ROOT to an LLVM install.")
+            endif ()
+        endif ()
+    endif ()
+
     WEBKIT_OPTION_DEFINE(ENABLE_ACCESSIBILITY_ISOLATED_TREE "Toggle accessibility isolated tree support" PRIVATE OFF)
     WEBKIT_OPTION_DEFINE(ENABLE_API_TESTS "Enable public API unit tests" PRIVATE OFF)
     WEBKIT_OPTION_DEFINE(ENABLE_APPLE_PAY "Toggle Apple Pay support" PRIVATE OFF)
@@ -256,6 +285,8 @@ macro(WEBKIT_OPTION_BEGIN)
     WEBKIT_OPTION_DEFINE(ENABLE_MINIBROWSER "Toggle MiniBrowser compilation." PRIVATE OFF)
     WEBKIT_OPTION_DEFINE(ENABLE_MODEL_ELEMENT "Toggle Model Element support" PRIVATE OFF)
     WEBKIT_OPTION_DEFINE(ENABLE_MOUSE_CURSOR_SCALE "Toggle Scaled mouse cursor support" PRIVATE OFF)
+    WEBKIT_OPTION_DEFINE(ENABLE_MYA "Toggle the mya process analysis tool" PRIVATE ${ENABLE_MYA_DEFAULT})
+    WEBKIT_OPTION_DEFINE(ENABLE_MYA_HEAP "Toggle naming the native objects on a heap mya reads, which takes LLDB and RTTI" PRIVATE ${ENABLE_MYA_HEAP_DEFAULT})
     WEBKIT_OPTION_DEFINE(ENABLE_NAVIGATOR_STANDALONE "Toogle standalone navigator support" PRIVATE OFF)
     WEBKIT_OPTION_DEFINE(ENABLE_NOTIFICATIONS "Toggle Notifications support" PRIVATE ON)
     WEBKIT_OPTION_DEFINE(ENABLE_OFFSCREEN_CANVAS "Toggle OffscreenCanvas support" PRIVATE OFF)

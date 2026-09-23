@@ -33,11 +33,13 @@
 #include "CorpseExportsTrie.h"
 #include "CorpseSnapshot.h"
 
+#if OS(DARWIN)
 #include <mach-o/dyld_images.h>
 #include <mach-o/loader.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <mach/task_info.h>
+#endif
 #include <optional>
 #include <span>
 #include <string.h>
@@ -58,6 +60,8 @@ namespace JSC {
 namespace Corpse {
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(Symbol);
+
+#if OS(DARWIN)
 
 // It is assumed that this corpse analysis library is built with the same SDK targeting
 // the same OS that the corpse binary is built for. While the corpse gives us the data
@@ -473,6 +477,16 @@ Symbol::Symbol(const Snapshot& snapshot, const char* name)
     if (!m_name.empty())
         m_address = lookUpName(snapshot);
 }
+
+#else // A platform whose implementation is still to be written.
+
+// FIXME: Resolve a symbol in a Linux target's images, alongside the process
+// reading in https://bugs.webkit.org/show_bug.cgi?id=324772
+bool Symbol::hasReadBudget(size_t) { return false; }
+Address Symbol::resolveInImage(TaskHandle, Address, std::string_view) { return { }; }
+Address Symbol::lookUpName(const Snapshot&) { return { }; }
+
+#endif // OS(DARWIN)
 
 } // namespace Corpse
 } // namespace JSC

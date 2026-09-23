@@ -34,18 +34,22 @@
 #include "CorpseRegion.h"
 #include "CorpseSnapshot.h"
 
+#if OS(DARWIN)
 #include <mach/mach.h>
 #include <mach/mach_error.h>
 #include <mach/mach_vm.h>
 #include <mach/thread_act.h>
 #include <mach/thread_info.h>
 #include <mach/thread_status.h>
+#endif
 #include <optional>
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
 namespace JSC {
 namespace Corpse {
+
+#if OS(DARWIN)
 
 static std::optional<Address> readStackPointer(thread_act_t thread)
 {
@@ -182,6 +186,17 @@ Vector<Thread> Thread::collect(const Snapshot& snapshot)
 
     return result;
 }
+#else // A platform whose implementation is still to be written.
+
+// FIXME: Read a process on Linux by stopping every thread through WTF's
+// signal-based Thread::suspend(), forking, and reading the child.
+// https://bugs.webkit.org/show_bug.cgi?id=324772
+const char* Thread::runStateDescription() const { return "unknown"; }
+
+Vector<Thread> Thread::collect(const Snapshot&) { return { }; }
+
+#endif // OS(DARWIN)
+
 } // namespace Corpse
 } // namespace JSC
 

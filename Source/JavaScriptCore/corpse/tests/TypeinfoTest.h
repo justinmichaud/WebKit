@@ -28,7 +28,7 @@
 
 namespace JSCToolsTest {
 
-// Checks what HAVE(MYA_TYPEINFO) claims: that this binary carries the type_info
+// Checks what HAVE(MYA_HEAP) claims: that this binary carries the type_info
 // a polymorphic object is identified by, and that LLDB's SB API is linked and
 // reads WTF::StringImpl's layout back out of the debug info. Neither takes a
 // snapshot, so this runs on every platform mya is built for.

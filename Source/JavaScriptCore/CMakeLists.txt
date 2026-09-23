@@ -1627,25 +1627,12 @@ if (USE_INSPECTOR_SOCKET_SERVER)
     )
 endif ()
 
-# mya is built wherever there is a process for it to read and on Linux besides,
-# where it is the main that says it cannot yet -- so that the build is exercised.
-#
-# Saying what an address holds takes LLDB and the RTTI that goes with it, which
-# is one switch and a debug build's: neither belongs in a shipping binary. Not
-# finding LLDB costs a debug build the typeinfo suite, which says so, and costs
-# the build itself nothing.
-if (APPLE OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
-    set(ENABLE_MYA ON)
-    if (CMAKE_BUILD_TYPE STREQUAL "Debug")
-        find_package(LLDB)
-        if (NOT LLDB_FOUND)
-            message(STATUS "liblldb was not found, so mya will not be able to say what an "
-                "address holds. Install liblldb-dev (Debian, Ubuntu), lldb-devel (Fedora) "
-                "or lldb (Homebrew), or set LLDB_ROOT to an LLVM install.")
-        endif ()
-    endif ()
+# ENABLE_MYA and ENABLE_MYA_HEAP, and the defaults that decide them, are in
+# WebKitFeatures.cmake. An explicit -DENABLE_MYA_HEAP=ON is a request that cannot
+# be met without the SB API, so it fails here rather than later.
+if (ENABLE_MYA_HEAP)
+    find_package(LLDB REQUIRED)
 endif ()
-set(ENABLE_MYA_TYPEINFO ${LLDB_FOUND})
 
 if (ENABLE_MYA)
     list(APPEND JavaScriptCore_PRIVATE_INCLUDE_DIRECTORIES
