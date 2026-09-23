@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2026 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -25,9 +26,7 @@
 
 #pragma once
 
-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
-
-#include <mach/mach.h>
+#include <JavaScriptCore/CorpsePlatform.h>
 #include <memory>
 #include <span>
 #include <stdint.h>
@@ -39,12 +38,18 @@
 #include <wtf/Seconds.h>
 #include <wtf/Vector.h>
 
+#if OS(DARWIN)
+#include <mach/mach.h>
+#endif
+
+#if ENABLE(MYA)
 namespace JSC {
 namespace Corpse {
 class Process;
 class Snapshot;
 }
 }
+#endif
 
 namespace JSCToolsTest {
 
@@ -119,6 +124,8 @@ Seconds totalSuiteTime();
         } \
     } while (0)
 
+#if OS(DARWIN)
+
 // The number of names in this task's Mach port name space. Used to show that a
 // sequence of operations leaves no port behind.
 unsigned machPortNameCount();
@@ -128,6 +135,10 @@ unsigned machPortNameCount();
 // under that same name rather than a new name, so a right that is taken and never
 // given back shows up here and not in machPortNameCount().
 unsigned machPortSendRightCount(mach_port_t);
+
+#endif // OS(DARWIN)
+
+#if ENABLE(MYA)
 
 // Attaches to this process and takes a corpse of it. That is what lets a test
 // check what a corpse reports against what this process already knows about
@@ -160,7 +171,11 @@ public:
 
     // pthread keeps a thread name in a fixed buffer, so a longer name arrives cut
     // to this length.
+#if OS(DARWIN)
     static constexpr size_t maximumNameLength = 63;
+#else
+    static constexpr size_t maximumNameLength = 15;
+#endif
 
     ~ParkedThreads();
 
@@ -179,6 +194,6 @@ private:
     Vector<Thread*> m_threads;
 };
 
-} // namespace JSCToolsTest
+#endif // ENABLE(MYA)
 
-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
+} // namespace JSCToolsTest

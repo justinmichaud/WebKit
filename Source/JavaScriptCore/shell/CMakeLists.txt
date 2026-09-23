@@ -22,9 +22,7 @@ if (ENABLE_FUZZILLI)
   list(APPEND jsc_SOURCES ../fuzzilli/Fuzzilli.cpp)
 endif ()
 
-# mya analyzes process corpses through Mach task APIs, so it only builds on
-# Apple platforms. Its sources do not compile elsewhere.
-if (APPLE)
+if (ENABLE_MYA)
     set(mya_SOURCES ../mya/mya.cpp)
     set(mya_FRAMEWORKS
         JavaScriptCore
@@ -37,12 +35,15 @@ if (APPLE)
     )
 
     # The corpse support mya uses lives in the tools static library.
-    set(mya_LIBRARIES JavaScriptCoreTools edit)
+    set(mya_LIBRARIES JavaScriptCoreTools)
+    if (APPLE)
+        list(APPEND mya_LIBRARIES edit)
+    endif ()
 endif ()
 
 WEBKIT_EXECUTABLE_DECLARE(jsc)
 
-if (APPLE)
+if (ENABLE_MYA)
     WEBKIT_EXECUTABLE_DECLARE(mya)
 endif ()
 
@@ -104,8 +105,7 @@ if (DEVELOPER_MODE)
     set(testdfg_PRIVATE_INCLUDE_DIRECTORIES ${jsc_PRIVATE_INCLUDE_DIRECTORIES})
     set(testdfg_FRAMEWORKS ${jsc_FRAMEWORKS})
 
-    # The tools library and its tests are only relevant for Apple platforms.
-    if (APPLE)
+    if (ENABLE_MYA)
         set(testLibJSCTools_SOURCES
             ../corpse/tests/CorpseAddressTest.cpp
             ../corpse/tests/CorpseByteParserTest.cpp
@@ -116,6 +116,7 @@ if (DEVELOPER_MODE)
             ../corpse/tests/CorpseSymbolTest.cpp
             ../corpse/tests/CorpseThreadTest.cpp
             ../corpse/tests/LibJSCToolsTestUtilities.cpp
+            ../corpse/tests/TypeinfoTest.cpp
             ../corpse/tests/testLibJSCTools.cpp
         )
         set(testLibJSCTools_DEFINITIONS ${jsc_PRIVATE_DEFINITIONS})
@@ -125,6 +126,25 @@ if (DEVELOPER_MODE)
         )
         set(testLibJSCTools_FRAMEWORKS ${jsc_FRAMEWORKS})
         set(testLibJSCTools_LIBRARIES JavaScriptCoreTools)
+
+        if (ENABLE_MYA_HEAP)
+            list(APPEND testLibJSCTools_LIBRARIES LLDB::LLDB)
+        endif ()
+
+        if (APPLE)
+            set(testLibJSCTools_CODE_SIGN_ENTITLEMENTS ${CMAKE_CURRENT_BINARY_DIR}/testLibJSCTools.entitlements)
+            add_custom_command(
+                OUTPUT ${testLibJSCTools_CODE_SIGN_ENTITLEMENTS}
+                COMMAND env
+                    PRODUCT_NAME=testLibJSCTools
+                    RC_XBS=
+                    WK_PLATFORM_NAME=macosx
+                    WK_PROCESSED_XCENT_FILE=${testLibJSCTools_CODE_SIGN_ENTITLEMENTS}
+                    ${JAVASCRIPTCORE_DIR}/Scripts/process-entitlements.sh
+                DEPENDS ${JAVASCRIPTCORE_DIR}/Scripts/process-entitlements.sh
+                VERBATIM)
+            list(APPEND testLibJSCTools_SOURCES ${testLibJSCTools_CODE_SIGN_ENTITLEMENTS})
+        endif ()
     endif ()
 
     set(testwasmdebugger_SOURCES
@@ -159,7 +179,7 @@ if (DEVELOPER_MODE)
     WEBKIT_EXECUTABLE_DECLARE(testdfg)
     WEBKIT_EXECUTABLE_DECLARE(testwasmdebugger)
 
-    if (APPLE)
+    if (ENABLE_MYA)
         WEBKIT_EXECUTABLE_DECLARE(testLibJSCTools)
     endif ()
 
@@ -178,7 +198,7 @@ if (SHOULD_INSTALL_JS_SHELL)
     install(TARGETS jsc DESTINATION "${LIBEXEC_INSTALL_DIR}")
 endif ()
 
-if (APPLE)
+if (ENABLE_MYA)
     WEBKIT_EXECUTABLE(mya)
 
     if (SHOULD_INSTALL_JS_SHELL)
@@ -195,7 +215,7 @@ if (DEVELOPER_MODE)
     WEBKIT_EXECUTABLE(testdfg)
     WEBKIT_EXECUTABLE(testwasmdebugger)
 
-    if (APPLE)
+    if (ENABLE_MYA)
         WEBKIT_EXECUTABLE(testLibJSCTools)
     endif ()
 

@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2026 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -25,14 +26,12 @@
 
 #pragma once
 
-#include <JavaScriptCore/CorpsePlatform.h>
-
-#if ENABLE(MYA)
-
 namespace JSCToolsTest {
 
-void testProcess();
+// Tests that liblldb and rtti are available without pulling in any other parts of mya.
+void testTypeinfo();
+
+// Runs as the target that testTypeinfo() analyzes from another process: writes the address of the object to stdout, then holds the object until it is killed.
+int runTypeinfoTarget();
 
 } // namespace JSCToolsTest
-
-#endif // ENABLE(MYA)
