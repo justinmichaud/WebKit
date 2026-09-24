@@ -35,26 +35,17 @@
 #include <JavaScriptCore/CorpseProcess.h>
 #include <JavaScriptCore/CorpseSnapshot.h>
 #include <JavaScriptCore/SourceProvider.h>
-#include <array>
 #include <cxxabi.h>
-#include <errno.h>
 #include <lldb/API/LLDB.h>
 #include <optional>
-#include <signal.h>
-#include <spawn.h>
 #include <stdlib.h>
 #include <string_view>
-#include <sys/wait.h>
 #include <typeinfo>
-#include <unistd.h>
-#include <wtf/SafeStrerror.h>
 #include <wtf/Scope.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/Vector.h>
 #include <wtf/text/CString.h>
 #include <wtf/text/StringCommon.h>
-
-extern char** environ;
 
 #endif // ENABLE(MYA_HEAP)
 
@@ -238,80 +229,6 @@ void analyze(Snapshot& snapshot, Address object)
         "the corpse holds the target's m_startPosition at the offset the debug info gives");
 }
 
-void attachAndAnalyze(pid_t pid, Address object)
-{
-    RefPtr<Process> process = Process::create(pid);
-    bool attached = process->attach();
-    TEST_ASSERT(attached, "attaching to the target process succeeds");
-    if (!attached)
-        return;
-    Snapshot snapshot(process);
-    TEST_ASSERT(snapshot.isValid(), "a snapshot of the target process is valid");
-    if (!snapshot.isValid())
-        return;
-
-    analyze(snapshot, object);
-}
-
-void testInThisProcess()
-{
-    Ref<JSC::SourceProvider> object = createTargetObject();
-    attachAndAnalyze(getpid(), Address { object.ptr() });
-}
-
-// The analysis and the target are separate processes: this process launches a
-// copy of itself as the target and takes a corpse of it.
-void testInSeparateProcess()
-{
-    // The target writes the address of its object to its stdout.
-    std::array<int, 2> addressPipe { -1, -1 };
-    TEST_ASSERT(!pipe(addressPipe.data()), "a pipe from the target opens");
-    auto closePipe = makeScopeExit([&] {
-        for (int fd : addressPipe) {
-            if (fd >= 0)
-                close(fd);
-        }
-    });
-    if (addressPipe[0] < 0)
-        return;
-
-    CString executablePath = Process::create(getpid())->executablePath();
-    TEST_ASSERT(!executablePath.isNull(), "this process's executable path is readable");
-    if (executablePath.isNull())
-        return;
-
-    char* const arguments[] = {
-        const_cast<char*>(executablePath.data()),
-        const_cast<char*>("--typeinfo-target"),
-        nullptr
-    };
-    posix_spawn_file_actions_t actions;
-    posix_spawn_file_actions_init(&actions);
-    posix_spawn_file_actions_adddup2(&actions, addressPipe[1], STDOUT_FILENO);
-    posix_spawn_file_actions_addclose(&actions, addressPipe[0]);
-    posix_spawn_file_actions_addclose(&actions, addressPipe[1]);
-    pid_t child = 0;
-    int error = posix_spawn(&child, executablePath.data(), &actions, nullptr, arguments, environ);
-    posix_spawn_file_actions_destroy(&actions);
-    TEST_ASSERT(!error, "the target process launches");
-    if (error) {
-        dataLogLn("    posix_spawn: ", safeStrerror(error));
-        return;
-    }
-    auto killChild = makeScopeExit([&] {
-        kill(child, SIGKILL);
-        while (waitpid(child, nullptr, 0) < 0 && errno == EINTR) { }
-    });
-
-    uint64_t object = 0;
-    bool reported = read(addressPipe[0], &object, sizeof(object)) == sizeof(object);
-    TEST_ASSERT(reported, "the target reports the address of its object");
-    if (!reported)
-        return;
-
-    attachAndAnalyze(child, Address { object });
-}
-
 } // anonymous namespace
 
 void testTypeinfo()
@@ -320,40 +237,14 @@ void testTypeinfo()
     if (!tracer.shouldRun())
         return;
 
-    testInThisProcess();
-    testInSeparateProcess();
+    Ref<JSC::SourceProvider> object = createTargetObject();
+    analyzeInAndOutOfProcess(Address { object.ptr() }, "--typeinfo-target", analyze);
 }
 
-int runTypeinfoTarget()
+void runTypeinfoTarget()
 {
     Ref<JSC::SourceProvider> object = createTargetObject();
-    auto address = reinterpret_cast<uint64_t>(object.ptr());
-    if (write(STDOUT_FILENO, &address, sizeof(address)) != sizeof(address))
-        return 1;
-
-    // The analysis kills this process when it is done with the object.
-    while (true)
-        pause();
-}
-
-#else // No SB API, so there is nothing to ask.
-
-void testTypeinfo()
-{
-    SuiteTracer tracer("Typeinfo");
-    if (!tracer.shouldRun())
-        return;
-
-#if ASSERT_ENABLED
-    TEST_ASSERT(false, "we expected to test mya_heap in this configuration");
-#else
-    skipSuite("Typeinfo", "mya_heap is not enabled");
-#endif
-}
-
-int runTypeinfoTarget()
-{
-    return 1;
+    parkAsCorpseTarget(Address { object.ptr() });
 }
 
 #endif // ENABLE(MYA_HEAP)

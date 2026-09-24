@@ -29,8 +29,9 @@
 #if ENABLE(MYA_HEAP)
 
 #include "CorpseError.h"
+#include "CorpseLimits.h"
 #include "CorpseSnapshot.h"
-#include "CorpseTargetDebugInfo.h"
+#include "CorpseSnapshotDebugInfo.h"
 #include <cxxabi.h>
 #include <stdlib.h>
 #include <string_view>
@@ -41,308 +42,232 @@
 namespace JSC {
 namespace Corpse {
 
-// CLAUDE: all bounds should live together
-// CLAUDE: all parts of this should be hooked up to the diagnostics pattern
-static constexpr size_t maxTypeNameLength = 4 * KB;
+// The two words before a vtable's address point (Itanium C++ ABI 2.5.2).
+struct VTablePrefix {
+    int64_t offsetToTop;
+    uint64_t typeInfo;
+};
 
-// CLAUDE: Remove all things related to searching for names. We should only be able to search by rtti to avoid confusion and complexity, and we should always walk the full type hierarchy of a given class, never searching.
-static bool nameIs(const TargetType& type, const char* name)
+// How a std::type_info starts (Itanium C++ ABI 2.9.3).
+struct TypeInfoPrefix {
+    uint64_t vtable;
+    uint64_t name;
+};
+
+static unsigned long long forReport(Address address)
 {
-    return std::string_view { type.name().span() } == std::string_view { name };
+    return address.toTargetVMAddress();
 }
 
-// A direct or indirect non-virtual base of `type`, at its offset from `type`.
-static std::optional<TargetType::Base> findBase(const TargetType& type, const char* name)
-{
-    Vector<TargetType::Base> bases = type.bases();
-    for (const TargetType::Base& base : bases) {
-        if (nameIs(base.type.get(), name))
-            return base;
-        if (auto nested = findBase(base.type.get(), name)) {
-            nested->offset += base.offset;
-            return nested;
-        }
-    }
-    return std::nullopt;
-}
-
-// Whether bytes `offset` to `offset + size` are inside a value of `type`; reports when not.
-static bool containsBytes(const TargetType& type, size_t offset, size_t size)
-{
-    size_t total = type.byteSize();
-    if (offset <= total && size <= total - offset)
-        return true;
-    CORPSE_REPORT("Bytes %zu to %zu are outside the %zu-byte '%s'", offset, offset + size, total, type.name());
-    return false;
-}
-
-template<Materialization materialization>
-TargetValue<materialization>::TargetValue(const Snapshot& snapshot, Address address, Ref<TargetType>&& type, Storage&& storage)
+TargetValue::TargetValue(const Snapshot& snapshot, Address address, Ref<TargetType>&& type, bool isValid)
     : m_snapshot(&snapshot)
     , m_address(address)
     , m_type(WTF::move(type))
-    , m_storage(WTF::move(storage))
+    , m_isValid(isValid)
 {
 }
 
-template<Materialization materialization>
-std::optional<TargetValue<materialization>> TargetValue<materialization>::at(const Snapshot& snapshot, Address address, Ref<TargetType>&& type)
+TargetValue TargetValue::at(const Snapshot& snapshot, Address address, Ref<TargetType>&& type)
 {
     if (!address)
-        return std::nullopt;
-    size_t size = type->byteSize();
-    if (!size) {
+        return TargetValue(snapshot, address, WTF::move(type), false);
+    if (!type->byteSize()) {
         CORPSE_REPORT("Type '%s' has no size, so nothing can be read as it", type->name());
-        return std::nullopt;
+        return TargetValue(snapshot, address, WTF::move(type), false);
     }
-    if constexpr (materialization == Materialization::Eager) {
-        Vector<uint8_t> bytes(size);
-        if (snapshot.read(address, bytes.mutableSpan()).empty())
-            return std::nullopt;
-        return TargetValue(snapshot, address, WTF::move(type), EagerStorage { WTF::move(bytes) });
-    } else
-        return TargetValue(snapshot, address, WTF::move(type), LazyStorage { });
+    return TargetValue(snapshot, address, WTF::move(type), true);
 }
 
-template<Materialization materialization>
-std::optional<Vector<uint8_t>> TargetValue<materialization>::readBytes(size_t offset, size_t size) const
+TargetValue TargetValue::member(size_t offset, Ref<TargetType>&& type) const
 {
-    if (!containsBytes(m_type.get(), offset, size))
-        return std::nullopt;
-    if constexpr (materialization == Materialization::Eager)
-        return Vector<uint8_t>(m_storage.bytes.subspan(offset, size));
-    else {
-        Vector<uint8_t> bytes(size);
-        if (m_snapshot->read(m_address + offset, bytes.mutableSpan()).empty())
-            return std::nullopt;
-        return bytes;
-    }
-}
-
-template<Materialization materialization>
-std::optional<TargetValue<materialization>> TargetValue<materialization>::member(size_t offset, Ref<TargetType>&& type) const
-{
+    if (!m_isValid)
+        return TargetValue(*m_snapshot, m_address, WTF::move(type), false);
+    size_t total = m_type->byteSize();
     size_t size = type->byteSize();
-    if (!size) {
-        CORPSE_REPORT("Type '%s' has no size, so nothing can be read as it", type->name());
-        return std::nullopt;
+    if (offset > total || size > total - offset) {
+        CORPSE_REPORT("Bytes %zu to %zu are outside the %zu-byte '%s'", offset, offset + size, total, m_type->name());
+        return TargetValue(*m_snapshot, m_address, WTF::move(type), false);
     }
-    if constexpr (materialization == Materialization::Eager) {
-        auto bytes = readBytes(offset, size);
-        if (!bytes)
-            return std::nullopt;
-        return TargetValue(*m_snapshot, m_address + offset, WTF::move(type), EagerStorage { WTF::move(*bytes) });
-    } else {
-        if (!containsBytes(m_type.get(), offset, size))
-            return std::nullopt;
-        return TargetValue(*m_snapshot, m_address + offset, WTF::move(type), LazyStorage { });
-    }
+    return at(*m_snapshot, m_address + offset, WTF::move(type));
 }
 
-template<Materialization materialization>
-std::optional<TargetValue<materialization>> TargetValue<materialization>::field(const char* name) const
+TargetValue TargetValue::properField(const char* name) const
 {
-    if (auto found = m_type->field(name))
-        return member(found->offset, WTF::move(found->type));
-
-    if (m_type->isPolymorphic()) {
-        // A virtual base sits wherever the complete object puts it.
-        auto complete = downcast();
-        if (!complete)
-            return std::nullopt;
-        Vector<TargetType::Base> virtualBases = complete->type().virtualBases();
-        for (const TargetType::Base& base : virtualBases) {
-            if (auto found = base.type->field(name))
-                return complete->member(base.offset + found->offset, WTF::move(found->type));
-        }
+    if (!m_isValid)
+        return invalidated();
+    TargetType::Layout layout = m_type->layout();
+    auto* klass = std::get_if<TargetType::Class>(&layout);
+    if (!klass) {
+        CORPSE_REPORT("Type '%s' is not a class, so it has no field '%s'", m_type->name(), reportableString(name));
+        return invalidated();
     }
-
-    CORPSE_REPORT("Type '%s' has no member '%s'", m_type->name(), reportableString(name));
-    return std::nullopt;
+    std::string_view wanted { name };
+    for (TargetType::Field& field : klass->properFields) {
+        if (std::string_view { field.name.span() } == wanted)
+            return member(field.offset, WTF::move(field.type));
+    }
+    CORPSE_REPORT("Type '%s' declares no field '%s'", m_type->name(), reportableString(name));
+    return invalidated();
 }
 
-template<Materialization materialization>
-std::optional<TargetValue<materialization>> TargetValue<materialization>::base(const char* name) const
+TargetValue TargetValue::field(const TargetType::Field& field) const
 {
-    if (auto found = findBase(m_type.get(), name))
-        return member(found->offset, WTF::move(found->type));
-    CORPSE_REPORT("Type '%s' has no non-virtual base '%s'", m_type->name(), reportableString(name));
-    return std::nullopt;
+    return member(field.offset, Ref { field.type });
 }
 
-template<Materialization materialization>
-std::optional<TargetValue<materialization>> TargetValue<materialization>::virtualBase(const char* name) const
+TargetValue TargetValue::base(const TargetType::Base& base) const
 {
-    // Every class with a virtual base has a vptr, so a type without one has no virtual bases.
-    if (!m_type->isPolymorphic()) {
-        CORPSE_REPORT("Type '%s' has no virtual bases", m_type->name());
-        return std::nullopt;
-    }
-    auto complete = downcast();
-    if (!complete)
-        return std::nullopt;
-    Vector<TargetType::Base> virtualBases = complete->type().virtualBases();
-    for (const TargetType::Base& base : virtualBases) {
-        if (nameIs(base.type.get(), name))
-            return complete->member(base.offset, Ref { base.type });
-    }
-    CORPSE_REPORT("Type '%s' has no virtual base '%s'", complete->type().name(), reportableString(name));
-    return std::nullopt;
+    return member(base.offset, Ref { base.type });
 }
 
-template<Materialization materialization>
-std::optional<TargetValue<materialization>> TargetValue<materialization>::element(size_t index) const
+TargetValue TargetValue::element(size_t index) const
 {
-    RefPtr<TargetType> elementType = m_type->element();
-    if (!elementType) {
+    if (!m_isValid)
+        return invalidated();
+    TargetType::Layout layout = m_type->layout();
+    auto* array = std::get_if<TargetType::Array>(&layout);
+    if (!array) {
         CORPSE_REPORT("Type '%s' is not an array", m_type->name());
-        return std::nullopt;
+        return invalidated();
     }
-    size_t count = m_type->elementCount();
-    if (index >= count) {
-        CORPSE_REPORT("Element %zu is outside the %zu elements of '%s'", index, count, m_type->name());
-        return std::nullopt;
+    if (index >= array->count) {
+        CORPSE_REPORT("Element %zu is outside the %zu elements of '%s'", index, array->count, m_type->name());
+        return invalidated();
     }
-    return member(index * elementType->byteSize(), elementType.releaseNonNull());
+    return member(index * array->element->byteSize(), WTF::move(array->element));
 }
 
-template<Materialization materialization>
-std::optional<Address> TargetValue<materialization>::pointerValue() const
+Vector<TargetValue> TargetValue::virtualBases() const
 {
-    TargetType::Kind kind = m_type->kind();
-    if (kind != TargetType::Kind::Pointer && kind != TargetType::Kind::Reference) {
+    if (!m_isValid)
+        return { };
+    TargetType::Layout layout = m_type->layout();
+    auto* klass = std::get_if<TargetType::Class>(&layout);
+    if (!klass) {
+        CORPSE_REPORT("Type '%s' is not a class, so it has no virtual bases", m_type->name());
+        return { };
+    }
+    // Every class with a virtual base has a vptr, so a plain class has none.
+    if (!klass->isPolymorphic)
+        return { };
+
+    TargetValue complete = downcast();
+    if (!complete)
+        return { };
+    TargetType::Layout completeLayout = complete.type().layout();
+    Vector<TargetValue> result;
+    for (const TargetType::Base& base : std::get<TargetType::Class>(completeLayout).virtualBases)
+        result.append(complete.base(base));
+    return result;
+}
+
+std::optional<Address> TargetValue::pointerValue() const
+{
+    if (!m_isValid)
+        return std::nullopt;
+    if (!std::holds_alternative<TargetType::Pointer>(m_type->layout())) {
         CORPSE_REPORT("Type '%s' is not a pointer", m_type->name());
         return std::nullopt;
     }
-    auto bytes = readBytes(0, m_type->byteSize());
-    if (!bytes)
-        return std::nullopt;
-    if (bytes->size() != sizeof(uint64_t)) {
-        CORPSE_REPORT("'%s' is a %zu-byte pointer, and only 8-byte pointers are supported", m_type->name(), bytes->size());
-        return std::nullopt;
-    }
     uint64_t raw = 0;
-    memcpySpan(asMutableByteSpan(raw), bytes->span());
+    if (!readWhole(asMutableByteSpan(raw)))
+        return std::nullopt;
     return Address { raw }.stripped();
 }
 
-template<Materialization materialization>
-std::optional<TargetValue<materialization>> TargetValue<materialization>::dereference() const
+TargetValue TargetValue::dereference() const
 {
     auto pointer = pointerValue();
-    if (!pointer || !*pointer)
-        return std::nullopt;
-    RefPtr<TargetType> pointee = m_type->pointee();
-    if (!pointee) {
-        CORPSE_REPORT("Type '%s' points at nothing that can be read", m_type->name());
-        return std::nullopt;
-    }
-    return at(*m_snapshot, *pointer, pointee.releaseNonNull());
+    if (!pointer)
+        return invalidated();
+    TargetType::Layout layout = m_type->layout();
+    return at(*m_snapshot, *pointer, WTF::move(std::get<TargetType::Pointer>(layout).pointee));
 }
 
-template<Materialization materialization>
-bool TargetValue<materialization>::readInto(std::span<uint8_t> destination) const
+bool TargetValue::readWhole(std::span<uint8_t> destination) const
 {
+    if (!m_isValid)
+        return false;
     if (destination.size() != m_type->byteSize()) {
         CORPSE_REPORT("Reading the %zu-byte '%s' as %zu bytes", m_type->byteSize(), m_type->name(), destination.size());
         return false;
     }
-    auto bytes = readBytes(0, destination.size());
-    if (!bytes)
+    if (m_snapshot->read(m_address, destination).empty()) {
+        CORPSE_REPORT("Could not read the %zu-byte '%s' at 0x%llx", destination.size(), m_type->name(), forReport(m_address));
         return false;
-    memcpySpan(destination, bytes->span());
+    }
     return true;
 }
 
-template<Materialization materialization>
-std::optional<int64_t> TargetValue<materialization>::integer() const
+template<typename T>
+std::optional<T> TargetValue::readAt(Address address, ASCIILiteral what) const
 {
-    TargetType::Kind kind = m_type->kind();
-    if (kind != TargetType::Kind::Integer && kind != TargetType::Kind::Enum && kind != TargetType::Kind::Bool) {
+    auto value = m_snapshot->read<T>(address);
+    if (!value)
+        CORPSE_REPORT("Could not read the %s at 0x%llx of the '%s' at 0x%llx", what, forReport(address), m_type->name(), forReport(m_address));
+    return value;
+}
+
+std::optional<int64_t> TargetValue::integer() const
+{
+    if (!m_isValid)
+        return std::nullopt;
+    TargetType::Layout layout = m_type->layout();
+    auto* integer = std::get_if<TargetType::Integer>(&layout);
+    if (!integer) {
         CORPSE_REPORT("Type '%s' is not an integer", m_type->name());
         return std::nullopt;
     }
-    auto bytes = readBytes(0, m_type->byteSize());
-    if (!bytes)
-        return std::nullopt;
-    size_t size = bytes->size();
+    size_t size = m_type->byteSize();
     if (size != 1 && size != 2 && size != 4 && size != 8) {
         CORPSE_REPORT("'%s' is a %zu-byte integer, which does not fit in 64 bits", m_type->name(), size);
         return std::nullopt;
     }
     uint64_t raw = 0;
-    memcpySpan(asMutableByteSpan(raw).first(size), bytes->span());
+    if (!readWhole(asMutableByteSpan(raw).first(size)))
+        return std::nullopt;
     unsigned bits = size * 8;
-    if (m_type->isSigned() && bits < 64 && ((raw >> (bits - 1)) & 1))
+    if (integer->isSigned && bits < 64 && ((raw >> (bits - 1)) & 1))
         raw |= ~0ull << bits;
     return static_cast<int64_t>(raw);
 }
 
-// CLAUDE: we never read floats. Don't add any helpers not exercised by a test, we can add them as we need them.
-template<Materialization materialization>
-std::optional<double> TargetValue<materialization>::floatingPoint() const
+std::optional<TargetTypeInfo> TargetValue::typeInfo() const
 {
-    if (m_type->kind() != TargetType::Kind::Float) {
-        CORPSE_REPORT("Type '%s' is not a floating-point type", m_type->name());
+    if (!m_isValid)
         return std::nullopt;
-    }
-    auto bytes = readBytes(0, m_type->byteSize());
-    if (!bytes)
-        return std::nullopt;
-    if (bytes->size() == sizeof(float)) {
-        float value = 0;
-        memcpySpan(asMutableByteSpan(value), bytes->span());
-        return value;
-    }
-    if (bytes->size() == sizeof(double)) {
-        double value = 0;
-        memcpySpan(asMutableByteSpan(value), bytes->span());
-        return value;
-    }
-    CORPSE_REPORT("'%s' is a %zu-byte floating-point type, and only float and double are supported", m_type->name(), bytes->size());
-    return std::nullopt;
-}
-
-template<Materialization materialization>
-std::optional<Vector<uint8_t>> TargetValue<materialization>::bytes() const
-{
-    return readBytes(0, m_type->byteSize());
-}
-
-template<Materialization materialization>
-std::optional<TargetTypeInfo> TargetValue<materialization>::typeInfo() const
-{
-    if (!m_type->isPolymorphic()) {
+    TargetType::Layout layout = m_type->layout();
+    auto* klass = std::get_if<TargetType::Class>(&layout);
+    if (!klass || !klass->isPolymorphic) {
         CORPSE_REPORT("Type '%s' is not polymorphic, so it has no type_info", m_type->name());
         return std::nullopt;
     }
-    auto vptrBytes = readBytes(0, sizeof(uint64_t));
-    if (!vptrBytes)
-        return std::nullopt;
-    uint64_t vptr = 0;
-    memcpySpan(asMutableByteSpan(vptr), vptrBytes->span());
 
+    auto vptr = readAt<uint64_t>(m_address, "vtable pointer"_s);
+    if (!vptr)
+        return std::nullopt;
     TargetTypeInfo info;
-    info.vtable = Address { vptr }.stripped();
-    // CLAUDE: make a struct and read it instead of doing offset math if its not too complex
-    // make this whole thing self-documenting in that way
-    auto offsetToTop = m_snapshot->read<int64_t>(info.vtable - 2 * sizeof(uint64_t));
-    auto typeInfoPointer = m_snapshot->read<uint64_t>(info.vtable - sizeof(uint64_t));
-    if (!offsetToTop || !typeInfoPointer)
-        return std::nullopt;
-    info.offsetToTop = *offsetToTop;
-    info.typeInfo = Address { *typeInfoPointer }.stripped();
+    info.vtable = Address { *vptr }.stripped();
 
-    // A type_info is its own vtable pointer followed by its name pointer.
-    auto namePointer = m_snapshot->read<uint64_t>(info.typeInfo + sizeof(uint64_t));
-    if (!namePointer)
+    auto vtablePrefix = readAt<VTablePrefix>(info.vtable - sizeof(VTablePrefix), "vtable prefix"_s);
+    if (!vtablePrefix)
         return std::nullopt;
+    info.offsetToTop = vtablePrefix->offsetToTop;
+    info.typeInfo = Address { vtablePrefix->typeInfo }.stripped();
+
+    auto typeInfoPrefix = readAt<TypeInfoPrefix>(info.typeInfo, "type_info"_s);
+    if (!typeInfoPrefix)
+        return std::nullopt;
+
     // libc++ sets the top bit of the name pointer when the name is not unique
     // across images; libstdc++ prefixes the name with '*' instead.
     constexpr uint64_t nonUniqueBit = 1ull << 63;
-    auto name = m_snapshot->readCString(Address { *namePointer & ~nonUniqueBit }.stripped(), maxTypeNameLength);
-    if (!name)
+    Address nameAddress = Address { typeInfoPrefix->name & ~nonUniqueBit }.stripped();
+    auto name = m_snapshot->readCString(nameAddress, maxTypeNameLength);
+    if (!name) {
+        CORPSE_REPORT("Could not read the type_info name at 0x%llx of the '%s' at 0x%llx", forReport(nameAddress), m_type->name(), forReport(m_address));
         return std::nullopt;
+    }
     std::span<const char> characters = name->span();
     if (!characters.empty() && characters.front() == '*')
         characters = characters.subspan(1);
@@ -354,37 +279,31 @@ std::optional<TargetTypeInfo> TargetValue<materialization>::typeInfo() const
         free(demangled);
     });
     if (status || !demangled) {
-        CORPSE_REPORT("The type_info name '%s' of the object at 0x%llx does not demangle", info.mangledName,
-            static_cast<unsigned long long>(m_address.toTargetVMAddress()));
+        CORPSE_REPORT("The type_info name '%s' of the object at 0x%llx does not demangle", info.mangledName, forReport(m_address));
         return std::nullopt;
     }
     info.demangledName = UTF8CString(byteCast<char8_t>(unsafeSpan(demangled)));
     return info;
 }
 
-template<Materialization materialization>
-RefPtr<TargetType> TargetValue<materialization>::dynamicType() const
+RefPtr<TargetType> TargetValue::dynamicType() const
 {
     auto info = typeInfo();
     if (!info)
         return nullptr;
-    return m_type->debugInfo().findTypeInImageContaining(info->vtable, info->demangledName.data());
+    return m_type->m_debugInfo->findTypeForVTable(info->vtable, info->demangledName.data());
 }
 
-template<Materialization materialization>
-std::optional<TargetValue<materialization>> TargetValue<materialization>::downcast() const
+TargetValue TargetValue::downcast() const
 {
     auto info = typeInfo();
     if (!info)
-        return std::nullopt;
-    RefPtr<TargetType> dynamicType = m_type->debugInfo().findTypeInImageContaining(info->vtable, info->demangledName.data());
+        return invalidated();
+    RefPtr<TargetType> dynamicType = m_type->m_debugInfo->findTypeForVTable(info->vtable, info->demangledName.data());
     if (!dynamicType)
-        return std::nullopt;
+        return invalidated();
     return at(*m_snapshot, m_address + static_cast<uint64_t>(info->offsetToTop), dynamicType.releaseNonNull());
 }
-
-template class TargetValue<Materialization::Eager>;
-template class TargetValue<Materialization::Lazy>;
 
 } // namespace Corpse
 } // namespace JSC

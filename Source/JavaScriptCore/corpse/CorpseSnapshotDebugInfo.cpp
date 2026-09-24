@@ -24,7 +24,7 @@
  */
 
 #include "config.h"
-#include "CorpseTargetDebugInfo.h"
+#include "CorpseSnapshotDebugInfo.h"
 
 #if ENABLE(MYA_HEAP)
 
@@ -42,21 +42,21 @@
 namespace JSC {
 namespace Corpse {
 
-WTF_MAKE_TZONE_ALLOCATED_IMPL(TargetDebugInfo);
+WTF_MAKE_TZONE_ALLOCATED_IMPL(SnapshotDebugInfo);
 
-TargetDebugInfo::TargetDebugInfo(std::unique_ptr<lldb::SBDebugger>&& debugger, std::unique_ptr<lldb::SBTarget>&& target)
+SnapshotDebugInfo::SnapshotDebugInfo(std::unique_ptr<lldb::SBDebugger>&& debugger, std::unique_ptr<lldb::SBTarget>&& target)
     : m_debugger(WTF::move(debugger))
     , m_target(WTF::move(target))
 {
 }
 
-TargetDebugInfo::~TargetDebugInfo()
+SnapshotDebugInfo::~SnapshotDebugInfo()
 {
     m_debugger->DeleteTarget(*m_target);
     lldb::SBDebugger::Destroy(*m_debugger);
 }
 
-RefPtr<TargetDebugInfo> TargetDebugInfo::create(const Snapshot& snapshot)
+RefPtr<SnapshotDebugInfo> SnapshotDebugInfo::create(const Snapshot& snapshot)
 {
     if (!snapshot.isValid()) {
         CORPSE_REPORT("Cannot read debug info for an invalid snapshot");
@@ -115,69 +115,47 @@ RefPtr<TargetDebugInfo> TargetDebugInfo::create(const Snapshot& snapshot)
         }
     }
 
-    // liblldb only ever reads files here: nothing above may have given it a process.
     RELEASE_ASSERT(!target->GetProcess().IsValid());
 
     destroyDebugger.release();
-    return adoptRef(*new TargetDebugInfo(WTF::move(debugger), WTF::move(target)));
+    return adoptRef(*new SnapshotDebugInfo(WTF::move(debugger), WTF::move(target)));
 }
 
-// CLAUDE: ditto, should not be needed
-RefPtr<TargetType> TargetDebugInfo::onlyCompleteType(lldb::SBTypeList& candidates, const char* qualifiedName, const char* where)
+RefPtr<TargetType> SnapshotDebugInfo::findType(const char* qualifiedName, lldb::SBModule& module)
 {
-    lldb::SBType found;
-    unsigned completeCount = 0;
-    for (uint32_t index = 0; index < candidates.GetSize(); ++index) {
-        lldb::SBType candidate = candidates.GetTypeAtIndex(index);
-        // A declaration has no layout, so it does not count.
-        if (!candidate.IsTypeComplete())
-            continue;
-        ++completeCount;
-        found = candidate;
-    }
-    if (!completeCount) {
-        CORPSE_REPORT("No complete definition of '%s' in %s", reportableString(qualifiedName), reportableString(where));
+    // liblldb resolves a declaration to the definition wherever the image has
+    // one, so what comes back is incomplete only if the image never defines it.
+    lldb::SBType type = module.FindFirstType(qualifiedName);
+    if (!type.IsValid()) {
+        CORPSE_REPORT("No type '%s' in %s", reportableString(qualifiedName), reportableString(module.GetFileSpec().GetFilename()));
         return nullptr;
     }
-    if (completeCount > 1) {
-        CORPSE_REPORT("%u complete definitions of '%s' in %s", completeCount, reportableString(qualifiedName), reportableString(where));
+    if (!type.IsTypeComplete()) {
+        CORPSE_REPORT("'%s' is only declared in %s", reportableString(qualifiedName), reportableString(module.GetFileSpec().GetFilename()));
         return nullptr;
     }
-    return adoptRef(*new TargetType(*this, found));
+    return adoptRef(*new TargetType(*this, type));
 }
 
-RefPtr<TargetType> TargetDebugInfo::findType(const char* qualifiedName)
+RefPtr<TargetType> SnapshotDebugInfo::findType(const char* qualifiedName, const Image& image)
 {
-    lldb::SBTypeList candidates = m_target->FindTypes(qualifiedName);
-    return onlyCompleteType(candidates, qualifiedName, "the images of the snapshot");
-}
-
-RefPtr<TargetType> TargetDebugInfo::findType(const char* qualifiedName, const char* imagePath)
-{
-    lldb::SBModule module = m_target->FindModule(lldb::SBFileSpec(imagePath, false));
+    lldb::SBModule module = m_target->FindModule(lldb::SBFileSpec(image.path().data(), false));
     if (!module.IsValid()) {
-        CORPSE_REPORT("No image %s in the snapshot", reportableString(imagePath));
+        CORPSE_REPORT("No image %s in the snapshot", image.path());
         return nullptr;
     }
-    lldb::SBTypeList candidates = module.FindTypes(qualifiedName);
-    return onlyCompleteType(candidates, qualifiedName, imagePath);
+    return findType(qualifiedName, module);
 }
 
-RefPtr<TargetType> TargetDebugInfo::findTypeInImageContaining(Address address, const char* qualifiedName)
+RefPtr<TargetType> SnapshotDebugInfo::findTypeForVTable(Address vtable, const char* demangledName)
 {
-    lldb::SBModule module = m_target->ResolveLoadAddress(address.toTargetVMAddress()).GetModule();
+    lldb::SBModule module = m_target->ResolveLoadAddress(vtable.toTargetVMAddress()).GetModule();
     if (!module.IsValid()) {
-        CORPSE_REPORT("No image is mapped at 0x%llx, where '%s' would be defined",
-            static_cast<unsigned long long>(address.toTargetVMAddress()), reportableString(qualifiedName));
+        CORPSE_REPORT("No image is mapped at 0x%llx, where the vtable of '%s' is",
+            static_cast<unsigned long long>(vtable.toTargetVMAddress()), reportableString(demangledName));
         return nullptr;
     }
-    lldb::SBTypeList candidates = module.FindTypes(qualifiedName);
-    return onlyCompleteType(candidates, qualifiedName, module.GetFileSpec().GetFilename());
-}
-
-unsigned TargetDebugInfo::moduleCount() const
-{
-    return m_target->GetNumModules();
+    return findType(demangledName, module);
 }
 
 } // namespace Corpse

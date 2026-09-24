@@ -1644,12 +1644,13 @@ if (ENABLE_MYA)
         corpse/CorpseError.h
         corpse/CorpseExportsTrie.h
         corpse/CorpseImage.h
+        corpse/CorpseLimits.h
         corpse/CorpsePlatform.h
         corpse/CorpseProcess.h
         corpse/CorpseRegion.h
         corpse/CorpseSnapshot.h
+        corpse/CorpseSnapshotDebugInfo.h
         corpse/CorpseSymbol.h
-        corpse/CorpseTargetDebugInfo.h
         corpse/CorpseTargetType.h
         corpse/CorpseTargetValue.h
         corpse/CorpseThread.h

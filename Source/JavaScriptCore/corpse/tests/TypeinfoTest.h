@@ -31,7 +31,7 @@ namespace JSCToolsTest {
 // Tests that liblldb and rtti are available without pulling in any other parts of mya.
 void testTypeinfo();
 
-// Runs as the target that testTypeinfo() analyzes from another process: writes the address of the object to stdout, then holds the object until it is killed.
-int runTypeinfoTarget();
+// Runs as the target that testTypeinfo() analyzes from another process.
+[[noreturn]] void runTypeinfoTarget();
 
 } // namespace JSCToolsTest

@@ -29,6 +29,7 @@
 #if ENABLE(MYA)
 
 #include "CorpseError.h"
+#include "CorpseLimits.h"
 #include "CorpseProcess.h"
 #include "CorpseSnapshot.h"
 
@@ -38,11 +39,14 @@
 #include <mach/mach_error.h>
 #include <mach/task_info.h>
 #else
+#include <algorithm>
 #include <array>
 #include <errno.h>
 #include <fcntl.h>
+#include <optional>
 #include <string_view>
 #include <unistd.h>
+#include <wtf/Scope.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/text/MakeString.h>
 #include <wtf/text/StringToIntegerConversion.h>
@@ -52,15 +56,7 @@
 namespace JSC {
 namespace Corpse {
 
-// A path read out of a corpse is bounded like every other value in it.
-static constexpr size_t maxPathLength = 4 * KB;
-
 #if OS(DARWIN)
-
-// A process that dlopens every framework on the system reaches about 2,800
-// images. Each one below costs reads out of the corpse, so an implausible count
-// says the struct read was not dyld_all_image_infos.
-static constexpr uint32_t maxImageCount = 16 * 1024;
 
 Vector<Image> Image::collect(const Snapshot& snapshot)
 {
@@ -99,7 +95,8 @@ Vector<Image> Image::collect(const Snapshot& snapshot)
         return result;
     }
     if (imageCount > maxImageCount) {
-        CORPSE_REPORT("dyld lists %u images for pid %d, too many to be a real image list", imageCount, pid);
+        CORPSE_REPORT("dyld_all_image_infos v%u at 0x%llx lists %u images for pid %d, too many to be a real image list",
+            allImages->version, allImageInfosAddress.toTargetVMAddress(), imageCount, pid);
         return result;
     }
 
@@ -108,27 +105,85 @@ Vector<Image> Image::collect(const Snapshot& snapshot)
         Address infoAddress = arrayAddress + static_cast<uint64_t>(i) * sizeof(dyld_image_info);
         auto info = snapshot.read<dyld_image_info>(infoAddress);
         if (!info) {
-            CORPSE_REPORT("Could not read image %u of %u at 0x%llx for pid %d",
-                i, imageCount, infoAddress.toTargetVMAddress(), pid);
+            CORPSE_REPORT("Could not read image %u of the %u dyld_all_image_infos v%u lists at 0x%llx for pid %d",
+                i, imageCount, allImages->version, infoAddress.toTargetVMAddress(), pid);
             return { };
         }
-        Image image;
-        image.m_loadAddress = Address { info->imageLoadAddress }.stripped();
+        Address loadAddress = Address { info->imageLoadAddress }.stripped();
         auto path = snapshot.readCString(Address { info->imageFilePath }.stripped(), maxPathLength);
         if (!path) {
-            CORPSE_REPORT("Could not read the path of the image at 0x%llx for pid %d",
-                image.m_loadAddress.toTargetVMAddress(), pid);
+            CORPSE_REPORT("Could not read the path of the image at 0x%llx for pid %d", loadAddress.toTargetVMAddress(), pid);
             return { };
         }
-        image.m_path = WTF::move(*path);
-        result.append(WTF::move(image));
+        result.append(Image { WTF::move(*path), loadAddress });
     }
     return result;
 }
 
 #else
 
-// CLAUDE: This seems too low-level, can we make this parsing more clear?
+// One line of /proc/<pid>/maps: "start-end perms offset dev inode path", with
+// the path column padded by spaces and absent for an anonymous mapping.
+struct MapsLine {
+    uint64_t start;
+    uint64_t fileOffset;
+    std::string_view path;
+};
+
+static std::string_view takeWord(std::string_view& line)
+{
+    size_t end = line.find(' ');
+    std::string_view word = line.substr(0, end);
+    line = end == std::string_view::npos ? std::string_view { } : line.substr(end + 1);
+    return word;
+}
+
+static std::optional<uint64_t> parseHex(std::string_view text)
+{
+    return parseInteger<uint64_t>(StringView { std::span<const char> { text } }, 16);
+}
+
+static std::optional<MapsLine> parseMapsLine(std::string_view line)
+{
+    std::string_view range = takeWord(line);
+    takeWord(line); // Permissions.
+    std::string_view offset = takeWord(line);
+    takeWord(line); // Device.
+    takeWord(line); // Inode.
+
+    auto start = parseHex(range.substr(0, range.find('-')));
+    auto fileOffset = parseHex(offset);
+    if (!start || !fileOffset)
+        return std::nullopt;
+
+    size_t pathStart = line.find('/');
+    std::string_view path = pathStart == std::string_view::npos ? std::string_view { } : line.substr(pathStart);
+    return MapsLine { *start, *fileOffset, path };
+}
+
+static std::optional<Vector<uint8_t>> readEntireFile(const CString& path)
+{
+    int fd = open(path.data(), O_RDONLY | O_CLOEXEC);
+    if (fd < 0)
+        return std::nullopt;
+    auto closeFile = makeScopeExit([&] {
+        close(fd);
+    });
+
+    // procfs reports every file as empty, so it has to be read to its end.
+    Vector<uint8_t> contents;
+    std::array<uint8_t, 16 * KB> chunk;
+    while (true) {
+        ssize_t got = read(fd, chunk.data(), chunk.size());
+        if (got < 0 && errno == EINTR)
+            continue;
+        if (got < 0)
+            return std::nullopt;
+        if (!got)
+            return contents;
+        contents.append(std::span { chunk }.first(static_cast<size_t>(got)));
+    }
+}
 
 // The lowest mapping of each file at file offset zero is where its header
 // landed; that is what /proc/<pid>/maps has in place of a loader's image list.
@@ -142,77 +197,30 @@ Vector<Image> Image::collect(const Snapshot& snapshot)
     }
     int pid = static_cast<int>(snapshot.process()->pid());
 
-    // procfs reports the file as empty, so it has to be read to its end.
-    CString mapsPath = makeString("/proc/"_s, pid, "/maps"_s).utf8();
-    int fd = open(mapsPath.data(), O_RDONLY | O_CLOEXEC);
-    if (fd < 0) {
-        CORPSE_REPORT("Could not open the memory map of pid %d", pid);
-        return result;
-    }
-    Vector<uint8_t> maps;
-    std::array<uint8_t, 16 * KB> chunk;
-    while (true) {
-        ssize_t got = read(fd, chunk.data(), chunk.size());
-        if (got < 0 && errno == EINTR)
-            continue;
-        if (got <= 0) {
-            if (got < 0)
-                maps.clear();
-            break;
-        }
-        maps.append(std::span { chunk }.first(static_cast<size_t>(got)));
-    }
-    close(fd);
-    if (maps.isEmpty()) {
+    auto maps = readEntireFile(makeString("/proc/"_s, pid, "/maps"_s).utf8());
+    if (!maps || maps->isEmpty()) {
         CORPSE_REPORT("Could not read the memory map of pid %d", pid);
         return result;
     }
 
-    std::string_view text { byteCast<char>(maps.span()) };
+    std::string_view text { byteCast<char>(maps->span()) };
     while (!text.empty()) {
         size_t newline = text.find('\n');
         std::string_view line = text.substr(0, newline);
         text = newline == std::string_view::npos ? std::string_view { } : text.substr(newline + 1);
 
-        // start-end perms offset dev inode path
-        size_t dash = line.find('-');
-        size_t space = line.find(' ');
-        if (dash == std::string_view::npos || space == std::string_view::npos || dash > space)
-            continue;
-        auto start = parseInteger<uint64_t>(StringView { std::span<const char> { line.substr(0, dash) } }, 16);
-        if (!start)
+        auto mapping = parseMapsLine(line);
+        if (!mapping || mapping->fileOffset || mapping->path.empty() || mapping->path.size() > maxPathLength)
             continue;
 
-        std::string_view rest = line.substr(space + 1);
-        std::string_view fields[4];
-        for (auto& field : fields) {
-            size_t end = rest.find(' ');
-            field = rest.substr(0, end);
-            rest = end == std::string_view::npos ? std::string_view { } : rest.substr(end + 1);
+        size_t index = result.findIf([&](const Image& image) {
+            return std::string_view { image.m_path.span() } == mapping->path;
+        });
+        if (index != notFound) {
+            result[index].m_loadAddress = std::min(result[index].m_loadAddress, Address { mapping->start });
+            continue;
         }
-        if (fields[1] != "00000000")
-            continue;
-        size_t pathStart = rest.find('/');
-        if (pathStart == std::string_view::npos)
-            continue;
-        std::string_view path = rest.substr(pathStart);
-        if (path.size() > maxPathLength)
-            continue;
-
-        bool seen = false;
-        for (auto& image : result) {
-            if (std::string_view { image.m_path.span() } != path)
-                continue;
-            seen = true;
-            if (Address { *start } < image.m_loadAddress)
-                image.m_loadAddress = Address { *start };
-        }
-        if (seen)
-            continue;
-        Image image;
-        image.m_path = UTF8CString(byteCast<char8_t>(std::span { path }));
-        image.m_loadAddress = Address { *start };
-        result.append(WTF::move(image));
+        result.append(Image { UTF8CString(byteCast<char8_t>(std::span { mapping->path })), Address { mapping->start } });
     }
     return result;
 }

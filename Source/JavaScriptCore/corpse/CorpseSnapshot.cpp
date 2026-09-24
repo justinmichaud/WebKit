@@ -65,32 +65,23 @@ const Vector<Image>& Snapshot::images() const
     return *m_images;
 }
 
-// CLAUDE: This can be simplified
 std::optional<CString> Snapshot::readCString(Address address, size_t maxLength) const
 {
+    // No read crosses a 4 KB boundary, which every page size is a multiple of,
+    // so a read fails only if none of its bytes are mapped.
+    constexpr size_t granule = 4 * KB;
     Vector<char> characters;
-    std::array<uint8_t, 64> chunk;
-    for (size_t offset = 0; offset < maxLength; offset += chunk.size()) {
-        size_t wanted = std::min(chunk.size(), maxLength - offset);
-        std::span<uint8_t> got = read(address + offset, std::span { chunk }.first(wanted));
-        if (got.empty()) {
-            // The string may end just short of an unmapped page, in which case
-            // the chunk fails as a whole while its first bytes are readable.
-            for (size_t index = 0; index < wanted; ++index) {
-                auto byte = read<uint8_t>(address + offset + index);
-                if (!byte)
-                    return std::nullopt;
-                if (!*byte)
-                    return UTF8CString(byteCast<char8_t>(characters.span()));
-                characters.append(static_cast<char>(*byte));
-            }
-            continue;
-        }
-        for (uint8_t byte : got) {
-            if (!byte)
-                return UTF8CString(byteCast<char8_t>(characters.span()));
-            characters.append(static_cast<char>(byte));
-        }
+    std::array<uint8_t, 256> chunk;
+    while (characters.size() < maxLength) {
+        Address next = address + characters.size();
+        size_t wanted = std::min({ chunk.size(), maxLength - characters.size(), static_cast<size_t>(granule - next.toTargetVMAddress() % granule) });
+        std::span<uint8_t> got = read(next, std::span { chunk }.first(wanted));
+        if (got.empty())
+            return std::nullopt;
+        auto terminator = std::ranges::find(got, 0);
+        characters.append(byteCast<char>(std::span { got.begin(), terminator }));
+        if (terminator != got.end())
+            return UTF8CString(byteCast<char8_t>(characters.span()));
     }
     return std::nullopt;
 }
@@ -137,6 +128,8 @@ Snapshot::~Snapshot()
         mach_port_deallocate(mach_task_self(), m_corpsePort);
 }
 
+// FIXME: Every read of a corpse copies through here. A page manager will map
+// the corpse's pages instead, so that reading a value copies nothing.
 std::span<uint8_t> Snapshot::read(Address address, std::span<uint8_t> into) const
 {
     if (!isValid())

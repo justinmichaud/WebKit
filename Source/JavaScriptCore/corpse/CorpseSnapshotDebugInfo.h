@@ -31,56 +31,51 @@
 
 #include <JavaScriptCore/CorpseAddress.h>
 #include <memory>
-#include <wtf/Ref.h>
 #include <wtf/RefCounted.h>
 #include <wtf/RefPtr.h>
 #include <wtf/TZoneMalloc.h>
 
 namespace lldb {
 class SBDebugger;
+class SBModule;
 class SBTarget;
-class SBTypeList;
 }
 
 namespace JSC {
 namespace Corpse {
 
-enum class Materialization : uint8_t;
+class Image;
 class Snapshot;
 class TargetType;
-template<Materialization> class TargetValue;
+class TargetValue;
 
-// CLAUDE: since this is per snapshot, this should be SnapshotDebugInfo or similar.
-class TargetDebugInfo : public RefCounted<TargetDebugInfo> {
-    WTF_MAKE_TZONE_ALLOCATED(TargetDebugInfo);
+// The debug info of every image in a snapshot, opened through liblldb. liblldb
+// only ever reads files here: it is never given a process.
+class SnapshotDebugInfo : public RefCounted<SnapshotDebugInfo> {
+    WTF_MAKE_TZONE_ALLOCATED(SnapshotDebugInfo);
 public:
+    static RefPtr<SnapshotDebugInfo> create(const Snapshot&);
+    ~SnapshotDebugInfo();
 
-    static RefPtr<TargetDebugInfo> create(const Snapshot&);
-    ~TargetDebugInfo();
-
-    // CLAUDE: this should require an image, so we can completely rule out ambiguity.
-    RefPtr<TargetType> findType(const char* qualifiedName);
-    RefPtr<TargetType> findType(const char* qualifiedName, const char* imagePath);
-
-    // claude: why needed?
-    unsigned moduleCount() const;
+    // The type as `image` defines it. A header-only type is complete in every
+    // image that uses it, so a type is always asked for by its image.
+    RefPtr<TargetType> findType(const char* qualifiedName, const Image&);
 
 private:
-    TargetDebugInfo(std::unique_ptr<lldb::SBDebugger>&&, std::unique_ptr<lldb::SBTarget>&&);
+    SnapshotDebugInfo(std::unique_ptr<lldb::SBDebugger>&&, std::unique_ptr<lldb::SBTarget>&&);
 
-    // The type as the image mapped at `address` defines it.
-    // CLAUDE: confirm rtti does not require us to search by name, there must be something more robust?
-    RefPtr<TargetType> findTypeInImageContaining(Address, const char* qualifiedName);
+    RefPtr<TargetType> findType(const char* qualifiedName, lldb::SBModule&);
 
-    // The one complete definition among `candidates`, or null after saying how many there were.
-    // CLAUDE: again, confusing and unnecesary
-    RefPtr<TargetType> onlyCompleteType(lldb::SBTypeList& candidates, const char* qualifiedName, const char* where);
+    // The type an object's RTTI names, as the image holding its vtable defines
+    // it. Debug info has no link from a vtable's address to its class, so this
+    // is a lookup by name, which is also how lldb's Itanium ABI runtime resolves
+    // a dynamic type.
+    RefPtr<TargetType> findTypeForVTable(Address vtable, const char* demangledName);
 
     std::unique_ptr<lldb::SBDebugger> m_debugger;
     std::unique_ptr<lldb::SBTarget> m_target;
 
-    friend class TargetType;
-    template<Materialization> friend class TargetValue;
+    friend class TargetValue;
 };
 
 } // namespace Corpse

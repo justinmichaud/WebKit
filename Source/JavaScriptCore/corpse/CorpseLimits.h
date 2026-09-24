@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2026 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -29,42 +29,33 @@
 
 #if ENABLE(MYA)
 
-#include <wtf/Assertions.h>
+#include <stddef.h>
+#include <stdint.h>
 #include <wtf/StdLibExtras.h>
-#include <wtf/text/CString.h>
-#include <wtf/text/StringCommon.h>
 
 namespace JSC {
 namespace Corpse {
 
-// Reports the library's diagnostics. Messages are prefixed with the name the
-// client set via Corpse::Client, so they read as the client's own output.
-class Error {
-public:
-    static void report(const char* format, ...) WTF_ATTRIBUTE_PRINTF(1, 2);
+// Every size and count read out of a corpse bounds a loop or an allocation, so
+// it is checked against one of these first. Each limit is a plausibility check
+// on a single value: exceeding it says the bytes read were not the struct they
+// were taken for, so the addresses in them are not worth chasing. The values sit
+// well above what was measured across every Mach-O image installed on a sample
+// system, and in a process that dlopens every framework on it.
 
-    static unsigned reportCount() { return s_reportCount; }
+constexpr uint32_t maxImageCount = 16 * 1024; // About 6x the 2,800 images measured.
+constexpr size_t maxPathLength = 4 * KB; // PATH_MAX on Darwin and on Linux.
+constexpr size_t maxTypeNameLength = 4 * KB; // A mangled name out of a type_info.
+constexpr size_t maxLoadCommandsSize = 128 * KB; // About 17x the 7.4 KB measured.
+constexpr size_t maxExportsTrieSize = 16 * MB; // About 8x the 2.1 MB measured.
 
-private:
-    static thread_local unsigned s_reportCount;
-};
-
-// CORPSE_REPORT rejects a bare char*, which has no bound. This copies a string
-// owned by a C interface (liblldb, Mach, dyld) so that it can be printed.
-inline UTF8CString reportableString(const char* string)
-{
-    if (!string)
-        return { };
-    return UTF8CString(byteCast<char8_t>(unsafeSpan(string)));
-}
+// The per-image limits multiply by the image count, so they do not bound the
+// work of one symbol lookup. This does: a lookup that finds nothing reads every
+// image's load commands and exports trie, which measured 101 MB for the 2,800
+// image process and 0.4 MB for a small one.
+constexpr size_t maxTotalBytesRead = 256 * MB; // About 2.5x the measured maximum.
 
 } // namespace Corpse
 } // namespace JSC
-
-// Error::report in the shape of SAFE_PRINTF
-#define CORPSE_REPORT(format, ...) \
-    WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN \
-    ::JSC::Corpse::Error::report(format __VA_OPT__(, SAFE_PRINTF_TYPE(__VA_ARGS__))) \
-    WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 
 #endif // ENABLE(MYA)

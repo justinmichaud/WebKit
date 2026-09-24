@@ -45,6 +45,12 @@ public:
     Address loadAddress() const { return m_loadAddress; } // Where the image's header landed.
 
 private:
+    Image(CString&& path, Address loadAddress)
+        : m_path(WTF::move(path))
+        , m_loadAddress(loadAddress)
+    {
+    }
+
     static Vector<Image> collect(const Snapshot&);
 
     CString m_path;

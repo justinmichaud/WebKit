@@ -74,7 +74,8 @@ private:
 
 #if CORPSE_SYMBOL_LOOKUP_DIAGNOSTICS
     // How far a search got, so a failure can name the stage that fell short.
-    // CLAUDE: you missed the point of the diagnostics, we need to wire this up fully.
+    // The image list itself comes from Snapshot::images(), which reports its
+    // own failures, so the stages here start from the images it lists.
     struct Diagnostics {
         unsigned images { 0 }; // Images the snapshot lists.
         unsigned examined { 0 }; // ...whose Mach header we read.

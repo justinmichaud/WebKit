@@ -30,17 +30,15 @@
 
 #include "CorpseError.h"
 #include <lldb/API/LLDB.h>
-#include <string_view>
 #include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMallocInlines.h>
-#include <wtf/text/StringCommon.h>
 
 namespace JSC {
 namespace Corpse {
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(TargetType);
 
-TargetType::TargetType(TargetDebugInfo& debugInfo, const lldb::SBType& type)
+TargetType::TargetType(SnapshotDebugInfo& debugInfo, const lldb::SBType& type)
     : m_debugInfo(debugInfo)
     , m_type(makeUniqueWithoutFastMallocCheck<lldb::SBType>(lldb::SBType(type).GetCanonicalType()))
 {
@@ -53,55 +51,6 @@ Ref<TargetType> TargetType::wrap(const lldb::SBType& type) const
     return adoptRef(*new TargetType(m_debugInfo.get(), type));
 }
 
-TargetType::Kind TargetType::kind() const
-{
-    uint32_t typeClass = m_type->GetTypeClass();
-    if (typeClass & (lldb::eTypeClassClass | lldb::eTypeClassStruct | lldb::eTypeClassUnion))
-        return Kind::Class;
-    if (typeClass & lldb::eTypeClassPointer)
-        return Kind::Pointer;
-    if (typeClass & lldb::eTypeClassReference)
-        return Kind::Reference;
-    if (typeClass & lldb::eTypeClassArray)
-        return Kind::Array;
-    if (typeClass & lldb::eTypeClassEnumeration)
-        return Kind::Enum;
-    if (!(typeClass & lldb::eTypeClassBuiltin))
-        return Kind::Other;
-
-    switch (m_type->GetBasicType()) {
-    case lldb::eBasicTypeBool:
-        return Kind::Bool;
-    case lldb::eBasicTypeHalf:
-    case lldb::eBasicTypeFloat:
-    case lldb::eBasicTypeDouble:
-    case lldb::eBasicTypeLongDouble:
-        return Kind::Float;
-    case lldb::eBasicTypeChar:
-    case lldb::eBasicTypeSignedChar:
-    case lldb::eBasicTypeUnsignedChar:
-    case lldb::eBasicTypeWChar:
-    case lldb::eBasicTypeSignedWChar:
-    case lldb::eBasicTypeUnsignedWChar:
-    case lldb::eBasicTypeChar16:
-    case lldb::eBasicTypeChar32:
-    case lldb::eBasicTypeChar8:
-    case lldb::eBasicTypeShort:
-    case lldb::eBasicTypeUnsignedShort:
-    case lldb::eBasicTypeInt:
-    case lldb::eBasicTypeUnsignedInt:
-    case lldb::eBasicTypeLong:
-    case lldb::eBasicTypeUnsignedLong:
-    case lldb::eBasicTypeLongLong:
-    case lldb::eBasicTypeUnsignedLongLong:
-    case lldb::eBasicTypeInt128:
-    case lldb::eBasicTypeUnsignedInt128:
-        return Kind::Integer;
-    default:
-        return Kind::Other;
-    }
-}
-
 CString TargetType::name() const
 {
     return reportableString(m_type->GetName());
@@ -112,12 +61,8 @@ size_t TargetType::byteSize() const
     return m_type->GetByteSize();
 }
 
-bool TargetType::isSigned() const
+static bool isSignedInteger(lldb::SBType type)
 {
-    lldb::SBType type = *m_type;
-    if (kind() == Kind::Enum)
-        type = m_type->GetEnumerationIntegerType();
-
     switch (type.GetBasicType()) {
     case lldb::eBasicTypeSignedChar:
     case lldb::eBasicTypeSignedWChar:
@@ -140,95 +85,89 @@ bool TargetType::isSigned() const
     }
 }
 
-bool TargetType::isPolymorphic() const
+static bool isIntegerBasicType(lldb::BasicType type)
 {
-    return m_type->IsPolymorphicClass();
-}
-
-Vector<TargetType::Field> TargetType::fields() const
-{
-    Vector<Field> result;
-    uint32_t count = m_type->GetNumberOfFields();
-    result.reserveInitialCapacity(count);
-    for (uint32_t index = 0; index < count; ++index) {
-        lldb::SBTypeMember member = m_type->GetFieldAtIndex(index);
-        result.append(Field { reportableString(member.GetName()), static_cast<size_t>(member.GetOffsetInBytes()), wrap(member.GetType()) });
-    }
-    return result;
-}
-
-Vector<TargetType::Base> TargetType::bases() const
-{
-    Vector<Base> virtualBases = this->virtualBases();
-    Vector<Base> result;
-    uint32_t count = m_type->GetNumberOfDirectBaseClasses();
-    for (uint32_t index = 0; index < count; ++index) {
-        lldb::SBTypeMember member = m_type->GetDirectBaseClassAtIndex(index);
-        Ref<TargetType> base = wrap(member.GetType());
-        // liblldb lists a direct virtual base among the direct bases as well.
-        if (virtualBases.containsIf([&](const Base& virtualBase) { return virtualBase.type->name() == base->name(); }))
-            continue;
-        result.append(Base { static_cast<size_t>(member.GetOffsetInBytes()), WTF::move(base) });
-    }
-    return result;
-}
-
-Vector<TargetType::Base> TargetType::virtualBases() const
-{
-    Vector<Base> result;
-    uint32_t count = m_type->GetNumberOfVirtualBaseClasses();
-    result.reserveInitialCapacity(count);
-    for (uint32_t index = 0; index < count; ++index) {
-        lldb::SBTypeMember member = m_type->GetVirtualBaseClassAtIndex(index);
-        result.append(Base { static_cast<size_t>(member.GetOffsetInBytes()), wrap(member.GetType()) });
-    }
-    return result;
-}
-
-std::optional<TargetType::Field> TargetType::field(const char* name) const
-{
-    std::string_view wanted { name };
-    Vector<Field> own = fields();
-    for (const Field& field : own) {
-        if (std::string_view { field.name.span() } == wanted)
-            return field;
-    }
-    Vector<Base> bases = this->bases();
-    for (const Base& base : bases) {
-        if (auto found = base.type->field(name)) {
-            found->offset += base.offset;
-            return found;
-        }
-    }
-    return std::nullopt;
-}
-
-RefPtr<TargetType> TargetType::pointee() const
-{
-    switch (kind()) {
-    case Kind::Pointer:
-        return wrap(m_type->GetPointeeType());
-    case Kind::Reference:
-        return wrap(m_type->GetDereferencedType());
+    switch (type) {
+    case lldb::eBasicTypeBool:
+    case lldb::eBasicTypeChar:
+    case lldb::eBasicTypeSignedChar:
+    case lldb::eBasicTypeUnsignedChar:
+    case lldb::eBasicTypeWChar:
+    case lldb::eBasicTypeSignedWChar:
+    case lldb::eBasicTypeUnsignedWChar:
+    case lldb::eBasicTypeChar16:
+    case lldb::eBasicTypeChar32:
+    case lldb::eBasicTypeChar8:
+    case lldb::eBasicTypeShort:
+    case lldb::eBasicTypeUnsignedShort:
+    case lldb::eBasicTypeInt:
+    case lldb::eBasicTypeUnsignedInt:
+    case lldb::eBasicTypeLong:
+    case lldb::eBasicTypeUnsignedLong:
+    case lldb::eBasicTypeLongLong:
+    case lldb::eBasicTypeUnsignedLongLong:
+    case lldb::eBasicTypeInt128:
+    case lldb::eBasicTypeUnsignedInt128:
+        return true;
     default:
-        return nullptr;
+        return false;
     }
 }
 
-RefPtr<TargetType> TargetType::element() const
+TargetType::Layout TargetType::layout() const
 {
-    if (kind() != Kind::Array)
-        return nullptr;
-    return wrap(m_type->GetArrayElementType());
-}
+    uint32_t typeClass = m_type->GetTypeClass();
 
-size_t TargetType::elementCount() const
-{
-    RefPtr<TargetType> elementType = element();
-    if (!elementType)
-        return 0;
-    size_t elementSize = elementType->byteSize();
-    return elementSize ? byteSize() / elementSize : 0;
+    if (typeClass & (lldb::eTypeClassClass | lldb::eTypeClassStruct | lldb::eTypeClassUnion)) {
+        Class result { m_type->IsPolymorphicClass(), { }, { }, { } };
+
+        uint32_t fieldCount = m_type->GetNumberOfFields();
+        for (uint32_t index = 0; index < fieldCount; ++index) {
+            lldb::SBTypeMember member = m_type->GetFieldAtIndex(index);
+            result.properFields.append(Field { reportableString(member.GetName()), static_cast<size_t>(member.GetOffsetInBytes()), wrap(member.GetType()) });
+        }
+
+        uint32_t virtualBaseCount = m_type->GetNumberOfVirtualBaseClasses();
+        for (uint32_t index = 0; index < virtualBaseCount; ++index) {
+            lldb::SBTypeMember member = m_type->GetVirtualBaseClassAtIndex(index);
+            result.virtualBases.append(Base { static_cast<size_t>(member.GetOffsetInBytes()), wrap(member.GetType()) });
+        }
+
+        uint32_t baseCount = m_type->GetNumberOfDirectBaseClasses();
+        for (uint32_t index = 0; index < baseCount; ++index) {
+            lldb::SBTypeMember member = m_type->GetDirectBaseClassAtIndex(index);
+            lldb::SBType baseType = member.GetType();
+            // liblldb lists a direct virtual base among the direct bases as well.
+            bool isVirtual = false;
+            for (uint32_t virtualIndex = 0; virtualIndex < virtualBaseCount && !isVirtual; ++virtualIndex) {
+                lldb::SBType virtualBaseType = m_type->GetVirtualBaseClassAtIndex(virtualIndex).GetType();
+                isVirtual = baseType == virtualBaseType;
+            }
+            if (isVirtual)
+                continue;
+            result.bases.append(Base { static_cast<size_t>(member.GetOffsetInBytes()), wrap(baseType) });
+        }
+        return result;
+    }
+
+    if (typeClass & lldb::eTypeClassPointer)
+        return Pointer { wrap(m_type->GetPointeeType()) };
+    if (typeClass & lldb::eTypeClassReference)
+        return Pointer { wrap(m_type->GetDereferencedType()) };
+
+    if (typeClass & lldb::eTypeClassArray) {
+        Ref<TargetType> element = wrap(m_type->GetArrayElementType());
+        size_t elementSize = element->byteSize();
+        size_t count = elementSize ? byteSize() / elementSize : 0;
+        return Array { WTF::move(element), count };
+    }
+
+    if (typeClass & lldb::eTypeClassEnumeration)
+        return Integer { isSignedInteger(m_type->GetEnumerationIntegerType()) };
+    if ((typeClass & lldb::eTypeClassBuiltin) && isIntegerBasicType(m_type->GetBasicType()))
+        return Integer { isSignedInteger(*m_type) };
+
+    return Other { };
 }
 
 } // namespace Corpse

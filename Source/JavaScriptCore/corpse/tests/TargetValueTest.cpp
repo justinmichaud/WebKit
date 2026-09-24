@@ -22,7 +22,6 @@
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
  * THE POSSIBILITY OF SUCH DAMAGE.
  */
-
 #include "config.h"
 #include "LibJSCToolsTestUtilities.h"
 #include "TargetValueTest.h"
@@ -33,51 +32,33 @@
 
 #include <JavaScriptCore/CorpseAddress.h>
 #include <JavaScriptCore/CorpseImage.h>
-#include <JavaScriptCore/CorpseProcess.h>
 #include <JavaScriptCore/CorpseSnapshot.h>
-#include <JavaScriptCore/CorpseTargetDebugInfo.h>
+#include <JavaScriptCore/CorpseSnapshotDebugInfo.h>
 #include <JavaScriptCore/CorpseTargetType.h>
 #include <JavaScriptCore/CorpseTargetValue.h>
 #include <JavaScriptCore/SourceProvider.h>
-#include <array>
-#include <errno.h>
 #include <optional>
-#include <signal.h>
-#include <spawn.h>
 #include <stdint.h>
 #include <string_view>
-#include <sys/wait.h>
 #include <typeinfo>
-#include <unistd.h>
 #include <wtf/Ref.h>
 #include <wtf/RefPtr.h>
-#include <wtf/SafeStrerror.h>
-#include <wtf/Scope.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/text/CString.h>
 #include <wtf/text/TextPosition.h>
 
-extern char** environ;
-
-#endif // ENABLE(MYA_HEAP)
-
 namespace JSCToolsTest {
-
-#if ENABLE(MYA_HEAP)
 
 namespace {
 
 using JSC::Corpse::Address;
-using JSC::Corpse::EagerTargetValue;
-using JSC::Corpse::LazyTargetValue;
-using JSC::Corpse::Materialization;
-using JSC::Corpse::Process;
+using JSC::Corpse::Image;
 using JSC::Corpse::Snapshot;
-using JSC::Corpse::TargetDebugInfo;
+using JSC::Corpse::SnapshotDebugInfo;
 using JSC::Corpse::TargetType;
 using JSC::Corpse::TargetValue;
 
-// We walk this hierarchy to test TargetValue
+// The object graph a corpse of this process is read back through.
 struct Point {
     int32_t x { 3 };
     int32_t y { 4 };
@@ -133,7 +114,10 @@ struct Diamond : Left, Right {
     int32_t numbers[4] { 10, 20, 30, 40 };
 };
 
-// Start from mya and confirm we can read JSC debug info.
+// Every integer in a Diamond, its one VBase counted once.
+constexpr int64_t diamondIntegerSum = 1 + 2 + 3 + 10 + 20 + 30 + 40 + 0x5555;
+
+// Our class holding a JSC object, to read JSC's debug info from mya's side.
 struct TestContainer {
     Ref<JSC::SourceProvider> provider;
     uint32_t marker { 0xc0ffee };
@@ -169,26 +153,6 @@ bool typeNameIs(const TargetType& type, std::string_view expected)
     return std::string_view { type.name().span() } == expected;
 }
 
-// CLAUDE: these should be baked in to value
-template<typename Value>
-std::optional<int64_t> integerAt(const std::optional<Value>& value, const char* fieldName)
-{
-    if (!value)
-        return std::nullopt;
-    auto field = value->field(fieldName);
-    if (!field)
-        return std::nullopt;
-    return field->integer();
-}
-
-template<typename T, typename Value>
-std::optional<T> readAs(const std::optional<Value>& value)
-{
-    if (!value)
-        return std::nullopt;
-    return value->template as<T>();
-}
-
 void expectInteger(std::optional<int64_t> actual, int64_t expected, const char* message)
 {
     TEST_ASSERT(actual, message);
@@ -196,269 +160,257 @@ void expectInteger(std::optional<int64_t> actual, int64_t expected, const char* 
         TEST_ASSERT_EQ(*actual, expected, message);
 }
 
-// CLAUDE: we shouldn't support reading through base classes; value only does one step of dereferencing, we should iterate through each base class (including virtual ones) to see every field in the object.
-// Avoid nesting: ASSERT, if(!) return always.
-template<Materialization materialization>
-void checkFixture(const Snapshot& snapshot, Address address, TargetType& fixtureType)
+// The class layout of a value's type, or nullopt after failing the test.
+std::optional<TargetType::Class> classLayout(const TargetValue& value, const char* message)
 {
-    using Value = TargetValue<materialization>;
-
-    auto fixture = Value::at(snapshot, address, Ref<TargetType> { fixtureType });
-    TEST_ASSERT(fixture, "the fixture is readable");
-    if (!fixture)
-        return;
-
-    // Fields of fields, with no polymorphism involved.
-    auto circle = fixture->field("circle");
-    TEST_ASSERT(circle, "the fixture has a circle");
-    if (!circle)
-        return;
-    expectInteger(integerAt(circle, "radius"), 6, "the circle's own field reads back");
-    expectInteger(integerAt(circle, "flags"), 5, "a field declared in a base reads through the derived class");
-    auto origin = circle->field("origin");
-    TEST_ASSERT(origin, "a struct field declared in a base is found through the derived class");
-    if (!origin)
-        return;
-    TEST_ASSERT(typeNameIs(origin->type(), "(anonymous namespace)::Point"), "a field carries its declared type");
-    expectInteger(integerAt(origin, "x"), 3, "a field of a field reads back");
-    expectInteger(integerAt(origin, "y"), 4, "a field of a field reads back");
-    auto point = readAs<Point>(origin);
-    TEST_ASSERT(point && *point == Point { }, "a struct reads back whole");
-
-    // A pointer, the dynamic type behind it, and the downcast to it.
-    auto shape = fixture->field("shapeThatIsACircle");
-    auto pointee = shape ? shape->dereference() : std::nullopt;
-    TEST_ASSERT(pointee, "a pointer field dereferences");
-    if (pointee) {
-        TEST_ASSERT(typeNameIs(pointee->type(), "(anonymous namespace)::Shape"), "a dereferenced pointer has the pointee's static type");
-        TEST_ASSERT(pointee->address() == circle->address(), "the pointer points at the circle");
-        auto info = pointee->typeInfo();
-        TEST_ASSERT(info && !info->offsetToTop, "a complete object has no offset to top");
-        TEST_ASSERT(info && std::string_view { info->mangledName.span() } == typeid(Circle).name(), "the type_info name is what typeid gives");
-        RefPtr<TargetType> dynamicType = pointee->dynamicType();
-        TEST_ASSERT(dynamicType && typeNameIs(*dynamicType, "(anonymous namespace)::Circle"), "RTTI names the class the object really is");
-        auto realCircle = pointee->downcast();
-        TEST_ASSERT(realCircle && typeNameIs(realCircle->type(), "(anonymous namespace)::Circle"), "downcast() gives the dynamic type");
-        expectInteger(integerAt(realCircle, "radius"), 6, "a field of the dynamic type reads through the downcast");
-
-        auto neighbor = realCircle ? realCircle->field("neighbor") : std::nullopt;
-        auto square = neighbor ? neighbor->dereference() : std::nullopt;
-        auto realSquare = square ? square->downcast() : std::nullopt;
-        TEST_ASSERT(realSquare && typeNameIs(realSquare->type(), "(anonymous namespace)::Square"), "a pointer chain crosses objects");
-        if (realSquare) {
-            auto side = realSquare->field("side");
-            TEST_ASSERT(side && side->floatingPoint() == 7.5, "a double reads back");
-            expectInteger(integerAt(realSquare, "signedByte"), -9, "a signed byte sign-extends");
-        }
-    }
-
-    // A base subobject that does not start its complete object.
-    auto tagged = fixture->field("circleThatIsTagged");
-    auto taggedCircle = tagged ? tagged->dereference() : std::nullopt;
-    TEST_ASSERT(taggedCircle, "a pointer to a second base dereferences");
-    if (taggedCircle) {
-        auto info = taggedCircle->typeInfo();
-        TEST_ASSERT(info && info->offsetToTop == -static_cast<int64_t>(sizeof(Tagged)), "offset to top leads from the second base to the complete object");
-        auto complete = taggedCircle->downcast();
-        TEST_ASSERT(complete && typeNameIs(complete->type(), "(anonymous namespace)::TaggedCircle"), "downcast() from a second base finds the complete object's type");
-        if (complete) {
-            TEST_ASSERT(complete->address() == taggedCircle->address() - sizeof(Tagged), "the complete object starts before its second base");
-            expectInteger(integerAt(complete, "tag"), 0x7a67, "a field of the first base reads");
-            expectInteger(integerAt(complete, "extra"), 8, "the complete object's own field reads");
-            expectInteger(integerAt(complete, "radius"), 6, "a field of the second base reads through the complete object");
-            auto shapeBase = complete->base("(anonymous namespace)::Shape");
-            TEST_ASSERT(shapeBase && shapeBase->address() == taggedCircle->address(), "an indirect base is found at its offset");
-            expectInteger(integerAt(shapeBase, "flags"), 5, "a field of an indirect base reads");
-        }
-    }
-
-    // Virtual bases, reached from a subobject that is not the complete object.
-    auto right = fixture->field("rightOfDiamond");
-    auto rightSubobject = right ? right->dereference() : std::nullopt;
-    TEST_ASSERT(rightSubobject, "a pointer to a base with a virtual base dereferences");
-    if (rightSubobject) {
-        expectInteger(integerAt(rightSubobject, "right"), 2, "the subobject's own field reads");
-        expectInteger(integerAt(rightSubobject, "shared"), 0x5555, "a field of a virtual base is found through the complete object");
-        auto virtualBase = rightSubobject->virtualBase("(anonymous namespace)::VBase");
-        TEST_ASSERT(virtualBase, "a virtual base is found by name");
-        expectInteger(integerAt(virtualBase, "shared"), 0x5555, "the virtual base's field reads");
-        auto diamond = rightSubobject->downcast();
-        TEST_ASSERT(diamond && typeNameIs(diamond->type(), "(anonymous namespace)::Diamond"), "downcast() from the second base of a diamond");
-        if (diamond) {
-            expectInteger(integerAt(diamond, "left"), 1, "a field of the first base of a diamond reads");
-            expectInteger(integerAt(diamond, "bottom"), 3, "the diamond's own field reads");
-            auto numbers = diamond->field("numbers");
-            TEST_ASSERT(numbers && numbers->type().kind() == TargetType::Kind::Array && numbers->type().elementCount() == 4, "an array field knows its length");
-            auto third = numbers ? numbers->element(2) : std::nullopt;
-            expectInteger(third ? third->integer() : std::nullopt, 30, "an element reads at its index");
-            {
-                ExpectedErrors expectedErrors;
-                TEST_ASSERT(numbers && !numbers->element(4), "an index past the end gives nothing");
-            }
-        }
-    }
-
-    // Null and unreadable pointers are states of the heap, not errors.
-    auto nullShape = fixture->field("nullShape");
-    TEST_ASSERT(nullShape && !nullShape->dereference(), "a null pointer dereferences to nothing");
-    auto unmapped = fixture->field("unmappedShape");
-    TEST_ASSERT(unmapped, "the fixture has an unmapped pointer");
-    if (unmapped) {
-        auto unmappedValue = unmapped->dereference();
-        if constexpr (materialization == Materialization::Eager)
-            TEST_ASSERT(!unmappedValue, "an eager value of unreadable memory is nothing");
-        else {
-            TEST_ASSERT(unmappedValue, "a lazy value of unreadable memory exists until it is read");
-            TEST_ASSERT(!integerAt(unmappedValue, "flags"), "reading unreadable memory gives nothing");
-        }
-    }
-
-    // Misuse is reported, and gives nothing.
-    auto radius = circle->field("radius");
-    if (radius) {
-        ExpectedErrors expectedErrors(10);
-        TEST_ASSERT(!circle->field("nonexistent"), "a member the layout lacks");
-        TEST_ASSERT(!circle->base("(anonymous namespace)::Tagged"), "a base the class lacks");
-        TEST_ASSERT(!radius->dereference(), "dereferencing a non-pointer");
-        TEST_ASSERT(!readAs<uint8_t>(radius), "reading with the wrong size");
-        TEST_ASSERT(!radius->element(0), "indexing a non-array");
-        TEST_ASSERT(!radius->floatingPoint(), "an integer as a float");
-        TEST_ASSERT(!origin->integer(), "a struct as an integer");
-        TEST_ASSERT(!origin->typeInfo(), "the type_info of a non-polymorphic type");
-        TEST_ASSERT(!origin->dynamicType(), "the dynamic type of a non-polymorphic type");
-        TEST_ASSERT(!origin->virtualBase("(anonymous namespace)::VBase"), "a virtual base of a non-polymorphic type");
-    }
-
-    // The container: our class holding a JSC object through its base class.
-    auto container = fixture->field("container");
-    expectInteger(integerAt(container, "marker"), 0xc0ffee, "the container's own field reads");
-    auto provider = container ? container->field("provider") : std::nullopt;
-    auto pointer = provider ? provider->field("m_ptr") : std::nullopt;
-    TEST_ASSERT(pointer && pointer->type().kind() == TargetType::Kind::Pointer, "Ref's storage is seen through its typedef as a pointer");
-    auto sourceProvider = pointer ? pointer->dereference() : std::nullopt;
-    TEST_ASSERT(sourceProvider && typeNameIs(sourceProvider->type(), "JSC::SourceProvider"), "the Ref points at a JSC::SourceProvider");
-    if (!sourceProvider)
-        return;
-    auto realProvider = sourceProvider->downcast();
-    TEST_ASSERT(realProvider && typeNameIs(realProvider->type(), "JSC::StringSourceProvider"), "JavaScriptCore's RTTI and debug info name the class the object really is");
-    if (!realProvider)
-        return;
-    TEST_ASSERT_EQ(realProvider->type().byteSize(), sizeof(JSC::StringSourceProvider), "JavaScriptCore's debug info gives the class its size");
-    auto startPosition = realProvider->field("m_startPosition");
-    TEST_ASSERT(startPosition && typeNameIs(startPosition->type(), "WTF::TextPosition"), "a field of the JSC base class is found through the JSC derived class");
-    auto position = readAs<TextPosition>(startPosition);
-    TEST_ASSERT(position && *position == targetStartPosition(), "the corpse holds the target's start position");
-    auto line = startPosition ? startPosition->field("m_line") : std::nullopt;
-    expectInteger(integerAt(line, "m_zeroBasedValue"), 1234, "a WTF field two structs down reads");
+    TargetType::Layout layout = value.type().layout();
+    auto* klass = std::get_if<TargetType::Class>(&layout);
+    TEST_ASSERT(value && klass, message);
+    if (!value || !klass)
+        return std::nullopt;
+    return WTF::move(*klass);
 }
 
-void analyze(const Snapshot& snapshot, Address fixtureAddress)
+// The sum of every integer in `value`, by its layout, without following
+// pointers. A virtual base belongs to the complete object, so it is counted
+// only from there.
+int64_t integerSumOfSubobject(const TargetValue& value)
 {
-    RefPtr<TargetDebugInfo> debugInfo = TargetDebugInfo::create(snapshot);
+    return WTF::switchOn(value.type().layout(),
+        [&](const TargetType::Class& klass) {
+            int64_t sum = 0;
+            for (const TargetType::Field& field : klass.properFields)
+                sum += integerSumOfSubobject(value.field(field));
+            for (const TargetType::Base& base : klass.bases)
+                sum += integerSumOfSubobject(value.base(base));
+            return sum;
+        },
+        [&](const TargetType::Array& array) {
+            int64_t sum = 0;
+            for (size_t index = 0; index < array.count; ++index)
+                sum += integerSumOfSubobject(value.element(index));
+            return sum;
+        },
+        [&](const TargetType::Integer&) {
+            return value.integer().value_or(0);
+        },
+        [](const TargetType::Pointer&) {
+            return int64_t { 0 };
+        },
+        [](const TargetType::Other&) {
+            return int64_t { 0 };
+        });
+}
+
+int64_t integerSum(const TargetValue& value)
+{
+    int64_t sum = integerSumOfSubobject(value);
+    for (const TargetValue& virtualBase : value.virtualBases())
+        sum += integerSumOfSubobject(virtualBase);
+    return sum;
+}
+
+void checkPlainFields(const TargetValue& fixture)
+{
+    TargetValue circle = fixture.properField("circle");
+    expectInteger(circle.properField("radius").integer(), 6, "a proper field reads back");
+    {
+        ExpectedErrors expectedErrors;
+        TEST_ASSERT(!circle.properField("flags"), "a field of a base is not a proper field of the derived class");
+    }
+
+    auto circleLayout = classLayout(circle, "the circle is a class");
+    if (!circleLayout)
+        return;
+    TEST_ASSERT(circleLayout->isPolymorphic && circleLayout->bases.size() == 1 && circleLayout->virtualBases.isEmpty(), "Circle has a vptr, one base and no virtual base");
+    if (circleLayout->bases.size() != 1)
+        return;
+    TargetValue shape = circle.base(circleLayout->bases[0]);
+    TEST_ASSERT(shape && typeNameIs(shape.type(), "JSCToolsTest::(anonymous namespace)::Shape") && shape.address() == circle.address(), "the primary base starts where the object does");
+    expectInteger(shape.properField("flags").integer(), 5, "a field of a base reads through the base subobject");
+
+    TargetValue origin = shape.properField("origin");
+    TEST_ASSERT(origin && typeNameIs(origin.type(), "JSCToolsTest::(anonymous namespace)::Point"), "a field carries its declared type");
+    expectInteger(origin.properField("x").integer(), 3, "a field of a field reads back");
+    expectInteger(origin.properField("y").integer(), 4, "a field of a field reads back");
+    auto point = origin.as<Point>();
+    TEST_ASSERT(point && *point == Point { }, "a struct reads back whole");
+}
+
+void checkDynamicTypes(const TargetValue& fixture)
+{
+    TargetValue circle = fixture.properField("circle");
+    TargetValue pointee = fixture.properField("shapeThatIsACircle").dereference();
+    TEST_ASSERT(pointee && typeNameIs(pointee.type(), "JSCToolsTest::(anonymous namespace)::Shape"), "a dereferenced pointer has the pointee's static type");
+    TEST_ASSERT(pointee.address() == circle.address(), "the pointer points at the circle");
+    auto info = pointee.typeInfo();
+    TEST_ASSERT(info && !info->offsetToTop, "a complete object has no offset to top");
+    TEST_ASSERT(info && std::string_view { info->mangledName.span() } == typeid(Circle).name(), "the type_info name is what typeid gives");
+    RefPtr<TargetType> dynamicType = pointee.dynamicType();
+    TEST_ASSERT(dynamicType && typeNameIs(*dynamicType, "JSCToolsTest::(anonymous namespace)::Circle"), "RTTI names the class the object really is");
+    TargetValue realCircle = pointee.downcast();
+    TEST_ASSERT(realCircle && typeNameIs(realCircle.type(), "JSCToolsTest::(anonymous namespace)::Circle"), "downcast() gives the dynamic type");
+    expectInteger(realCircle.properField("radius").integer(), 6, "a field of the dynamic type reads through the downcast");
+
+    auto circleLayout = classLayout(realCircle, "the downcast circle is a class");
+    if (!circleLayout || circleLayout->bases.size() != 1)
+        return;
+    TargetValue square = realCircle.base(circleLayout->bases[0]).properField("neighbor").dereference().downcast();
+    TEST_ASSERT(square && typeNameIs(square.type(), "JSCToolsTest::(anonymous namespace)::Square"), "a pointer chain crosses objects");
+    auto side = square.properField("side").as<double>();
+    TEST_ASSERT(side && *side == 7.5, "a double reads back as its own type");
+    expectInteger(square.properField("signedByte").integer(), -9, "a signed byte sign-extends");
+
+    // A base subobject that does not start its complete object.
+    TargetValue taggedCircle = fixture.properField("circleThatIsTagged").dereference();
+    TEST_ASSERT(taggedCircle, "a pointer to a second base dereferences");
+    info = taggedCircle.typeInfo();
+    TEST_ASSERT(info && info->offsetToTop == -static_cast<int64_t>(sizeof(Tagged)), "offset to top leads from the second base to the complete object");
+    TargetValue complete = taggedCircle.downcast();
+    TEST_ASSERT(complete && typeNameIs(complete.type(), "JSCToolsTest::(anonymous namespace)::TaggedCircle"), "downcast() from a second base finds the complete object's type");
+    TEST_ASSERT(complete.address() == taggedCircle.address() - sizeof(Tagged), "the complete object starts before its second base");
+    expectInteger(complete.properField("extra").integer(), 8, "the complete object's own field reads");
+    auto completeLayout = classLayout(complete, "the complete object is a class");
+    if (!completeLayout)
+        return;
+    TEST_ASSERT_EQ(completeLayout->bases.size(), 2u, "TaggedCircle has two direct bases");
+    if (completeLayout->bases.size() != 2)
+        return;
+    TargetValue tagged = complete.base(completeLayout->bases[0]);
+    TargetValue secondBase = complete.base(completeLayout->bases[1]);
+    TEST_ASSERT(typeNameIs(tagged.type(), "JSCToolsTest::(anonymous namespace)::Tagged") && tagged.address() == complete.address(), "the first base starts the complete object");
+    TEST_ASSERT(typeNameIs(secondBase.type(), "JSCToolsTest::(anonymous namespace)::Circle") && secondBase.address() == taggedCircle.address(), "the second base is where the pointer pointed");
+    expectInteger(tagged.properField("tag").integer(), 0x7a67, "a field of the first base reads");
+}
+
+void checkVirtualBases(const TargetValue& fixture)
+{
+    TargetValue right = fixture.properField("rightOfDiamond").dereference();
+    TEST_ASSERT(right && typeNameIs(right.type(), "JSCToolsTest::(anonymous namespace)::Right"), "a pointer to a base with a virtual base dereferences");
+    expectInteger(right.properField("right").integer(), 2, "the subobject's own field reads");
+
+    Vector<TargetValue> virtualBases = right.virtualBases();
+    TEST_ASSERT_EQ(virtualBases.size(), 1u, "the complete object has one virtual base");
+    if (virtualBases.size() == 1) {
+        TEST_ASSERT(typeNameIs(virtualBases[0].type(), "JSCToolsTest::(anonymous namespace)::VBase"), "the virtual base is VBase");
+        expectInteger(virtualBases[0].properField("shared").integer(), 0x5555, "the virtual base's field reads");
+    }
+
+    TargetValue diamond = right.downcast();
+    TEST_ASSERT(diamond && typeNameIs(diamond.type(), "JSCToolsTest::(anonymous namespace)::Diamond"), "downcast() from the second base of a diamond");
+    expectInteger(diamond.properField("bottom").integer(), 3, "the diamond's own field reads");
+    TEST_ASSERT_EQ(integerSum(diamond), diamondIntegerSum, "visiting the layout sees every integer, the shared virtual base once");
+
+    auto diamondLayout = classLayout(diamond, "the diamond is a class");
+    if (diamondLayout) {
+        TEST_ASSERT_EQ(diamondLayout->bases.size(), 2u, "Diamond has two direct bases");
+        TEST_ASSERT_EQ(diamondLayout->virtualBases.size(), 1u, "Diamond lists its virtual base once");
+        for (const TargetType::Base& base : diamondLayout->bases)
+            TEST_ASSERT_EQ(diamond.base(base).virtualBases().size(), 1u, "a base subobject reaches the virtual base through the complete object");
+    }
+
+    TargetValue numbers = diamond.properField("numbers");
+    TargetType::Layout numbersLayout = numbers.type().layout();
+    auto* array = std::get_if<TargetType::Array>(&numbersLayout);
+    TEST_ASSERT(numbers && array && array->count == 4, "an array field knows its length");
+    expectInteger(numbers.element(2).integer(), 30, "an element reads at its index");
+    {
+        ExpectedErrors expectedErrors;
+        TEST_ASSERT(!numbers.element(4), "an index past the end gives nothing");
+    }
+}
+
+void checkFailures(const TargetValue& fixture)
+{
+    TargetValue nullShape = fixture.properField("nullShape");
+    TEST_ASSERT(nullShape && !nullShape.dereference(), "a null pointer dereferences to nothing, silently");
+
+    TargetValue unmapped = fixture.properField("unmappedShape").dereference();
+    TEST_ASSERT(unmapped, "a value in unreadable memory exists until it is read");
+    {
+        ExpectedErrors expectedErrors;
+        TEST_ASSERT(!unmapped.properField("flags").integer(), "reading unreadable memory is reported and gives nothing");
+    }
+
+    TargetValue circle = fixture.properField("circle");
+    TargetValue radius = circle.properField("radius");
+    auto circleLayout = classLayout(circle, "the circle is a class");
+    if (!circleLayout || circleLayout->bases.size() != 1)
+        return;
+    TargetValue origin = circle.base(circleLayout->bases[0]).properField("origin");
+    TEST_ASSERT(radius && origin, "the values the misuse below starts from are valid");
+
+    // Each misuse is reported once, and nothing after an invalid value reports again.
+    {
+        ExpectedErrors expectedErrors(11);
+        TEST_ASSERT(!circle.properField("nonexistent"), "a field the class lacks");
+        TEST_ASSERT(!radius.properField("x"), "a field of a non-class");
+        TEST_ASSERT(!radius.dereference(), "dereferencing a non-pointer");
+        TEST_ASSERT(!radius.as<uint8_t>(), "reading with the wrong size");
+        TEST_ASSERT(!radius.element(0), "indexing a non-array");
+        TEST_ASSERT(radius.virtualBases().isEmpty(), "the virtual bases of a non-class");
+        TEST_ASSERT(!origin.integer(), "a struct as an integer");
+        TEST_ASSERT(!origin.typeInfo(), "the type_info of a non-polymorphic type");
+        TEST_ASSERT(!origin.dynamicType(), "the dynamic type of a non-polymorphic type");
+        TEST_ASSERT(!origin.downcast(), "the downcast of a non-polymorphic type");
+        TEST_ASSERT(!circle.properField("nonexistent").properField("x").dereference().integer(), "a chain reports its first failure only");
+    }
+    TEST_ASSERT(origin.virtualBases().isEmpty(), "a plain struct has no virtual bases, and that is not a failure");
+}
+
+void checkContainer(const TargetValue& fixture)
+{
+    TargetValue container = fixture.properField("container");
+    expectInteger(container.properField("marker").integer(), 0xc0ffee, "the container's own field reads");
+    TargetValue pointer = container.properField("provider").properField("m_ptr");
+    TEST_ASSERT(pointer && std::holds_alternative<TargetType::Pointer>(pointer.type().layout()), "Ref's storage is seen through its typedef as a pointer");
+    TargetValue sourceProvider = pointer.dereference();
+    TEST_ASSERT(sourceProvider && typeNameIs(sourceProvider.type(), "JSC::SourceProvider"), "the Ref points at a JSC::SourceProvider");
+    TargetValue realProvider = sourceProvider.downcast();
+    TEST_ASSERT(realProvider && typeNameIs(realProvider.type(), "JSC::StringSourceProvider"), "JavaScriptCore's RTTI and debug info name the class the object really is");
+    if (!realProvider)
+        return;
+    TEST_ASSERT_EQ(realProvider.type().byteSize(), sizeof(JSC::StringSourceProvider), "JavaScriptCore's debug info gives the class its size");
+
+    auto providerLayout = classLayout(realProvider, "StringSourceProvider is a class");
+    if (!providerLayout || providerLayout->bases.size() != 1)
+        return;
+    TargetValue startPosition = realProvider.base(providerLayout->bases[0]).properField("m_startPosition");
+    TEST_ASSERT(startPosition && typeNameIs(startPosition.type(), "WTF::TextPosition"), "a field of the JSC base class is found through its subobject");
+    auto position = startPosition.as<TextPosition>();
+    TEST_ASSERT(position && *position == targetStartPosition(), "the corpse holds the target's start position");
+    expectInteger(startPosition.properField("m_line").properField("m_zeroBasedValue").integer(), 1234, "a WTF field two structs down reads");
+}
+
+void analyze(Snapshot& snapshot, Address fixtureAddress)
+{
+    RefPtr<SnapshotDebugInfo> debugInfo = SnapshotDebugInfo::create(snapshot);
     TEST_ASSERT(debugInfo, "liblldb opens every image of the snapshot");
     if (!debugInfo)
         return;
-    TEST_ASSERT_EQ(static_cast<size_t>(debugInfo->moduleCount()), snapshot.images().size(), "liblldb has one module per image");
 
-    RefPtr<TargetType> fixtureType = debugInfo->findType("(anonymous namespace)::TargetValueFixture");
-    TEST_ASSERT(fixtureType, "the fixture's type is in the debug info");
+    // The loader lists the executable first.
+    const Image& executable = snapshot.images()[0];
+    RefPtr<TargetType> fixtureType = debugInfo->findType("JSCToolsTest::(anonymous namespace)::TargetValueFixture", executable);
+    TEST_ASSERT(fixtureType, "the fixture's type is in the executable's debug info");
     if (!fixtureType)
         return;
     TEST_ASSERT_EQ(fixtureType->byteSize(), sizeof(TargetValueFixture), "the debug info gives the fixture its size");
-    TEST_ASSERT(fixtureType->kind() == TargetType::Kind::Class && !fixtureType->isPolymorphic(), "the fixture is a plain struct");
-
     {
-        // Every image that uses a header-only type carries a complete copy of it.
-        ExpectedErrors expectedErrors(2);
-        TEST_ASSERT(!debugInfo->findType("WTF::TextPosition"), "a type complete in more than one image is ambiguous");
-        TEST_ASSERT(!debugInfo->findType("(anonymous namespace)::NoSuchType"), "a type no image defines is missing");
+        ExpectedErrors expectedErrors;
+        TEST_ASSERT(!debugInfo->findType("JSCToolsTest::(anonymous namespace)::NoSuchType", executable), "a type the image does not define is missing");
     }
-    // dyld lists the executable first.
-    TEST_ASSERT(debugInfo->findType("WTF::TextPosition", snapshot.images()[0].path().data()), "naming the image resolves the ambiguity");
+    TEST_ASSERT(debugInfo->findType("WTF::TextPosition", executable), "a header-only type is complete in the image that uses it");
 
-    dataLogLn("    eager values");
-    checkFixture<Materialization::Eager>(snapshot, fixtureAddress, *fixtureType);
-    dataLogLn("    lazy values");
-    checkFixture<Materialization::Lazy>(snapshot, fixtureAddress, *fixtureType);
+    TargetValue fixture = TargetValue::at(snapshot, fixtureAddress, Ref { *fixtureType });
+    auto fixtureLayout = classLayout(fixture, "the fixture is a class");
+    TEST_ASSERT(fixtureLayout && !fixtureLayout->isPolymorphic && fixtureLayout->bases.isEmpty(), "the fixture is a plain struct");
 
-    auto eager = EagerTargetValue::at(snapshot, fixtureAddress, Ref<TargetType> { *fixtureType });
-    auto lazy = LazyTargetValue::at(snapshot, fixtureAddress, Ref<TargetType> { *fixtureType });
-    TEST_ASSERT(eager && lazy && eager->bytes() == lazy->bytes(), "eager and lazy values read the same bytes");
-}
-
-void attachAndAnalyze(pid_t pid, Address fixture)
-{
-    RefPtr<Process> process = Process::create(pid);
-    bool attached = process->attach();
-    TEST_ASSERT(attached, "attaching to the target process succeeds");
-    if (!attached)
-        return;
-    Snapshot snapshot(process);
-    TEST_ASSERT(snapshot.isValid(), "a snapshot of the target process is valid");
-    if (!snapshot.isValid())
-        return;
-
-    analyze(snapshot, fixture);
-}
-
-// CLAUDE: abstract away this mechanism of running a test in and out of process for both test files that do it.
-void testInThisProcess()
-{
-    TargetValueFixture fixture;
-    attachAndAnalyze(getpid(), Address { &fixture });
-}
-
-// The analysis and the target are separate processes: this process launches a
-// copy of itself as the target and takes a corpse of it.
-void testInSeparateProcess()
-{
-    // The target writes the address of its fixture to its stdout.
-    std::array<int, 2> addressPipe { -1, -1 };
-    TEST_ASSERT(!pipe(addressPipe.data()), "a pipe from the target opens");
-    auto closePipe = makeScopeExit([&] {
-        for (int fd : addressPipe) {
-            if (fd >= 0)
-                close(fd);
-        }
-    });
-    if (addressPipe[0] < 0)
-        return;
-
-    CString executablePath = Process::create(getpid())->executablePath();
-    TEST_ASSERT(!executablePath.isNull(), "this process's executable path is readable");
-    if (executablePath.isNull())
-        return;
-
-    char* const arguments[] = {
-        const_cast<char*>(executablePath.data()),
-        const_cast<char*>("--target-value-target"),
-        nullptr
-    };
-    posix_spawn_file_actions_t actions;
-    posix_spawn_file_actions_init(&actions);
-    posix_spawn_file_actions_adddup2(&actions, addressPipe[1], STDOUT_FILENO);
-    posix_spawn_file_actions_addclose(&actions, addressPipe[0]);
-    posix_spawn_file_actions_addclose(&actions, addressPipe[1]);
-    pid_t child = 0;
-    int error = posix_spawn(&child, executablePath.data(), &actions, nullptr, arguments, environ);
-    posix_spawn_file_actions_destroy(&actions);
-    TEST_ASSERT(!error, "the target process launches");
-    if (error) {
-        dataLogLn("    posix_spawn: ", safeStrerror(error));
-        return;
-    }
-    auto killChild = makeScopeExit([&] {
-        kill(child, SIGKILL);
-        while (waitpid(child, nullptr, 0) < 0 && errno == EINTR) { }
-    });
-
-    uint64_t fixture = 0;
-    bool reported = read(addressPipe[0], &fixture, sizeof(fixture)) == sizeof(fixture);
-    TEST_ASSERT(reported, "the target reports the address of its fixture");
-    if (!reported)
-        return;
-
-    attachAndAnalyze(child, Address { fixture });
+    checkPlainFields(fixture);
+    checkDynamicTypes(fixture);
+    checkVirtualBases(fixture);
+    checkFailures(fixture);
+    checkContainer(fixture);
 }
 
 } // anonymous namespace
@@ -469,41 +421,14 @@ void testTargetValue()
     if (!tracer.shouldRun())
         return;
 
-    testInThisProcess();
-    testInSeparateProcess();
+    TargetValueFixture fixture;
+    analyzeInAndOutOfProcess(Address { &fixture }, "--target-value-target", analyze);
 }
 
-int runTargetValueTarget()
+void runTargetValueTarget()
 {
     TargetValueFixture fixture;
-    auto address = reinterpret_cast<uint64_t>(&fixture);
-    if (write(STDOUT_FILENO, &address, sizeof(address)) != sizeof(address))
-        return 1;
-
-    // The analysis kills this process when it is done with the fixture.
-    while (true)
-        pause();
-}
-
-#else
-
-void testTargetValue()
-{
-    SuiteTracer tracer("TargetValue");
-    if (!tracer.shouldRun())
-        return;
-
-    // CLAUDE: abstract away this check, we only need it once. Don't duplicate the test bodies.
-#if ASSERT_ENABLED
-    TEST_ASSERT(false, "we expected to test mya_heap in this configuration");
-#else
-    skipSuite("TargetValue", "mya_heap is not enabled");
-#endif
-}
-
-int runTargetValueTarget()
-{
-    return 1;
+    parkAsCorpseTarget(Address { &fixture });
 }
 
 #endif // ENABLE(MYA_HEAP)

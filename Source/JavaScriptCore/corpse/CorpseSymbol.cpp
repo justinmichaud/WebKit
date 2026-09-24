@@ -32,6 +32,7 @@
 #include "CorpseError.h"
 #include "CorpseExportsTrie.h"
 #include "CorpseImage.h"
+#include "CorpseLimits.h"
 #include "CorpseSnapshot.h"
 
 #if OS(DARWIN)
@@ -70,25 +71,6 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(Symbol);
 // dyld exports trie and get addresses of symbols.
 
 namespace {
-
-// Sizes and counts read out of a corpse are used to bound loops and to size
-// allocations, so they are checked against these limits first. Each one is a
-// sanity check on a single value: it says the struct we read was not what we
-// thought it was, in which case the addresses in it are not worth chasing. They
-// are not a bound on the work a lookup can do, because the per-image limits
-// multiply by the image count. maxTotalBytesRead below is that bound.
-//
-// The values sit above what was empirically measured.
-constexpr size_t maxLoadCommandsSize = 128 * KB; // About 17× the measured maximum.
-constexpr size_t maxExportsTrieSize = 16 * MB; // About 8× the measured maximum.
-
-// ClAUDE: why did you remove maxImageCount? Everything we read should have a max count
-
-// A lookup that finds nothing will read every image's load commands and exports
-// trie, which measured 101 MB for the ~2,800 image process above and 0.4 MB for
-// a small one. This caps the total for one lookup, so a corpse claiming many
-// large images cannot turn a single symbol lookup into unbounded copying.
-constexpr size_t maxTotalBytesRead = 256 * MB; // About 2.5× the measured maximum.
 
 // Copies data from a corpse task's virtual address space.
 // FIXME: This is a temporary "get things to work solution", and will be replaced with
@@ -325,7 +307,7 @@ Address Symbol::lookUpName(const Snapshot& snapshot)
     mach_port_t task = snapshot.corpsePort();
 
     const Vector<Image>& images = snapshot.images();
-    CORPSE_DIAGNOSTIC_DO(m_diagnostics.images = images.size());
+    CORPSE_DIAGNOSTIC_DO(m_diagnostics.images = static_cast<unsigned>(images.size()));
     Address address;
     for (const Image& image : images) {
         address = resolveInImage(task, image.loadAddress(), name);
@@ -351,7 +333,7 @@ void Symbol::reportFailure(const Snapshot& snapshot) const
         static_cast<int>(snapshot.process()->pid()));
 
     if (!d.images) {
-        Error::report("  the snapshot lists no images, so there was nothing to search");
+        Error::report("  the snapshot lists no images (reported when they were read), so there was nothing to search");
         return;
     }
 

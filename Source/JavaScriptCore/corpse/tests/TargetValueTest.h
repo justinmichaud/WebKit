@@ -31,6 +31,6 @@ namespace JSCToolsTest {
 void testTargetValue();
 
 // Runs as the target that testTargetValue() analyzes from another process.
-int runTargetValueTarget();
+[[noreturn]] void runTargetValueTarget();
 
 } // namespace JSCToolsTest

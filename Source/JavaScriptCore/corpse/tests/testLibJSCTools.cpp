@@ -112,10 +112,12 @@ int main(int argc, char** argv)
             JSCToolsTest::verbose = true;
             continue;
         }
+#if ENABLE(MYA_HEAP)
         if (argument == "--typeinfo-target")
-            return JSCToolsTest::runTypeinfoTarget();
+            JSCToolsTest::runTypeinfoTarget();
         if (argument == "--target-value-target")
-            return JSCToolsTest::runTargetValueTarget();
+            JSCToolsTest::runTargetValueTarget();
+#endif
         if (argument == "--fuzz-trie") {
             fuzzOnly = true;
             if (index + 1 < arguments.size() && parseUint64(arguments[index + 1], fuzzSeed)) {
@@ -140,8 +142,15 @@ int main(int argc, char** argv)
     else {
         JSCToolsTest::fuzzExportsTrie(fuzzSeed, static_cast<unsigned>(fuzzIterations));
         runCorpseSuite();
+#if ENABLE(MYA_HEAP)
         JSCToolsTest::testTypeinfo();
         JSCToolsTest::testTargetValue();
+#elif ASSERT_ENABLED
+        TEST_ASSERT(false, "we expected to test mya_heap in this configuration");
+#else
+        JSCToolsTest::skipSuite("Typeinfo", "mya_heap is not enabled");
+        JSCToolsTest::skipSuite("TargetValue", "mya_heap is not enabled");
+#endif
     }
 
     dataLogLn("Ran ", JSCToolsTest::assertionsRun, " assertions, ",

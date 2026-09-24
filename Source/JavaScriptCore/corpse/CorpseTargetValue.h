@@ -39,6 +39,7 @@
 #include <wtf/RefPtr.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/Vector.h>
+#include <wtf/text/ASCIILiteral.h>
 #include <wtf/text/CString.h>
 
 namespace JSC {
@@ -47,9 +48,10 @@ namespace Corpse {
 class Snapshot;
 
 // The std::type_info of a polymorphic object, read through its vtable pointer.
-// The Itanium ABI puts the offset to the complete object and the type_info
-// pointer in the two words before the vtable's first entry.
-// CLAUDE: explain why we can assume Itanium ABI with sources. Give a source for this format.
+// libc++ and libstdc++, the C++ runtimes of macOS and Linux, both implement the
+// Itanium C++ ABI (https://itanium-cxx-abi.github.io/cxx-abi/abi.html), whose
+// vtable layout (section 2.5.2) and type_info layout (section 2.9.3) are what
+// is read here.
 struct TargetTypeInfo {
     Address vtable;
     Address typeInfo;
@@ -63,89 +65,75 @@ struct TargetTypeInfo {
     CString demangledName;
 };
 
-// CLAUDE: Simplify this by assuming lazy materialization everywhere. Future work will make that map in pages to avoid mutation.
-enum class Materialization : uint8_t {
-    // at() copies the whole object once; field() and element() slice that copy
-    // and never go back to the corpse.
-    Eager,
-    // Nothing is copied until a scalar is asked for, so one field of a large
-    // object costs one read of that field.
-    Lazy,
-};
-
-// CLAUDE: if memory could not be read, we must always report.
-
-// A mya-side view of a value or object in a corpse.
-template<Materialization materialization>
+// A value in a corpse: an address and the type to read it as. Nothing is read
+// until a scalar is asked for, so a field of a large object costs one read of
+// that field.
+//
+// A failure reports once and gives an invalid value; everything asked of an
+// invalid value is invalid or nullopt without another report, so a chain of
+// lookups reports the step that failed and nothing more.
 class TargetValue {
 public:
-    static std::optional<TargetValue> at(const Snapshot&, Address, Ref<TargetType>&&);
+    // Invalid, and silent, for a null address: a null pointer is a state of
+    // the heap, not a failure.
+    static TargetValue at(const Snapshot&, Address, Ref<TargetType>&&);
+
+    bool isValid() const { return m_isValid; }
+    explicit operator bool() const { return m_isValid; }
 
     Address address() const { return m_address; }
     const TargetType& type() const { return m_type.get(); }
     const Snapshot& snapshot() const { return *m_snapshot; }
 
-    // CLAUDE: ditto re: properField
-    // This class, then its non-virtual bases, then (through RTTI) its virtual bases.
-    std::optional<TargetValue> field(const char* name) const;
+    // Sub-values, by type().layout(). Only the fields a class declares itself
+    // are its proper fields; a base's fields are read through its subobject.
+    TargetValue properField(const char* name) const;
+    TargetValue field(const TargetType::Field&) const;
+    TargetValue base(const TargetType::Base&) const;
+    TargetValue element(size_t index) const;
 
-    // A direct or indirect non-virtual base, by qualified name.
-    std::optional<TargetValue> base(const char* name) const;
+    // The virtual bases of the complete object this value is part of, where
+    // that object puts them. A virtual base's offset depends on the dynamic
+    // type, so this is the only way to reach one.
+    Vector<TargetValue> virtualBases() const;
 
-    // A virtual base, located through the complete object's layout: the offset
-    // of a virtual base depends on the dynamic type, not the static one.
-    std::optional<TargetValue> virtualBase(const char* name) const;
-
-    // CLAUDE: ditto re: visiting
-    std::optional<TargetValue> element(size_t index) const; // Array.
-
-    std::optional<Address> pointerValue() const; // Pointer and Reference, PAC stripped.
-    std::optional<TargetValue> dereference() const; // Nullopt for a null pointer.
+    std::optional<Address> pointerValue() const; // Pointers and references, PAC stripped.
+    TargetValue dereference() const;
 
     template<typename T>
     std::optional<T> as() const
     {
         static_assert(std::is_trivially_copyable_v<T>);
         T value;
-        if (!readInto(asMutableByteSpan(value)))
+        if (!readWhole(asMutableByteSpan(value)))
             return std::nullopt;
         return value;
     }
-    std::optional<int64_t> integer() const; // Integer, Enum and Bool, by the type's width and sign.
-    std::optional<double> floatingPoint() const;
-    std::optional<Vector<uint8_t>> bytes() const;
+    std::optional<int64_t> integer() const; // By the type's width and sign.
 
-    // The three below need type().isPolymorphic().
+    // The three below need a polymorphic type.
     std::optional<TargetTypeInfo> typeInfo() const;
-    RefPtr<TargetType> dynamicType() const; // Looked up in the image the vtable is mapped in.
-    std::optional<TargetValue> downcast() const; // The complete object, as its dynamic type.
+    RefPtr<TargetType> dynamicType() const;
+    TargetValue downcast() const; // The complete object, as its dynamic type.
 
 private:
-    struct EagerStorage {
-        Vector<uint8_t> bytes;
-    };
-    struct LazyStorage { };
-    using Storage = std::conditional_t<materialization == Materialization::Eager, EagerStorage, LazyStorage>;
+    TargetValue(const Snapshot&, Address, Ref<TargetType>&&, bool isValid);
 
-    TargetValue(const Snapshot&, Address, Ref<TargetType>&&, Storage&&);
+    TargetValue invalidated() const { return TargetValue(*m_snapshot, m_address, Ref { m_type }, false); }
 
-    // CLAUDE: we should avoid reading via copies. Make sure this works in a way that will work with the future plans to have a page manager. Reading from corpse memory should be done close to the code that has a fixme for the page manager, not here.
-    // Copies exactly type().byteSize() bytes; a span of another size is reported.
-    bool readInto(std::span<uint8_t>) const;
+    // The value at `offset` within this one, reporting if it does not fit.
+    TargetValue member(size_t offset, Ref<TargetType>&&) const;
 
-    // The bytes at `offset` within this value, from the copy or from the corpse.
-    std::optional<Vector<uint8_t>> readBytes(size_t offset, size_t) const;
+    // Fills `destination`, which must be type().byteSize() long, reporting if it cannot.
+    bool readWhole(std::span<uint8_t> destination) const;
 
-    std::optional<TargetValue> member(size_t offset, Ref<TargetType>&&) const;
+    template<typename T> std::optional<T> readAt(Address, ASCIILiteral what) const;
 
     const Snapshot* m_snapshot;
     Address m_address;
     Ref<TargetType> m_type;
-    [[no_unique_address]] Storage m_storage;
+    bool m_isValid;
 };
-
-using EagerTargetValue = TargetValue<Materialization::Eager>;
-using LazyTargetValue = TargetValue<Materialization::Lazy>;
 
 } // namespace Corpse
 } // namespace JSC
