@@ -190,7 +190,12 @@ Vector<Thread> Thread::collect(const Snapshot& snapshot)
 
 const char* Thread::runStateDescription() const { return "unknown"; }
 
-Vector<Thread> Thread::collect(const Snapshot&) { return { }; }
+Vector<Thread> Thread::collect(const Snapshot& snapshot)
+{
+    if (!snapshot.isValid())
+        Error::report("Cannot read threads from an invalid snapshot");
+    return { };
+}
 
 #endif // OS(DARWIN)
 

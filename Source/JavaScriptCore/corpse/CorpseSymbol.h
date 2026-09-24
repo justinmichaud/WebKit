@@ -74,19 +74,12 @@ private:
 
 #if CORPSE_SYMBOL_LOOKUP_DIAGNOSTICS
     // How far a search got, so a failure can name the stage that fell short.
+    // CLAUDE: you missed the point of the diagnostics, we need to wire this up fully.
     struct Diagnostics {
-        bool readDyldInfo { false };
-        Address allImageInfosAddress;
-        bool readAllImageInfos { false };
-        uint32_t version { 0 };                 // dyld_all_image_infos::version.
-        Address rawImageArrayAddress;           // As stored, possibly signed.
-        Address imageArrayAddress;              // ...with any signature stripped.
-        unsigned images { 0 };                  // Images dyld reported.
-        bool implausibleImageCount { false };   // ...but too many to be believed.
-        unsigned examined { 0 };                // ...whose Mach header we read.
-        unsigned inSharedCache { 0 };           // ...of those, in the shared cache.
-        unsigned unreadableInfo { 0 };          // dyld_image_info unreadable.
-        unsigned unreadableHeader { 0 };        // Header missing or not 64-bit.
+        unsigned images { 0 }; // Images the snapshot lists.
+        unsigned examined { 0 }; // ...whose Mach header we read.
+        unsigned inSharedCache { 0 }; // ...of those, in the shared cache.
+        unsigned unreadableHeader { 0 }; // Header missing or not 64-bit.
         unsigned implausibleCommandsSize { 0 }; // sizeofcmds too large to believe.
         unsigned unreadableCommands { 0 };      // Load commands unreadable.
         unsigned withoutTrie { 0 };             // No trie, or no __TEXT/__LINKEDIT.

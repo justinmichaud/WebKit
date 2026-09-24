@@ -30,6 +30,7 @@
 #if ENABLE(MYA)
 
 #include <JavaScriptCore/CorpseAddress.h>
+#include <JavaScriptCore/CorpseImage.h>
 #include <JavaScriptCore/CorpseProcess.h>
 #include <JavaScriptCore/CorpseSymbol.h>
 #include <JavaScriptCore/CorpseThread.h>
@@ -44,6 +45,7 @@
 #include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMalloc.h>
 #include <wtf/Vector.h>
+#include <wtf/text/CString.h>
 #include <wtf/text/StringHash.h>
 #include <wtf/text/StringView.h>
 #include <wtf/text/WTFString.h>
@@ -79,6 +81,8 @@ public:
     // The threads captured in this corpse, read and cached on the first call.
     const Vector<Thread>& threads();
 
+    const Vector<Image>& images() const;
+
     // The address of `name` in this corpse, null if it is not there.
     Address symbol(const char* name);
 
@@ -96,6 +100,9 @@ public:
         return value;
     }
 
+    // Nullopt if the string could not be read fully within maxLengith.
+    std::optional<CString> readCString(Address, size_t maxLength) const;
+
 private:
     static unsigned s_nextId;
 
@@ -104,6 +111,7 @@ private:
     unsigned m_id;
 
     std::optional<Vector<Thread>> m_threads;
+    mutable std::optional<Vector<Image>> m_images;
     HashMap<String, std::unique_ptr<Symbol>> m_symbols;
 
     Snapshot* m_prev { nullptr }; // Required by DoublyLinkedListNode.

@@ -38,8 +38,11 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 namespace JSC {
 namespace Corpse {
 
+thread_local unsigned Error::s_reportCount = 0;
+
 void Error::report(const char* format, ...)
 {
+    ++s_reportCount;
     fprintf(stderr, "%s: ", Client::name().characters());
 
     va_list args;

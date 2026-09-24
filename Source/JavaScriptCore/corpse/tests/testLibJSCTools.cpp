@@ -39,6 +39,7 @@
 #include "CorpseSymbolTest.h"
 #include "CorpseThreadTest.h"
 #include "LibJSCToolsTestUtilities.h"
+#include "TargetValueTest.h"
 #include "TypeinfoTest.h"
 
 #include <stdlib.h>
@@ -61,6 +62,7 @@ void printUsage()
     dataLogLn("Usage: testLibJSCTools [--verbose] [<suite filter>]");
     dataLogLn("       testLibJSCTools --fuzz-trie [<seed> [<iterations>]]");
     dataLogLn("       testLibJSCTools --typeinfo-target");
+    dataLogLn("       testLibJSCTools --target-value-target");
     dataLogLn("");
     dataLogLn("  Runs the tests for libJavaScriptCoreTools. With a filter, only the");
     dataLogLn("  suites whose name contains it run.");
@@ -112,6 +114,8 @@ int main(int argc, char** argv)
         }
         if (argument == "--typeinfo-target")
             return JSCToolsTest::runTypeinfoTarget();
+        if (argument == "--target-value-target")
+            return JSCToolsTest::runTargetValueTarget();
         if (argument == "--fuzz-trie") {
             fuzzOnly = true;
             if (index + 1 < arguments.size() && parseUint64(arguments[index + 1], fuzzSeed)) {
@@ -137,6 +141,7 @@ int main(int argc, char** argv)
         JSCToolsTest::fuzzExportsTrie(fuzzSeed, static_cast<unsigned>(fuzzIterations));
         runCorpseSuite();
         JSCToolsTest::testTypeinfo();
+        JSCToolsTest::testTargetValue();
     }
 
     dataLogLn("Ran ", JSCToolsTest::assertionsRun, " assertions, ",

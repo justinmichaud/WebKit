@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2026 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -29,41 +29,31 @@
 
 #if ENABLE(MYA)
 
-#include <wtf/Assertions.h>
-#include <wtf/StdLibExtras.h>
+#include <JavaScriptCore/CorpseAddress.h>
+#include <wtf/Vector.h>
 #include <wtf/text/CString.h>
-#include <wtf/text/StringCommon.h>
 
 namespace JSC {
 namespace Corpse {
 
-// Reports the library's diagnostics. Messages are prefixed with the name the
-// client set via Corpse::Client, so they read as the client's own output.
-class Error {
-public:
-    static void report(const char* format, ...) WTF_ATTRIBUTE_PRINTF(1, 2);
+class Snapshot;
 
-    static unsigned reportCount() { return s_reportCount; }
+// One image (the executable or a shared library) mapped into a corpse.
+class Image {
+public:
+    const CString& path() const { return m_path; }
+    Address loadAddress() const { return m_loadAddress; } // Where the image's header landed.
 
 private:
-    static thread_local unsigned s_reportCount;
-};
+    static Vector<Image> collect(const Snapshot&);
 
-// CLAUDE: why is this needed?
-inline UTF8CString reportableString(const char* string)
-{
-    if (!string)
-        return { };
-    return UTF8CString(byteCast<char8_t>(unsafeSpan(string)));
-}
+    CString m_path;
+    Address m_loadAddress;
+
+    friend class Snapshot;
+};
 
 } // namespace Corpse
 } // namespace JSC
-
-// Error::report in the shape of SAFE_PRINTF
-#define CORPSE_REPORT(format, ...) \
-    WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN \
-    ::JSC::Corpse::Error::report(format __VA_OPT__(, SAFE_PRINTF_TYPE(__VA_ARGS__))) \
-    WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 
 #endif // ENABLE(MYA)

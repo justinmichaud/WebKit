@@ -1643,11 +1643,15 @@ if (ENABLE_MYA)
         corpse/CorpseClient.h
         corpse/CorpseError.h
         corpse/CorpseExportsTrie.h
+        corpse/CorpseImage.h
         corpse/CorpsePlatform.h
         corpse/CorpseProcess.h
         corpse/CorpseRegion.h
         corpse/CorpseSnapshot.h
         corpse/CorpseSymbol.h
+        corpse/CorpseTargetDebugInfo.h
+        corpse/CorpseTargetType.h
+        corpse/CorpseTargetValue.h
         corpse/CorpseThread.h
     )
 endif ()

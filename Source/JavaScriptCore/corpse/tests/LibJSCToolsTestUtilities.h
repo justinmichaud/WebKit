@@ -82,7 +82,21 @@ public:
 private:
     const char* m_name;
     MonotonicTime m_start;
+    unsigned m_reportsAtStart { 0 };
     bool m_shouldRun;
+};
+
+class ExpectedErrors {
+public:
+    explicit ExpectedErrors(unsigned count = 1);
+    ~ExpectedErrors();
+
+    ExpectedErrors(const ExpectedErrors&) = delete;
+    ExpectedErrors& operator=(const ExpectedErrors&) = delete;
+
+private:
+    unsigned m_count;
+    unsigned m_reportsAtStart;
 };
 
 Seconds totalSuiteTime();

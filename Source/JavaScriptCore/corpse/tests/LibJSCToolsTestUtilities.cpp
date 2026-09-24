@@ -30,6 +30,7 @@
 #include <wtf/StdLibExtras.h>
 
 #if ENABLE(MYA)
+#include <JavaScriptCore/CorpseError.h>
 #include <JavaScriptCore/CorpseProcess.h>
 #include <JavaScriptCore/CorpseSnapshot.h>
 #if OS(DARWIN)
@@ -51,6 +52,18 @@ bool verbose = false;
 
 static Seconds s_totalSuiteTime;
 
+// Reports the suite running on this thread asked for, via ExpectedErrors.
+static thread_local unsigned s_expectedReports = 0;
+
+static unsigned reportCount()
+{
+#if ENABLE(MYA)
+    return JSC::Corpse::Error::reportCount();
+#else
+    return 0;
+#endif
+}
+
 SuiteTracer::SuiteTracer(const char* name)
     : m_name(name)
     , m_shouldRun(!suiteFilter || std::string_view(name).contains(std::string_view(suiteFilter)))
@@ -59,12 +72,17 @@ SuiteTracer::SuiteTracer(const char* name)
         return;
     dataLogLn("--- ", m_name);
     m_start = MonotonicTime::now();
+    m_reportsAtStart = reportCount();
+    s_expectedReports = 0;
 }
 
 SuiteTracer::~SuiteTracer()
 {
     if (!m_shouldRun)
         return;
+
+    unsigned reported = reportCount() - m_reportsAtStart;
+    TEST_ASSERT_EQ(reported, s_expectedReports, "the library reported only the errors the suite asked for");
 
     Seconds elapsed = MonotonicTime::now() - m_start;
     s_totalSuiteTime += elapsed;
@@ -80,6 +98,20 @@ SuiteTracer::~SuiteTracer()
 Seconds totalSuiteTime()
 {
     return s_totalSuiteTime;
+}
+
+ExpectedErrors::ExpectedErrors(unsigned count)
+    : m_count(count)
+    , m_reportsAtStart(reportCount())
+{
+    dataLogLn("    (the next ", count, count == 1 ? " line is a failure" : " lines are failures", " this test asks for)");
+}
+
+ExpectedErrors::~ExpectedErrors()
+{
+    unsigned reported = reportCount() - m_reportsAtStart;
+    TEST_ASSERT_EQ(reported, m_count, "the library reported exactly the errors this test asked for");
+    s_expectedReports += reported;
 }
 
 void skipSuite(const char* name, const char* why)

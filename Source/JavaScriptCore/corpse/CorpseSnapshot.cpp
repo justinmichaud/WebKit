@@ -30,6 +30,9 @@
 
 #include "CorpseError.h"
 
+#include <algorithm>
+#include <array>
+#include <wtf/StdLibExtras.h>
 #if OS(DARWIN)
 #include <mach/mach.h>
 #include <mach/mach_error.h>
@@ -53,6 +56,43 @@ const Vector<Thread>& Snapshot::threads()
     if (!m_threads)
         m_threads = Thread::collect(*this);
     return *m_threads;
+}
+
+const Vector<Image>& Snapshot::images() const
+{
+    if (!m_images)
+        m_images = Image::collect(*this);
+    return *m_images;
+}
+
+// CLAUDE: This can be simplified
+std::optional<CString> Snapshot::readCString(Address address, size_t maxLength) const
+{
+    Vector<char> characters;
+    std::array<uint8_t, 64> chunk;
+    for (size_t offset = 0; offset < maxLength; offset += chunk.size()) {
+        size_t wanted = std::min(chunk.size(), maxLength - offset);
+        std::span<uint8_t> got = read(address + offset, std::span { chunk }.first(wanted));
+        if (got.empty()) {
+            // The string may end just short of an unmapped page, in which case
+            // the chunk fails as a whole while its first bytes are readable.
+            for (size_t index = 0; index < wanted; ++index) {
+                auto byte = read<uint8_t>(address + offset + index);
+                if (!byte)
+                    return std::nullopt;
+                if (!*byte)
+                    return UTF8CString(byteCast<char8_t>(characters.span()));
+                characters.append(static_cast<char>(*byte));
+            }
+            continue;
+        }
+        for (uint8_t byte : got) {
+            if (!byte)
+                return UTF8CString(byteCast<char8_t>(characters.span()));
+            characters.append(static_cast<char>(byte));
+        }
+    }
+    return std::nullopt;
 }
 
 Address Snapshot::symbol(const char* name)
