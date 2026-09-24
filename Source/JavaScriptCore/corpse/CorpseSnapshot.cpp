@@ -30,8 +30,10 @@
 
 #include "CorpseError.h"
 
+#if OS(DARWIN)
 #include <mach/mach.h>
 #include <mach/mach_error.h>
+#endif
 #include <wtf/TZoneMallocInlines.h>
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
@@ -42,6 +44,8 @@ namespace Corpse {
 WTF_MAKE_TZONE_ALLOCATED_IMPL(Snapshot);
 
 unsigned Snapshot::s_nextId = 1;
+
+#if OS(DARWIN)
 
 // Returns MACH_PORT_NULL if the snapshot could not be taken, having reported why.
 static mach_port_t takeSnapshot(Process* process)
@@ -66,6 +70,20 @@ static mach_port_t takeSnapshot(Process* process)
     return MACH_PORT_NULL;
 }
 
+#else
+
+// FIXME: Take a corpse on Linux. Until then a snapshot reads the live process.
+static TaskHandle takeSnapshot(Process* process)
+{
+    if (!process || !process->isAttached()) {
+        Error::report("Could not snapshot: No process attached");
+        return invalidTaskHandle;
+    }
+    return process->taskPort();
+}
+
+#endif // OS(DARWIN)
+
 Snapshot::Snapshot(RefPtr<Process> process)
     : m_process(WTF::move(process))
     , m_corpsePort(takeSnapshot(m_process.get()))
@@ -76,8 +94,10 @@ Snapshot::Snapshot(RefPtr<Process> process)
 
 Snapshot::~Snapshot()
 {
+#if OS(DARWIN)
     if (isValid())
         mach_port_deallocate(mach_task_self(), m_corpsePort);
+#endif
 }
 
 const Vector<Thread>& Snapshot::threads()

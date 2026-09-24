@@ -177,9 +177,10 @@ macro(WEBKIT_OPTION_BEGIN)
     endif ()
 
     if (NOT DEFINED ENABLE_JAVASCRIPTCORE_TOOLS)
-        # Currently, libJavaScriptCoreTools relies on Mach API (for the corpse code). Hence,
-        # only Apple platforms are supported. Simulators and MacCatalyst are not supported by design.
+        # Simulators and MacCatalyst are not supported by design.
         if (APPLE AND NOT WEBKIT_SDK_IS_SIMULATOR AND NOT WEBKIT_SDK_IS_MACCATALYST)
+            set(ENABLE_JAVASCRIPTCORE_TOOLS ON)
+        elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND DEVELOPER_MODE AND CMAKE_SIZEOF_VOID_P EQUAL 8)
             set(ENABLE_JAVASCRIPTCORE_TOOLS ON)
         else ()
             set(ENABLE_JAVASCRIPTCORE_TOOLS OFF)

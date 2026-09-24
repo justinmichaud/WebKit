@@ -36,9 +36,9 @@
 #include <JavaScriptCore/CorpseSymbol.h>
 #include <dlfcn.h>
 #include <errno.h>
-#include <limits.h>
-#include <mach-o/dyld.h>
+#if OS(DARWIN)
 #include <mach/mach.h>
+#endif
 #include <spawn.h>
 #include <stdlib.h>
 #include <string>
@@ -61,11 +61,10 @@ using JSC::Corpse::Symbol;
 
 static std::string helperPath()
 {
-    char buffer[PATH_MAX];
-    uint32_t size = sizeof buffer;
-    if (_NSGetExecutablePath(buffer, &size))
+    UTF8CString executable = Process::create(getpid())->executablePath();
+    if (executable.isNull())
         return { };
-    std::string path(buffer);
+    std::string path(executable.legacyCStringPointer());
     size_t slash = path.find_last_of('/');
     if (slash == std::string::npos)
         return { };
@@ -121,6 +120,8 @@ void testSymbol()
 {
     SuiteTracer tracer("Symbol");
     if (!tracer.shouldRun())
+        return;
+    if (linuxSkip("Symbol", "corpses are not implemented on Linux yet"))
         return;
 
     SelfSnapshot self;

@@ -32,10 +32,12 @@
 #include "CorpseExportsTrie.h"
 #include "CorpseSnapshot.h"
 
+#if OS(DARWIN)
 #include <mach-o/dyld_images.h>
 #include <mach-o/loader.h>
 #include <mach/mach.h>
 #include <mach/task_info.h>
+#endif
 #include <optional>
 #include <span>
 #include <string.h>
@@ -55,6 +57,8 @@ namespace JSC {
 namespace Corpse {
 
 WTF_MAKE_TZONE_ALLOCATED_IMPL(Symbol);
+
+#if OS(DARWIN)
 
 // It is assumed that this corpse analysis library is built with the same SDK targeting
 // the same OS that the corpse binary is built for. While the corpse gives us the data
@@ -420,6 +424,16 @@ void Symbol::reportFailure(const Snapshot& snapshot) const
 }
 
 #endif // CORPSE_SYMBOL_LOOKUP_DIAGNOSTICS
+
+#else
+
+// FIXME: Look symbols up in ELF images.
+Address Symbol::lookUpName(Snapshot&)
+{
+    return { };
+}
+
+#endif // OS(DARWIN)
 
 Symbol::Symbol(Snapshot& snapshot, const char* name)
     : m_name(name ? name : "")

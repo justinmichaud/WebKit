@@ -595,15 +595,15 @@ private:
             row.cells[4] = buffer;
             if (thread.stackPointer()) {
                 snprintf(buffer, sizeof(buffer), "0x%llx",
-                    thread.stackPointer().toMachVMAddress());
+                    static_cast<unsigned long long>(thread.stackPointer().toMachVMAddress()));
                 row.cells[5] = buffer;
             } else
                 row.cells[5] = "-";
             if (thread.hasStack()) {
                 const auto& stack = thread.stackRegion();
                 snprintf(buffer, sizeof(buffer), "0x%llx-0x%llx",
-                    stack.base().toMachVMAddress(),
-                    stack.end().toMachVMAddress());
+                    static_cast<unsigned long long>(stack.base().toMachVMAddress()),
+                    static_cast<unsigned long long>(stack.end().toMachVMAddress()));
                 row.cells[6] = buffer;
                 formatByteSize(stack.size(), buffer, sizeof(buffer));
                 row.cells[7] = buffer;
@@ -716,9 +716,9 @@ private:
             return;
         }
         if (hex)
-            printf("&%s = 0x%llx\n", name.c_str(), address.toMachVMAddress());
+            printf("&%s = 0x%llx\n", name.c_str(), static_cast<unsigned long long>(address.toMachVMAddress()));
         else
-            printf("&%s = %llu\n", name.c_str(), address.toMachVMAddress());
+            printf("&%s = %llu\n", name.c_str(), static_cast<unsigned long long>(address.toMachVMAddress()));
     }
 
     // Releases resources without extra output. Dropping the current selection

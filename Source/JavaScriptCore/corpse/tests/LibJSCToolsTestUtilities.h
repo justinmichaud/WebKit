@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2026 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -27,7 +28,6 @@
 
 #if ENABLE(LIB_JSC_TOOLS)
 
-#include <mach/mach.h>
 #include <memory>
 #include <span>
 #include <stdint.h>
@@ -39,6 +39,12 @@
 #include <wtf/RefPtr.h>
 #include <wtf/Seconds.h>
 #include <wtf/Vector.h>
+
+#if OS(DARWIN)
+#include <mach/mach.h>
+#endif
+
+#include <JavaScriptCore/CorpseAddress.h>
 
 namespace JSC {
 namespace Corpse {
@@ -60,6 +66,9 @@ extern const char* suiteFilter;
 extern bool verbose;
 
 void skipSuite(const char* name, const char* why);
+
+bool linuxSkip(const char* name, const char* why);
+
 
 // Announces a suite, times it, and reports on the way out. Destroyed on every path out
 // of a suite, including the early returns a suite takes when it cannot set itself up.
@@ -120,6 +129,8 @@ Seconds totalSuiteTime();
         } \
     } while (0)
 
+#if OS(DARWIN)
+
 // The number of names in this task's Mach port name space. Used to show that a
 // sequence of operations leaves no port behind.
 unsigned machPortNameCount();
@@ -129,6 +140,8 @@ unsigned machPortNameCount();
 // under that same name rather than a new name, so a right that is taken and never
 // given back shows up here and not in machPortNameCount().
 unsigned machPortSendRightCount(mach_port_t);
+
+#endif // OS(DARWIN)
 
 // Kills a child this process spawned and reaps it, so that it neither outlives the
 // test nor lingers as a zombie.
@@ -165,7 +178,11 @@ public:
 
     // pthread keeps a thread name in a fixed buffer, so a longer name arrives cut
     // to this length.
+#if OS(DARWIN)
     static constexpr size_t maximumNameLength = 63;
+#else
+    static constexpr size_t maximumNameLength = 15;
+#endif
 
     ~ParkedThreads();
 

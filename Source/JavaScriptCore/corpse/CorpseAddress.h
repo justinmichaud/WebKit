@@ -31,7 +31,6 @@
 #include <compare>
 #include <cstddef>
 #include <limits>
-#include <mach/mach.h>
 #include <stdint.h>
 #include <wtf/HashFunctions.h>
 #include <wtf/HashTraits.h>
@@ -48,17 +47,17 @@ namespace Corpse {
 class Address {
 public:
     Address() = default;
-    explicit Address(mach_vm_address_t value)
+    explicit constexpr Address(uint64_t value)
         : m_value(value)
     {
     }
 
     explicit Address(const void* pointer)
-        : m_value(reinterpret_cast<mach_vm_address_t>(pointer))
+        : m_value(reinterpret_cast<uint64_t>(pointer))
     {
     }
 
-    mach_vm_address_t toMachVMAddress() const { return m_value; }
+    uint64_t toMachVMAddress() const { return m_value; }
     explicit operator bool() const { return m_value; }
     template<typename T> explicit operator T() const = delete;
 
@@ -94,10 +93,10 @@ public:
 
     uint64_t operator-(Address other) const { return m_value - other.m_value; }
 
-    static constexpr Address deletedValue() { return Address(std::numeric_limits<mach_vm_address_t>::max()); }
+    static constexpr Address deletedValue() { return Address(std::numeric_limits<uint64_t>::max()); }
 
 private:
-    mach_vm_address_t m_value { 0 };
+    uint64_t m_value { 0 };
 };
 
 } // namespace Corpse

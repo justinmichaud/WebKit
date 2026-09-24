@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2026 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -28,10 +29,14 @@
 
 #if ENABLE(LIB_JSC_TOOLS)
 
+#if OS(DARWIN)
 #include <mach/mach_vm.h>
+#endif
 
 namespace JSC {
 namespace Corpse {
+
+#if OS(DARWIN)
 
 uint64_t Region::pageCount() const
 {
@@ -68,6 +73,14 @@ std::optional<Region> Region::findContaining(mach_port_t task, Address address)
     region.m_dirtyPageCount = info.pages_dirtied;
     return region;
 }
+
+#else
+
+uint64_t Region::pageCount() const { return 0; }
+
+std::optional<Region> Region::findContaining(TaskHandle, Address) { return std::nullopt; }
+
+#endif // OS(DARWIN)
 
 } // namespace Corpse
 } // namespace JSC
