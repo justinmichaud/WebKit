@@ -59,6 +59,14 @@ constexpr size_t maxPathLength = 4 * KB; // PATH_MAX on Darwin and on Linux.
 // large images cannot turn a single symbol lookup into unbounded mapping.
 constexpr size_t maxTotalBytesRead = 256 * MB; // About 2.5× the measured maximum.
 
+// A mangled name out of a type_info.
+constexpr size_t maxTypeNameLength = 4 * KB;
+
+// A JS heap holds a few hundred BlockDirectories, and no Vector walked out of
+// it comes near these element counts.
+constexpr unsigned maxBlockDirectories = 64 * 1024;
+constexpr unsigned maxVectorSize = 16 * 1024 * 1024;
+
 } // namespace Corpse
 } // namespace JSC
 

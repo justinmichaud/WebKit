@@ -78,15 +78,22 @@ const Vector<Image>& Snapshot::images()
 
 std::optional<CString> Snapshot::copyCString(Address address, size_t maxLength)
 {
+    // Read a page at a time, so that a string that runs up to an unmapped page
+    // is still read up to the end of its own page.
     Vector<char> characters;
     size_t pageSize = Memory::pageSize();
-    size_t toPageEnd = pageSize - (address.toTargetVMAddress() & (pageSize - 1));
-    maxLength = std::min(toPageEnd, maxLength);
-    auto chunk = m_memory.span<char>(address, maxLength);
-    if (!chunk)
-        return std::nullopt;
-    size_t length = std::ranges::find(chunk, '\0') - chunk.begin();
-    return UTF8CString(byteCast<char8_t>(chunk.first(length)));
+    while (characters.size() < maxLength) {
+        Address next = address + characters.size();
+        size_t toPageEnd = pageSize - (next.toTargetVMAddress() & (pageSize - 1));
+        auto chunk = m_memory.span<char>(next, std::min(toPageEnd, maxLength - characters.size()));
+        if (!chunk)
+            return std::nullopt;
+        auto terminator = std::ranges::find(chunk, '\0');
+        characters.append(std::span<const char> { chunk.begin(), terminator });
+        if (terminator != chunk.end())
+            return UTF8CString(byteCast<char8_t>(characters.span()));
+    }
+    return std::nullopt;
 }
 
 #if OS(DARWIN)

@@ -81,6 +81,8 @@ void testSnapshot();
 void testThreads();
 void fuzzExportsTrie(uint64_t seed, unsigned iterations);
 void testTypeinfo();
+void testTargetValue();
+void testHeapWalk();
 
 // Announces a suite, times it, and reports on the way out. Destroyed on every path out
 // of a suite, including the early returns a suite takes when it cannot set itself up.

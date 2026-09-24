@@ -135,6 +135,8 @@ int main(int argc, char** argv)
         JSCToolsTest::fuzzExportsTrie(fuzzSeed, static_cast<unsigned>(fuzzIterations));
         runCorpseSuite();
         JSCToolsTest::testTypeinfo();
+        JSCToolsTest::testTargetValue();
+        JSCToolsTest::testHeapWalk();
     }
 
     dataLogLn("Ran ", JSCToolsTest::assertionsRun, " assertions, ",
