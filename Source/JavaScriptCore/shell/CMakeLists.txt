@@ -132,6 +132,18 @@ if (DEVELOPER_MODE)
             list(APPEND testLibJSCTools_LIBRARIES LLDB::LLDB)
         endif ()
 
+        set(testLibJSCTools_CODE_SIGN_ENTITLEMENTS ${CMAKE_CURRENT_BINARY_DIR}/testLibJSCTools.entitlements)
+        add_custom_command(
+            OUTPUT ${testLibJSCTools_CODE_SIGN_ENTITLEMENTS}
+            COMMAND env
+                PRODUCT_NAME=testLibJSCTools
+                RC_XBS=
+                WK_PLATFORM_NAME=macosx
+                WK_PROCESSED_XCENT_FILE=${testLibJSCTools_CODE_SIGN_ENTITLEMENTS}
+                ${JAVASCRIPTCORE_DIR}/Scripts/process-entitlements.sh
+            DEPENDS ${JAVASCRIPTCORE_DIR}/Scripts/process-entitlements.sh
+            VERBATIM)
+        list(APPEND testLibJSCTools_SOURCES ${testLibJSCTools_CODE_SIGN_ENTITLEMENTS})
     endif ()
 
     set(testwasmdebugger_SOURCES
