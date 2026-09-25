@@ -1,5 +1,4 @@
 /*
- * Copyright (C) 2026 Apple Inc. All rights reserved.
  * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -31,53 +30,33 @@
 #if ENABLE(MYA)
 
 #include <JavaScriptCore/CorpseAddress.h>
-#include <JavaScriptCore/CorpseError.h>
-#include <stdint.h>
-#include <string>
-#include <string_view>
-#include <wtf/TZoneMalloc.h>
+#include <wtf/Vector.h>
+#include <wtf/text/CString.h>
 
 namespace JSC {
 namespace Corpse {
 
 class Snapshot;
 
-// A symbol looked up in a corpse by name. The lookup happens on construction,
-// and a name that is not found is reported with how far the search got.
-//
-// Only regular and absolute exports are read out of an image's trie. A re-export is
-// skipped rather than followed, so a name that one image re-exports resolves in the
-// image that defines it, as long as that image is loaded in the corpse. A
-// thread-local is not found at all.
-//
-// A re-export may also rename, and then no image exports the name at all: memcpy
-// exists only as libsystem_c's re-export of __platform_memmove from
-// libsystem_platform, so a lookup of memcpy finds nothing while a lookup of
-// __platform_memmove succeeds.
-class Symbol {
-    WTF_MAKE_TZONE_ALLOCATED(Symbol);
+// One image (the executable or a shared library) mapped into a corpse.
+class Image {
 public:
-    Symbol(Snapshot&, const char* name);
-
-    const std::string& name() const { return m_name; }
-
-    Address address() const { return m_address; } // Null means not found.
-    bool isValid() const { return static_cast<bool>(m_address); }
+    const CString& path() const { return m_path; }
+    Address loadAddress() const { return m_loadAddress; } // Where the image's header landed.
 
 private:
-    Address lookUpName(Snapshot&);
-    Address resolveInImage(TaskHandle, Address loadAddress, std::string_view name, Diagnostics&);
-#if OS(DARWIN)
-    bool hasReadBudget(size_t length, Diagnostics&);
-#endif
+    Image(CString&& path, Address loadAddress)
+        : m_path(WTF::move(path))
+        , m_loadAddress(loadAddress)
+    {
+    }
 
-    std::string m_name;
-    Address m_address;
+    static Vector<Image> collect(const Snapshot&);
 
-#if OS(DARWIN)
-    // What this lookup may still copy out of the corpse. Set when the search starts.
-    size_t m_readBudget { 0 };
-#endif
+    CString m_path;
+    Address m_loadAddress;
+
+    friend class Snapshot;
 };
 
 } // namespace Corpse

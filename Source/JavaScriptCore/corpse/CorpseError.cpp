@@ -32,21 +32,100 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <wtf/StdLibExtras.h>
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
 namespace JSC {
 namespace Corpse {
 
+thread_local unsigned Error::s_reportCount = 0;
+thread_local Diagnostics* Diagnostics::s_current = nullptr;
+
+static CString formatted(const char* format, va_list arguments) WTF_ATTRIBUTE_PRINTF(1, 0);
+static CString formatted(const char* format, va_list arguments)
+{
+    va_list measuring;
+    va_copy(measuring, arguments);
+    int length = vsnprintf(nullptr, 0, format, measuring);
+    va_end(measuring);
+    if (length < 0)
+        return { };
+    Vector<char> buffer(static_cast<size_t>(length) + 1);
+    vsnprintf(buffer.mutableSpan().data(), buffer.size(), format, arguments);
+    return UTF8CString(byteCast<char8_t>(buffer.span().first(static_cast<size_t>(length))));
+}
+
 void Error::report(const char* format, ...)
 {
-    fprintf(stderr, "%s: ", Client::name().characters());
+    ++s_reportCount;
+    SAFE_FPRINTF(stderr, "%s: ", Client::name());
 
     va_list args;
     va_start(args, format);
     vfprintf(stderr, format, args);
     va_end(args);
 
+    fputc('\n', stderr);
+
+    for (const Diagnostics* scope = Diagnostics::s_current; scope; scope = scope->m_parent)
+        scope->print();
+}
+
+Diagnostics::Diagnostics(const char* format, ...)
+    : m_parent(s_current)
+{
+    va_list args;
+    va_start(args, format);
+    m_operation = formatted(format, args);
+    va_end(args);
+    s_current = this;
+}
+
+Diagnostics::~Diagnostics()
+{
+    ASSERT(s_current == this);
+    s_current = m_parent;
+}
+
+void Diagnostics::count(ASCIILiteral what, uint64_t by)
+{
+    for (auto& counter : m_counters) {
+        if (counter.first == what) {
+            counter.second += by;
+            return;
+        }
+    }
+    m_counters.append({ what, by });
+}
+
+uint64_t Diagnostics::total(ASCIILiteral what) const
+{
+    for (auto& counter : m_counters) {
+        if (counter.first == what)
+            return counter.second;
+    }
+    return 0;
+}
+
+void Diagnostics::note(const char* format, ...)
+{
+    va_list args;
+    va_start(args, format);
+    m_notes.append(formatted(format, args));
+    va_end(args);
+}
+
+void Diagnostics::print() const
+{
+    SAFE_FPRINTF(stderr, "%s:   while %s", Client::name(), m_operation);
+    ASCIILiteral separator = ": "_s;
+    for (auto& [what, value] : m_counters) {
+        SAFE_FPRINTF(stderr, "%s%s %llu", separator, what, static_cast<unsigned long long>(value));
+        separator = ", "_s;
+    }
+    for (auto& note : m_notes)
+        SAFE_FPRINTF(stderr, "; %s", note);
     fputc('\n', stderr);
 }
 

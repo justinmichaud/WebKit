@@ -328,6 +328,9 @@ if (COMPILER_IS_GCC_OR_CLANG AND NOT MSVC)
     # Don't give -Wall to clang-cl because clang-cl treats /Wall and -Wall as -Weverything.
     # -Wall and -Wextra should be specified before -Wno-* for Clang.
     WEBKIT_PREPEND_GLOBAL_COMPILER_FLAGS(-Wall -Wextra)
+    # Matches GCC_WARN_NON_VIRTUAL_DESTRUCTOR in the Xcode configurations. mya
+    # finds an object's class through the destructor in its vtable.
+    WEBKIT_PREPEND_GLOBAL_CXX_FLAGS(-Wnon-virtual-dtor)
 endif ()
 
 # Ninja tricks compilers into turning off color support.

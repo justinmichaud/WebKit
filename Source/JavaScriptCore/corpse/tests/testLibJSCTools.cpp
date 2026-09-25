@@ -51,7 +51,7 @@ void printUsage()
 {
     dataLogLn("Usage: testLibJSCTools [--verbose] [<suite filter>]");
     dataLogLn("       testLibJSCTools --fuzz-trie [<seed> [<iterations>]]");
-    dataLogLn("       testLibJSCTools --typeinfo-target");
+    dataLogLn("       testLibJSCTools --target-value-target");
     dataLogLn("");
     dataLogLn("  Runs the tests for libJavaScriptCoreTools. With a filter, only the");
     dataLogLn("  suites whose name contains it run.");
@@ -101,8 +101,10 @@ int main(int argc, char** argv)
             JSCToolsTest::verbose = true;
             continue;
         }
-        if (argument == "--typeinfo-target")
-            return JSCToolsTest::runTypeinfoTarget();
+#if ENABLE(MYA_HEAP)
+        if (argument == "--target-value-target")
+            JSCToolsTest::runTargetValueTarget();
+#endif
         if (argument == "--fuzz-trie") {
             fuzzOnly = true;
             if (index + 1 < arguments.size() && parseUint64(arguments[index + 1], fuzzSeed)) {
@@ -127,7 +129,13 @@ int main(int argc, char** argv)
     else {
         JSCToolsTest::fuzzExportsTrie(fuzzSeed, static_cast<unsigned>(fuzzIterations));
         runCorpseSuite();
-        JSCToolsTest::testTypeinfo();
+#if ENABLE(MYA_HEAP)
+        JSCToolsTest::testTargetValue();
+#elif ASSERT_ENABLED
+        TEST_ASSERT(false, "we expected to test mya_heap in this configuration");
+#else
+        JSCToolsTest::skipSuite("TargetValue", "mya_heap is not enabled");
+#endif
     }
 
     dataLogLn("Ran ", JSCToolsTest::assertionsRun, " assertions, ",

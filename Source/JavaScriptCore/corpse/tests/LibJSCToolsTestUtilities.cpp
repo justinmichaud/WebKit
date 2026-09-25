@@ -30,15 +30,26 @@
 #include <wtf/StdLibExtras.h>
 
 #if ENABLE(MYA)
+#include <JavaScriptCore/CorpseError.h>
 #include <JavaScriptCore/CorpseProcess.h>
 #include <JavaScriptCore/CorpseSnapshot.h>
 #if OS(DARWIN)
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #endif
+#include <array>
+#include <errno.h>
 #include <pthread.h>
+#include <signal.h>
+#include <spawn.h>
+#include <stdlib.h>
 #include <string>
+#include <sys/wait.h>
 #include <unistd.h>
+#include <wtf/SafeStrerror.h>
+#include <wtf/Scope.h>
+
+extern char** environ;
 #endif
 
 namespace JSCToolsTest {
@@ -51,6 +62,18 @@ bool verbose = false;
 
 static Seconds s_totalSuiteTime;
 
+// Reports the suite running on this thread asked for, via ExpectedErrors.
+static thread_local unsigned s_expectedReports = 0;
+
+static unsigned reportCount()
+{
+#if ENABLE(MYA)
+    return JSC::Corpse::Error::reportCount();
+#else
+    return 0;
+#endif
+}
+
 SuiteTracer::SuiteTracer(const char* name)
     : m_name(name)
     , m_shouldRun(!suiteFilter || std::string_view(name).contains(std::string_view(suiteFilter)))
@@ -59,12 +82,17 @@ SuiteTracer::SuiteTracer(const char* name)
         return;
     dataLogLn("--- ", m_name);
     m_start = MonotonicTime::now();
+    m_reportsAtStart = reportCount();
+    s_expectedReports = 0;
 }
 
 SuiteTracer::~SuiteTracer()
 {
     if (!m_shouldRun)
         return;
+
+    unsigned reported = reportCount() - m_reportsAtStart;
+    TEST_ASSERT_EQ(reported, s_expectedReports, "the library reported only the errors the suite asked for");
 
     Seconds elapsed = MonotonicTime::now() - m_start;
     s_totalSuiteTime += elapsed;
@@ -80,6 +108,20 @@ SuiteTracer::~SuiteTracer()
 Seconds totalSuiteTime()
 {
     return s_totalSuiteTime;
+}
+
+ExpectedErrors::ExpectedErrors(unsigned count)
+    : m_count(count)
+    , m_reportsAtStart(reportCount())
+{
+    dataLogLn("    (the next ", count, count == 1 ? " line is a failure" : " lines are failures", " this test asks for)");
+}
+
+ExpectedErrors::~ExpectedErrors()
+{
+    unsigned reported = reportCount() - m_reportsAtStart;
+    TEST_ASSERT_EQ(reported, m_count, "the library reported exactly the errors this test asked for");
+    s_expectedReports += reported;
 }
 
 void skipSuite(const char* name, const char* why)
@@ -251,6 +293,83 @@ void ParkedThreads::stopAndJoin()
     parkStopping = false;
     parkedCount = 0;
     pthread_mutex_unlock(&parkMutex);
+}
+
+static void attachAndAnalyze(pid_t pid, JSC::Corpse::Address fixture, void (*analyze)(JSC::Corpse::Snapshot&, JSC::Corpse::Address))
+{
+    RefPtr<JSC::Corpse::Process> process = JSC::Corpse::Process::create(pid);
+    bool attached = process->attach();
+    TEST_ASSERT(attached, "attaching to the target process succeeds");
+    if (!attached)
+        return;
+    JSC::Corpse::Snapshot snapshot(process);
+    TEST_ASSERT(snapshot.isValid(), "a snapshot of the target process is valid");
+    if (!snapshot.isValid())
+        return;
+
+    analyze(snapshot, fixture);
+}
+
+void analyzeInAndOutOfProcess(JSC::Corpse::Address fixture, const char* targetArgument, void (*analyze)(JSC::Corpse::Snapshot&, JSC::Corpse::Address))
+{
+    attachAndAnalyze(getpid(), fixture, analyze);
+
+    // The target writes the address of its fixture to its stdout.
+    std::array<int, 2> addressPipe { -1, -1 };
+    TEST_ASSERT(!pipe(addressPipe.data()), "a pipe from the target opens");
+    auto closePipe = makeScopeExit([&] {
+        for (int fd : addressPipe) {
+            if (fd >= 0)
+                close(fd);
+        }
+    });
+    if (addressPipe[0] < 0)
+        return;
+
+    CString executablePath = JSC::Corpse::Process::create(getpid())->executablePath();
+    TEST_ASSERT(!executablePath.isNull(), "this process's executable path is readable");
+    if (executablePath.isNull())
+        return;
+
+    char* const arguments[] = {
+        const_cast<char*>(executablePath.data()),
+        const_cast<char*>(targetArgument),
+        nullptr
+    };
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_adddup2(&actions, addressPipe[1], STDOUT_FILENO);
+    posix_spawn_file_actions_addclose(&actions, addressPipe[0]);
+    posix_spawn_file_actions_addclose(&actions, addressPipe[1]);
+    pid_t child = 0;
+    int error = posix_spawn(&child, executablePath.data(), &actions, nullptr, arguments, environ);
+    posix_spawn_file_actions_destroy(&actions);
+    TEST_ASSERT(!error, "the target process launches");
+    if (error) {
+        dataLogLn("    posix_spawn: ", safeStrerror(error));
+        return;
+    }
+    auto killChild = makeScopeExit([&] {
+        kill(child, SIGKILL);
+        while (waitpid(child, nullptr, 0) < 0 && errno == EINTR) { }
+    });
+
+    uint64_t targetFixture = 0;
+    bool reported = read(addressPipe[0], &targetFixture, sizeof(targetFixture)) == sizeof(targetFixture);
+    TEST_ASSERT(reported, "the target reports the address of its fixture");
+    if (!reported)
+        return;
+
+    attachAndAnalyze(child, JSC::Corpse::Address { targetFixture }, analyze);
+}
+
+void parkAsCorpseTarget(JSC::Corpse::Address fixture)
+{
+    uint64_t address = fixture.toTargetVMAddress();
+    if (write(STDOUT_FILENO, &address, sizeof(address)) != sizeof(address))
+        exit(1);
+    while (true)
+        pause();
 }
 
 #endif // ENABLE(MYA)

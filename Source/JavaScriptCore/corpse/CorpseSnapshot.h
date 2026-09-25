@@ -30,6 +30,7 @@
 #if ENABLE(MYA)
 
 #include <JavaScriptCore/CorpseAddress.h>
+#include <JavaScriptCore/CorpseImage.h>
 #include <JavaScriptCore/CorpseProcess.h>
 #include <JavaScriptCore/CorpseSymbol.h>
 #include <JavaScriptCore/CorpseThread.h>
@@ -44,6 +45,7 @@
 #include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMalloc.h>
 #include <wtf/Vector.h>
+#include <wtf/text/CString.h>
 #include <wtf/text/StringHash.h>
 #include <wtf/text/StringView.h>
 #include <wtf/text/WTFString.h>
@@ -76,10 +78,11 @@ public:
     Process* process() const { return m_process.get(); }
     TaskHandle corpsePort() const { return m_corpsePort; }
 
-    // The threads captured in this corpse, read and cached on the first call.
+    // The threads and images captured in this corpse, read and cached on the first call.
     const Vector<Thread>& threads();
+    const Vector<Image>& images();
 
-    // The address of `name` in this corpse, null if it is not there.
+    // The address of `name` in this corpse. Null, and reported, if it is not there.
     Address symbol(const char* name);
 
     // Copies `into.size()` bytes of the corpse's memory at `address` and returns
@@ -96,6 +99,9 @@ public:
         return value;
     }
 
+    // Nullopt if no terminator is readable within maxLength bytes.
+    std::optional<CString> readCString(Address, size_t maxLength) const;
+
 private:
     static unsigned s_nextId;
 
@@ -104,7 +110,8 @@ private:
     unsigned m_id;
 
     std::optional<Vector<Thread>> m_threads;
-    HashMap<String, std::unique_ptr<Symbol>> m_symbols;
+    std::optional<Vector<Image>> m_images;
+    HashMap<String, std::unique_ptr<Symbol>> m_symbols; // Only the symbols that were found.
 
     Snapshot* m_prev { nullptr }; // Required by DoublyLinkedListNode.
     Snapshot* m_next { nullptr }; // Required by DoublyLinkedListNode.

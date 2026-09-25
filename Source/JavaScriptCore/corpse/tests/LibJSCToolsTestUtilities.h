@@ -43,6 +43,8 @@
 #endif
 
 #if ENABLE(MYA)
+#include <JavaScriptCore/CorpseAddress.h>
+
 namespace JSC {
 namespace Corpse {
 class Process;
@@ -98,7 +100,21 @@ public:
 private:
     const char* m_name;
     MonotonicTime m_start;
+    unsigned m_reportsAtStart { 0 };
     bool m_shouldRun;
+};
+
+class ExpectedErrors {
+public:
+    explicit ExpectedErrors(unsigned count = 1);
+    ~ExpectedErrors();
+
+    ExpectedErrors(const ExpectedErrors&) = delete;
+    ExpectedErrors& operator=(const ExpectedErrors&) = delete;
+
+private:
+    unsigned m_count;
+    unsigned m_reportsAtStart;
 };
 
 Seconds totalSuiteTime();
@@ -209,6 +225,15 @@ public:
 private:
     Vector<Thread*> m_threads;
 };
+
+// Runs `analyze` twice: on a corpse of this process, given `fixture` in it, and
+// on a corpse of a copy of this process launched with `targetArgument`, given
+// the fixture that copy parks with parkAsCorpseTarget().
+void analyzeInAndOutOfProcess(JSC::Corpse::Address fixture, const char* targetArgument, void (*analyze)(JSC::Corpse::Snapshot&, JSC::Corpse::Address fixture));
+
+// For the launched copy: tells the analysis where `fixture` is, then holds it
+// until the analysis kills this process.
+[[noreturn]] void parkAsCorpseTarget(JSC::Corpse::Address fixture);
 
 #endif // ENABLE(MYA)
 

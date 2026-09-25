@@ -30,6 +30,7 @@
 
 #include "CorpseError.h"
 
+#include <wtf/StdLibExtras.h>
 #if OS(DARWIN)
 #include <mach/mach.h>
 #include <mach/mach_error.h>
@@ -55,16 +56,43 @@ const Vector<Thread>& Snapshot::threads()
     return *m_threads;
 }
 
+const Vector<Image>& Snapshot::images()
+{
+    if (!m_images)
+        m_images = Image::collect(*this);
+    return *m_images;
+}
+
+std::optional<CString> Snapshot::readCString(Address address, size_t maxLength) const
+{
+    Vector<char> characters;
+    for (size_t offset = 0; offset < maxLength; ++offset) {
+        auto character = read<char>(address + offset);
+        if (!character)
+            return std::nullopt;
+        if (!*character)
+            return UTF8CString(byteCast<char8_t>(characters.span()));
+        characters.append(*character);
+    }
+    return std::nullopt;
+}
+
 Address Snapshot::symbol(const char* name)
 {
-    if (!name || !*name)
+    if (!name || !*name) {
+        CORPSE_REPORT("A symbol lookup needs a name");
         return { };
+    }
 
-    auto entry = m_symbols.ensure<StringViewHashTranslator>(StringView::fromLatin1(name), [&] {
-        return WTF::makeUnique<Symbol>(*this, name);
-    });
+    auto found = m_symbols.find<StringViewHashTranslator>(StringView::fromLatin1(name));
+    if (found != m_symbols.end())
+        return found->value->address();
 
-    return entry.iterator->value->address();
+    auto symbol = WTF::makeUnique<Symbol>(*this, name);
+    Address address = symbol->address();
+    if (address)
+        m_symbols.add(String::fromLatin1(name), WTF::move(symbol));
+    return address;
 }
 
 #if OS(DARWIN)
