@@ -32,22 +32,61 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <wtf/StdLibExtras.h>
+#include <wtf/StringPrintStream.h>
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
 namespace JSC {
 namespace Corpse {
 
+thread_local unsigned Error::s_reportCount = 0;
+thread_local Diagnostics* Diagnostics::s_current = nullptr;
+
 void Error::report(const char* format, ...)
 {
-    SAFE_FPRINTF(stderr, "%s: ", Client::name());
+    ++s_reportCount;
 
+    StringPrintStream out;
+    out.print(Client::name(), ": ");
     va_list args;
     va_start(args, format);
-    vfprintf(stderr, format, args);
+    out.vprintf(format, args);
     va_end(args);
+    out.print("\n", Diagnostics::context());
 
-    fputc('\n', stderr);
+    SAFE_FPRINTF(stderr, "%s", out.toUTF8CString());
+}
+
+UTF8CString Diagnostics::describe(const char* format, ...)
+{
+    StringPrintStream out;
+    va_list args;
+    va_start(args, format);
+    out.vprintf(format, args);
+    va_end(args);
+    return out.toUTF8CString();
+}
+
+Diagnostics::Diagnostics(UTF8CString&& operation)
+    : m_operation(WTF::move(operation))
+    , m_parent(s_current)
+{
+    s_current = this;
+}
+
+Diagnostics::~Diagnostics()
+{
+    ASSERT(s_current == this);
+    s_current = m_parent;
+}
+
+UTF8CString Diagnostics::context()
+{
+    StringPrintStream out;
+    for (const Diagnostics* scope = s_current; scope; scope = scope->m_parent)
+        out.print(Client::name(), ":   while ", scope->m_operation, "\n");
+    return out.toUTF8CString();
 }
 
 } // namespace Corpse

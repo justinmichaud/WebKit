@@ -31,6 +31,7 @@
 
 #include "CorpseAddressTest.h"
 #include "CorpseByteParserTest.h"
+#include "CorpseDiagnosticsTest.h"
 #include "CorpseExportsTrieTest.h"
 #include "CorpseMemoryTest.h"
 #include "CorpseProcessTest.h"
@@ -41,6 +42,7 @@
 #include "LibJSCToolsTestUtilities.h"
 #include "TypeinfoTest.h"
 
+#include <bmalloc/bmalloc.h>
 #include <stdlib.h>
 #include <string.h>
 #include <string_view>
@@ -123,6 +125,8 @@ int main(int argc, char** argv)
         JSCToolsTest::suiteFilter = arguments[index];
     }
 
+    bmalloc::api::disableScavenger();
+
     dataLogLn("Starting libJavaScriptCoreTools tests");
 
     if (fuzzOnly)
@@ -138,6 +142,7 @@ int main(int argc, char** argv)
         JSCToolsTest::testMemory();
         JSCToolsTest::testThreads();
         JSCToolsTest::testSymbol();
+        JSCToolsTest::testDiagnostics();
 #if ENABLE(MYA_HEAP)
         JSCToolsTest::testTypeinfo();
 #endif

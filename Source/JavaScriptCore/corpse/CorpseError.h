@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2026 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -28,6 +29,9 @@
 #if ENABLE(LIB_JSC_TOOLS)
 
 #include <wtf/Assertions.h>
+#include <wtf/Noncopyable.h>
+#include <wtf/Nonmovable.h>
+#include <wtf/text/CString.h>
 
 namespace JSC {
 namespace Corpse {
@@ -37,9 +41,43 @@ namespace Corpse {
 class Error {
 public:
     static void report(const char* format, ...) WTF_ATTRIBUTE_PRINTF(1, 2);
+
+    static unsigned reportCount() { return s_reportCount; }
+
+private:
+    static thread_local unsigned s_reportCount;
+};
+
+// An operation in progress. A report made meanwhile says so, innermost operation first.
+class Diagnostics {
+    WTF_MAKE_NONCOPYABLE(Diagnostics);
+    WTF_MAKE_NONMOVABLE(Diagnostics);
+public:
+    explicit Diagnostics(UTF8CString&& operation);
+    ~Diagnostics();
+
+    static UTF8CString describe(const char* format, ...) WTF_ATTRIBUTE_PRINTF(1, 2);
+
+    static UTF8CString context();
+
+private:
+    UTF8CString m_operation;
+    Diagnostics* const m_parent;
+
+    static thread_local Diagnostics* s_current;
 };
 
 } // namespace Corpse
 } // namespace JSC
+
+#define CORPSE_REPORT(format, ...) \
+    WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN \
+    ::JSC::Corpse::Error::report(format __VA_OPT__(, LOG_PRINTF_TYPE(__VA_ARGS__))) \
+    WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+
+#define CORPSE_DIAGNOSTICS(name, format, ...) \
+    WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN \
+    ::JSC::Corpse::Diagnostics name(::JSC::Corpse::Diagnostics::describe(format __VA_OPT__(, LOG_PRINTF_TYPE(__VA_ARGS__)))) \
+    WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 
 #endif // ENABLE(LIB_JSC_TOOLS)

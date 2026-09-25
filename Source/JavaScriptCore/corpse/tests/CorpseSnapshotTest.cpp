@@ -48,8 +48,6 @@ void testSnapshot()
     SuiteTracer tracer("Snapshot");
     if (!tracer.shouldRun())
         return;
-    if (linuxSkip("Snapshot", "corpses are not implemented on Linux yet"))
-        return;
 
     RefPtr<Process> process = Process::create(getpid());
     if (!process->attach()) {
@@ -72,8 +70,10 @@ void testSnapshot()
         Snapshot second(process);
         TEST_ASSERT(second.isValid(), "a second snapshot of the same process is valid");
         TEST_ASSERT(second.id() > firstId, "identifiers increase");
+#if OS(DARWIN)
         TEST_ASSERT(second.corpsePort() != snapshot.corpsePort(),
             "two snapshots hold two different corpses");
+#endif
         secondCorpsePort = second.corpsePort();
     }
 #if OS(DARWIN)
@@ -91,6 +91,7 @@ void testSnapshot()
         TEST_ASSERT(later.id() > firstId + 1, "identifiers are not reused after a snapshot is destroyed");
     }
     {
+        ExpectedErrors expectedErrors(2);
         RefPtr<Process> unattached = Process::create(getpid());
         Snapshot snapshot(unattached);
         TEST_ASSERT(!snapshot.isValid(), "a snapshot of an unattached process is invalid");
@@ -98,9 +99,11 @@ void testSnapshot()
         TEST_ASSERT(!snapshot.symbol("g_config"), "an invalid snapshot resolves no symbol");
     }
     {
+        ExpectedErrors expectedErrors(1);
         RefPtr<Process> none;
         Snapshot snapshot(none);
         TEST_ASSERT(!snapshot.isValid(), "a snapshot with no process is invalid");
+        TEST_ASSERT(!snapshot.symbol("g_config"), "a snapshot with no process resolves no symbol");
     }
     {
         Snapshot snapshot(process);
