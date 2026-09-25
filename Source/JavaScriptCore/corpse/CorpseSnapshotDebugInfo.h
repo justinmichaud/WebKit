@@ -27,10 +27,11 @@
 
 #include <JavaScriptCore/CorpsePlatform.h>
 
-#if ENABLE(MYA_HEAP)
+#if ENABLE(MYA)
 
 #include <JavaScriptCore/CorpseAddress.h>
 #include <memory>
+#include <optional>
 #include <wtf/RefCounted.h>
 #include <wtf/RefPtr.h>
 #include <wtf/TZoneMalloc.h>
@@ -50,7 +51,8 @@ class TargetType;
 class TargetValue;
 
 // The debug info of every image in a snapshot, opened through liblldb. liblldb
-// only ever reads files here: it is never given a process.
+// only ever reads files here: it is never given a process. A build without
+// liblldb has no debug info: create() reports that and gives nothing.
 class SnapshotDebugInfo : public RefCounted<SnapshotDebugInfo> {
     WTF_MAKE_TZONE_ALLOCATED(SnapshotDebugInfo);
 public:
@@ -60,6 +62,13 @@ public:
     // The type as `image` defines it. A header-only type is complete in every
     // image that uses it, so a type is always asked for by its image.
     RefPtr<TargetType> findType(const char* qualifiedName, const Image&);
+
+    // A global variable, with the type its debug info gives it. Walking from a
+    // variable through its fields reaches every type the walk needs without
+    // naming one.
+    std::optional<TargetValue> findVariable(const char* qualifiedName, const Snapshot&);
+
+    unsigned addressByteSize() const;
 
 private:
     SnapshotDebugInfo(std::unique_ptr<lldb::SBDebugger>&&, std::unique_ptr<lldb::SBTarget>&&);
@@ -81,4 +90,4 @@ private:
 } // namespace Corpse
 } // namespace JSC
 
-#endif // ENABLE(MYA_HEAP)
+#endif // ENABLE(MYA)

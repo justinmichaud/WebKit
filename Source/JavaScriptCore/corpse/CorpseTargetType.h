@@ -27,7 +27,7 @@
 
 #include <JavaScriptCore/CorpsePlatform.h>
 
-#if ENABLE(MYA_HEAP)
+#if ENABLE(MYA)
 
 #include <JavaScriptCore/CorpseSnapshotDebugInfo.h>
 #include <memory>
@@ -53,6 +53,7 @@ public:
 
     CString name() const;
     size_t byteSize() const;
+    SnapshotDebugInfo& debugInfo() const { return m_debugInfo; }
 
     struct Field {
         CString name;
@@ -109,4 +110,4 @@ private:
 } // namespace Corpse
 } // namespace JSC
 
-#endif // ENABLE(MYA_HEAP)
+#endif // ENABLE(MYA)

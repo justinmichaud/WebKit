@@ -26,6 +26,8 @@
 #include "config.h"
 #include "CorpseTargetType.h"
 
+#if ENABLE(MYA)
+
 #if ENABLE(MYA_HEAP)
 
 #include "CorpseError.h"
@@ -173,4 +175,52 @@ TargetType::Layout TargetType::layout() const
 } // namespace Corpse
 } // namespace JSC
 
+#else // ENABLE(MYA_HEAP)
+
+#include <wtf/TZoneMallocInlines.h>
+
+// A complete stand-in for the liblldb class the member points to, so that
+// the destructor compiles. No TargetType is ever made without liblldb.
+namespace lldb {
+class SBType { };
+}
+
+namespace JSC {
+namespace Corpse {
+
+WTF_MAKE_TZONE_ALLOCATED_IMPL(TargetType);
+
+TargetType::TargetType(SnapshotDebugInfo& debugInfo, const lldb::SBType&)
+    : m_debugInfo(debugInfo)
+{
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+TargetType::~TargetType() = default;
+
+Ref<TargetType> TargetType::wrap(const lldb::SBType& type) const
+{
+    return adoptRef(*new TargetType(m_debugInfo.get(), type));
+}
+
+CString TargetType::name() const
+{
+    return { };
+}
+
+size_t TargetType::byteSize() const
+{
+    return 0;
+}
+
+TargetType::Layout TargetType::layout() const
+{
+    return Other { };
+}
+
+} // namespace Corpse
+} // namespace JSC
+
 #endif // ENABLE(MYA_HEAP)
+
+#endif // ENABLE(MYA)

@@ -86,11 +86,6 @@ function mac_process_mya_entitlements()
     fi
 }
 
-function mac_process_testLibJSCTools_entitlements()
-{
-    [[ "${RC_XBS}" != YES ]] && plistbuddy Add :com.apple.security.get-task-allow bool YES
-}
-
 # ========================================
 # macCatalyst entitlements
 # ========================================
@@ -228,7 +223,11 @@ then
     [[ "${RC_XBS}" != YES ]] && plistbuddy Add :com.apple.security.get-task-allow bool YES
 elif [[ "${WK_PLATFORM_NAME}" == macosx ]]
 then
-    [[ "${RC_XBS}" != YES ]] && [[ "${WK_USE_RESTRICTED_ENTITLEMENTS}" == YES ]] && plistbuddy Add :com.apple.security.get-task-allow bool YES
+    # mya and testLibJSCTools take corpses of jsc, and testLibJSCTools of a copy of itself.
+    if [[ "${RC_XBS}" != YES && ( "${WK_USE_RESTRICTED_ENTITLEMENTS}" == YES || "${PRODUCT_NAME}" == jsc || "${PRODUCT_NAME}" == testLibJSCTools ) ]]
+    then
+        plistbuddy Add :com.apple.security.get-task-allow bool YES
+    fi
 
     if [[ "${PRODUCT_NAME}" == jsc ||
           "${PRODUCT_NAME}" == dynbench ||
@@ -241,7 +240,7 @@ then
           "${PRODUCT_NAME}" == testRegExp ]]; then mac_process_jsc_entitlements
     elif [[ "${PRODUCT_NAME}" == testapi ]]; then mac_process_testapi_entitlements
     elif [[ "${PRODUCT_NAME}" == mya ]]; then mac_process_mya_entitlements
-    elif [[ "${PRODUCT_NAME}" == testLibJSCTools ]]; then mac_process_testLibJSCTools_entitlements
+    elif [[ "${PRODUCT_NAME}" == testLibJSCTools ]]; then true
     else echo "Unsupported/unknown product: ${PRODUCT_NAME}"
     fi
 elif [[ "${WK_PLATFORM_NAME}" == maccatalyst || "${WK_PLATFORM_NAME}" == iosmac ]]

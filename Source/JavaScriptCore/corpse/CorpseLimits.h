@@ -55,6 +55,11 @@ constexpr size_t maxExportsTrieSize = 16 * MB; // About 8x the 2.1 MB measured.
 // image process and 0.4 MB for a small one.
 constexpr size_t maxTotalBytesRead = 256 * MB; // About 2.5x the measured maximum.
 
+// A JS heap holds a few hundred BlockDirectories, and no Vector walked out of
+// it comes near these element counts.
+constexpr unsigned maxBlockDirectories = 64 * 1024;
+constexpr unsigned maxVectorSize = 16 * 1024 * 1024;
+
 } // namespace Corpse
 } // namespace JSC
 

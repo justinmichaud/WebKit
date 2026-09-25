@@ -27,7 +27,7 @@
 
 #include <JavaScriptCore/CorpsePlatform.h>
 
-#if ENABLE(MYA_HEAP)
+#if ENABLE(MYA)
 
 #include <JavaScriptCore/CorpseAddress.h>
 #include <JavaScriptCore/CorpseTargetType.h>
@@ -78,6 +78,11 @@ public:
     // the heap, not a failure.
     static TargetValue at(const Snapshot&, Address, Ref<TargetType>&&);
 
+    // A value of this type at another address, and the one `count` values on
+    // from this one, for a buffer of them.
+    TargetValue at(Address) const;
+    TargetValue offsetBy(size_t count) const;
+
     bool isValid() const { return m_isValid; }
     explicit operator bool() const { return m_isValid; }
 
@@ -99,6 +104,9 @@ public:
 
     std::optional<Address> pointerValue() const; // Pointers and references, PAC stripped.
     TargetValue dereference() const;
+
+    // For a pointer: the value it would point at if it pointed at `address`.
+    TargetValue pointeeAt(Address) const;
 
     template<typename T>
     std::optional<T> as() const
@@ -138,4 +146,4 @@ private:
 } // namespace Corpse
 } // namespace JSC
 
-#endif // ENABLE(MYA_HEAP)
+#endif // ENABLE(MYA)

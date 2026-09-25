@@ -26,7 +26,7 @@
 #include "config.h"
 #include "CorpseTargetValue.h"
 
-#if ENABLE(MYA_HEAP)
+#if ENABLE(MYA)
 
 #include "CorpseError.h"
 #include "CorpseLimits.h"
@@ -76,6 +76,18 @@ TargetValue TargetValue::at(const Snapshot& snapshot, Address address, Ref<Targe
         return TargetValue(snapshot, address, WTF::move(type), false);
     }
     return TargetValue(snapshot, address, WTF::move(type), true);
+}
+
+TargetValue TargetValue::at(Address address) const
+{
+    return at(*m_snapshot, address, Ref { m_type });
+}
+
+TargetValue TargetValue::offsetBy(size_t count) const
+{
+    if (!m_isValid)
+        return invalidated();
+    return at(m_address + count * m_type->byteSize());
 }
 
 TargetValue TargetValue::member(size_t offset, Ref<TargetType>&& type) const
@@ -180,8 +192,20 @@ TargetValue TargetValue::dereference() const
     auto pointer = pointerValue();
     if (!pointer)
         return invalidated();
+    return pointeeAt(*pointer);
+}
+
+TargetValue TargetValue::pointeeAt(Address address) const
+{
+    if (!m_isValid)
+        return invalidated();
     TargetType::Layout layout = m_type->layout();
-    return at(*m_snapshot, *pointer, WTF::move(std::get<TargetType::Pointer>(layout).pointee));
+    auto* pointer = std::get_if<TargetType::Pointer>(&layout);
+    if (!pointer) {
+        CORPSE_REPORT("Type '%s' is not a pointer", m_type->name());
+        return invalidated();
+    }
+    return at(*m_snapshot, address, WTF::move(pointer->pointee));
 }
 
 bool TargetValue::readWhole(std::span<uint8_t> destination) const
@@ -308,4 +332,4 @@ TargetValue TargetValue::downcast() const
 } // namespace Corpse
 } // namespace JSC
 
-#endif // ENABLE(MYA_HEAP)
+#endif // ENABLE(MYA)

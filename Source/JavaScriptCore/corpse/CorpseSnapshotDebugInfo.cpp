@@ -26,6 +26,8 @@
 #include "config.h"
 #include "CorpseSnapshotDebugInfo.h"
 
+#if ENABLE(MYA)
+
 #if ENABLE(MYA_HEAP)
 
 #include "CorpseError.h"
@@ -33,6 +35,7 @@
 #include "CorpseProcess.h"
 #include "CorpseSnapshot.h"
 #include "CorpseTargetType.h"
+#include "CorpseTargetValue.h"
 #include <lldb/API/LLDB.h>
 #include <mutex>
 #include <wtf/Scope.h>
@@ -158,7 +161,79 @@ RefPtr<TargetType> SnapshotDebugInfo::findTypeForVTable(Address vtable, const ch
     return findType(demangledName, module);
 }
 
+std::optional<TargetValue> SnapshotDebugInfo::findVariable(const char* qualifiedName, const Snapshot& snapshot)
+{
+    lldb::SBValue variable = m_target->FindFirstGlobalVariable(qualifiedName);
+    if (!variable.IsValid()) {
+        CORPSE_REPORT("No variable '%s' in the snapshot's debug info", reportableString(qualifiedName));
+        return std::nullopt;
+    }
+    lldb::addr_t address = variable.GetLoadAddress();
+    if (address == LLDB_INVALID_ADDRESS) {
+        CORPSE_REPORT("The variable '%s' has no address in the snapshot", reportableString(qualifiedName));
+        return std::nullopt;
+    }
+    return TargetValue::at(snapshot, Address { address }, adoptRef(*new TargetType(*this, variable.GetType())));
+}
+
+unsigned SnapshotDebugInfo::addressByteSize() const
+{
+    return m_target->GetAddressByteSize();
+}
+
+} // namespace Corpse
+} // namespace JSC
+
+#else // ENABLE(MYA_HEAP)
+
+#include "CorpseError.h"
+#include "CorpseTargetType.h"
+#include "CorpseTargetValue.h"
+#include <wtf/TZoneMallocInlines.h>
+
+// Complete stand-ins for the liblldb classes the members point to, so that
+// the destructors compile. No instance is ever made.
+namespace lldb {
+class SBDebugger { };
+class SBTarget { };
+}
+
+namespace JSC {
+namespace Corpse {
+
+WTF_MAKE_TZONE_ALLOCATED_IMPL(SnapshotDebugInfo);
+
+SnapshotDebugInfo::~SnapshotDebugInfo() = default;
+
+RefPtr<SnapshotDebugInfo> SnapshotDebugInfo::create(const Snapshot&)
+{
+    CORPSE_REPORT("This build has no liblldb, so it cannot read debug info");
+    return nullptr;
+}
+
+RefPtr<TargetType> SnapshotDebugInfo::findType(const char*, const Image&)
+{
+    return nullptr;
+}
+
+RefPtr<TargetType> SnapshotDebugInfo::findTypeForVTable(Address, const char*)
+{
+    return nullptr;
+}
+
+std::optional<TargetValue> SnapshotDebugInfo::findVariable(const char*, const Snapshot&)
+{
+    return std::nullopt;
+}
+
+unsigned SnapshotDebugInfo::addressByteSize() const
+{
+    return 0;
+}
+
 } // namespace Corpse
 } // namespace JSC
 
 #endif // ENABLE(MYA_HEAP)
+
+#endif // ENABLE(MYA)

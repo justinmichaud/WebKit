@@ -38,6 +38,7 @@
 #include "CorpseSnapshotTest.h"
 #include "CorpseSymbolTest.h"
 #include "CorpseThreadTest.h"
+#include "HeapWalkTest.h"
 #include "LibJSCToolsTestUtilities.h"
 #include "TargetValueTest.h"
 #include "TypeinfoTest.h"
@@ -145,11 +146,13 @@ int main(int argc, char** argv)
 #if ENABLE(MYA_HEAP)
         JSCToolsTest::testTypeinfo();
         JSCToolsTest::testTargetValue();
+        JSCToolsTest::testHeapWalk();
 #elif ASSERT_ENABLED
         TEST_ASSERT(false, "we expected to test mya_heap in this configuration");
 #else
         JSCToolsTest::skipSuite("Typeinfo", "mya_heap is not enabled");
         JSCToolsTest::skipSuite("TargetValue", "mya_heap is not enabled");
+        JSCToolsTest::skipSuite("HeapWalk", "mya_heap is not enabled");
 #endif
     }
 
