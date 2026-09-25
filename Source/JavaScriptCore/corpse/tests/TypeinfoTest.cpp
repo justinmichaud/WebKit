@@ -34,26 +34,16 @@
 #include <JavaScriptCore/CorpseProcess.h>
 #include <JavaScriptCore/CorpseSnapshot.h>
 #include <JavaScriptCore/Watchpoint.h>
-#include <array>
 #include <cxxabi.h>
-#include <errno.h>
 #include <lldb/API/LLDB.h>
 #include <optional>
-#include <signal.h>
-#include <spawn.h>
 #include <stdlib.h>
 #include <string_view>
-#include <sys/wait.h>
 #include <typeinfo>
-#include <unistd.h>
-#include <wtf/SafeStrerror.h>
 #include <wtf/Scope.h>
 #include <wtf/StdLibExtras.h>
-#include <wtf/Vector.h>
 #include <wtf/text/CString.h>
 #include <wtf/text/StringCommon.h>
-
-extern char** environ;
 
 #if OS(DARWIN) && !defined(BUILDING_WITH_CMAKE)
 // We should only link this if it is actually found; Xcode doesn't have optional dependencies.
@@ -70,30 +60,10 @@ namespace {
 
 using JSC::Corpse::Address;
 using JSC::Corpse::Memory;
-using JSC::Corpse::Process;
 using JSC::Corpse::Snapshot;
 
 constexpr const char* targetString = "typeinfo-target";
-
-Address addressOfTargetObject(const JSC::FireDetail& object)
-{
-    return Address { &object };
-}
-
-CString readCString(Memory& memory, Address address)
-{
-    constexpr size_t maxLength = 256;
-    Vector<char> characters;
-    for (size_t offset = 0; offset < maxLength; ++offset) {
-        auto character = memory.ptr<char>(address + offset);
-        if (!character)
-            return { };
-        if (!*character)
-            return UTF8CString(byteCast<char8_t>(characters.span()));
-        characters.append(*character);
-    }
-    return { };
-}
+constexpr size_t maxStringLength = 256;
 
 // The mangled name in the type_info of the object at `object`, read out of the
 // corpse by following the object's vtable pointer.
@@ -119,9 +89,9 @@ CString dynamicTypeName(Snapshot& snapshot, Address object)
 
     // libc++ sets the top bit of the name pointer when the name is not unique across images.
     constexpr uint64_t nonUniqueBit = 1ull << 63;
-    CString name = readCString(memory, Address { *namePointer & ~nonUniqueBit }.stripped());
-    TEST_ASSERT(!name.isNull(), "the target object's type_info name is readable");
-    return name;
+    auto name = snapshot.copyCString(Address { *namePointer & ~nonUniqueBit }.stripped(), maxStringLength);
+    TEST_ASSERT(name, "the target object's type_info name is readable");
+    return name ? *name : CString { };
 }
 
 CString demangledTypeName(const CString& mangledName)
@@ -236,83 +206,9 @@ void analyze(Snapshot& snapshot, Address object)
     TEST_ASSERT(pointer, "the target object's m_string is readable at the offset the debug info gives");
     if (!pointer)
         return;
-    CString value = readCString(snapshot.memory(), Address { *pointer }.stripped());
-    TEST_ASSERT(!value.isNull() && std::string_view { value.data() } == targetString,
+    auto value = snapshot.copyCString(Address { *pointer }.stripped(), maxStringLength);
+    TEST_ASSERT(value && std::string_view { value->data() } == targetString,
         "the corpse holds the target's string at the offset the debug info gives");
-}
-
-void attachAndAnalyze(pid_t pid, Address object)
-{
-    RefPtr<Process> process = Process::create(pid);
-    bool attached = process->attach();
-    TEST_ASSERT(attached, "attaching to the target process succeeds");
-    if (!attached)
-        return;
-    Snapshot snapshot(process);
-    TEST_ASSERT(snapshot.isValid(), "a snapshot of the target process is valid");
-    if (!snapshot.isValid())
-        return;
-
-    analyze(snapshot, object);
-}
-
-void testInThisProcess()
-{
-    JSC::StringFireDetail object(targetString);
-    attachAndAnalyze(getpid(), addressOfTargetObject(object));
-}
-
-// The analysis and the target are separate processes: this process launches a
-// copy of itself as the target and takes a corpse of it.
-void testInSeparateProcess()
-{
-    // The target writes the address of its object to its stdout.
-    std::array<int, 2> addressPipe { -1, -1 };
-    TEST_ASSERT(!pipe(addressPipe.data()), "a pipe from the target opens");
-    auto closePipe = makeScopeExit([&] {
-        for (int fd : addressPipe) {
-            if (fd >= 0)
-                close(fd);
-        }
-    });
-    if (addressPipe[0] < 0)
-        return;
-
-    CString executablePath = Process::create(getpid())->executablePath();
-    TEST_ASSERT(!executablePath.isNull(), "this process's executable path is readable");
-    if (executablePath.isNull())
-        return;
-
-    char* const arguments[] = {
-        const_cast<char*>(executablePath.data()),
-        const_cast<char*>("--typeinfo-target"),
-        nullptr
-    };
-    posix_spawn_file_actions_t actions;
-    posix_spawn_file_actions_init(&actions);
-    posix_spawn_file_actions_adddup2(&actions, addressPipe[1], STDOUT_FILENO);
-    posix_spawn_file_actions_addclose(&actions, addressPipe[0]);
-    posix_spawn_file_actions_addclose(&actions, addressPipe[1]);
-    pid_t child = 0;
-    int error = posix_spawn(&child, executablePath.data(), &actions, nullptr, arguments, environ);
-    posix_spawn_file_actions_destroy(&actions);
-    TEST_ASSERT(!error, "the target process launches");
-    if (error) {
-        dataLogLn("    posix_spawn: ", safeStrerror(error));
-        return;
-    }
-    auto killChild = makeScopeExit([&] {
-        kill(child, SIGKILL);
-        while (waitpid(child, nullptr, 0) < 0 && errno == EINTR) { }
-    });
-
-    uint64_t object = 0;
-    bool reported = read(addressPipe[0], &object, sizeof(object)) == sizeof(object);
-    TEST_ASSERT(reported, "the target reports the address of its object");
-    if (!reported)
-        return;
-
-    attachAndAnalyze(child, Address { object });
 }
 
 } // anonymous namespace
@@ -323,21 +219,12 @@ void testTypeinfo()
     if (!tracer.shouldRun())
         return;
 
-    testInThisProcess();
-    if (!linuxSkip("Typeinfo in a separate process", "attaching to another process is not implemented on Linux yet"))
-        testInSeparateProcess();
-}
-
-int runTypeinfoTarget()
-{
-    JSC::StringFireDetail object(targetString);
-    uint64_t address = addressOfTargetObject(object).toTargetVMAddress();
-    if (write(STDOUT_FILENO, &address, sizeof(address)) != sizeof(address))
-        return 1;
-
-    // The analysis kills this process when it is done with the object.
-    while (true)
-        pause();
+    // The object is held as a JSC::FireDetail, so only the target's RTTI says
+    // which class it really is.
+    analyzeInAndOutOfProcess([] {
+        static JSC::StringFireDetail object(targetString);
+        return Address { &object };
+    }, analyze);
 }
 
 #else // No SB API, so there is nothing to ask.
@@ -353,11 +240,6 @@ void testTypeinfo()
 #else
     skipSuite("Typeinfo", "mya_heap is not enabled");
 #endif
-}
-
-int runTypeinfoTarget()
-{
-    return 1;
 }
 
 #endif // ENABLE(MYA_HEAP)

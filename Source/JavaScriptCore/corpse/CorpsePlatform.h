@@ -30,6 +30,7 @@
 
 #if ENABLE(MYA)
 
+#include <utility>
 #if OS(DARWIN)
 #include <mach/mach.h>
 #endif
@@ -52,6 +53,49 @@ inline bool isValidTaskHandle(TaskHandle handle) { return handle >= 0; }
 using KernelResult = int; // An errno.
 constexpr KernelResult kernelSuccess = 0;
 #endif
+
+// Owns a task handle. On Darwin that is a send right, given back on destruction.
+class OwnedTaskHandle {
+public:
+    static OwnedTaskHandle adopt(TaskHandle handle) { return OwnedTaskHandle { handle }; }
+
+    OwnedTaskHandle() = default;
+    OwnedTaskHandle(OwnedTaskHandle&& other)
+        : m_handle(std::exchange(other.m_handle, invalidTaskHandle))
+    {
+    }
+    OwnedTaskHandle& operator=(OwnedTaskHandle&& other)
+    {
+        if (this != &other) {
+            release();
+            m_handle = std::exchange(other.m_handle, invalidTaskHandle);
+        }
+        return *this;
+    }
+    ~OwnedTaskHandle() { release(); }
+
+    OwnedTaskHandle(const OwnedTaskHandle&) = delete;
+    OwnedTaskHandle& operator=(const OwnedTaskHandle&) = delete;
+
+private:
+    explicit OwnedTaskHandle(TaskHandle handle)
+        : m_handle(handle)
+    {
+    }
+
+    void release()
+    {
+#if OS(DARWIN)
+        if (isValidTaskHandle(m_handle))
+            mach_port_deallocate(mach_task_self(), m_handle);
+#endif
+        m_handle = invalidTaskHandle;
+    }
+
+    friend TaskHandle taskHandle(const OwnedTaskHandle& owned) { return owned.m_handle; }
+
+    TaskHandle m_handle { invalidTaskHandle };
+};
 
 } // namespace Corpse
 } // namespace JSC

@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2026 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -29,49 +30,35 @@
 
 #if ENABLE(MYA)
 
-#include <sys/types.h>
-#include <wtf/Assertions.h>
-#include <wtf/Ref.h>
-#include <wtf/RefCounted.h>
+#include <JavaScriptCore/CorpseAddress.h>
+#include <wtf/Vector.h>
 #include <wtf/text/CString.h>
 
 namespace JSC {
 namespace Corpse {
 
-// Represents a target corpse process identified by PID. It manages the Mach task
-// port for that process: attach() acquires it, detach() releases it (but keeps the
-// PID so the same Process can be reattached later).
-class Process final : public RefCounted<Process> {
+class Snapshot;
+
+// One image (the executable or a shared library) mapped into a corpse.
+class Image {
 public:
-    static Ref<Process> create(pid_t pid) { return adoptRef(*new Process(pid)); }
-
-    bool attach();
-    void detach() { m_taskPort = { }; }
-
-    pid_t pid() const { return m_pid; }
-
-    CString executablePath() const;
-    TaskHandle taskPort() const { return taskHandle(m_taskPort); }
-
-    bool isAttached() const { return isValidTaskHandle(taskPort()); }
-
-    // The target process may have terminated while we still hold the port.
-    bool holdsLiveTask() const;
-
-    // True if the target runs under Rosetta translation. Such a process executes as
-    // arm64 whatever its own architecture is, so its thread state describes the
-    // translator rather than the program, and cannot be read as the program's.
-    bool isTranslated() const;
+    const CString& path() const { return m_path; }
+    Address loadAddress() const { return m_loadAddress; } // Where the image's header landed.
 
 private:
-    explicit Process(pid_t pid)
-        : m_pid(pid)
+    Image(CString&& path, Address loadAddress)
+        : m_path(WTF::move(path))
+        , m_loadAddress(loadAddress)
     {
-        RELEASE_ASSERT(pid > 0);
     }
 
-    pid_t m_pid;
-    OwnedTaskHandle m_taskPort;
+    static Vector<Image> collect(Snapshot&);
+    static Vector<Image> platformCollect(Snapshot&);
+
+    CString m_path;
+    Address m_loadAddress;
+
+    friend class Snapshot;
 };
 
 } // namespace Corpse

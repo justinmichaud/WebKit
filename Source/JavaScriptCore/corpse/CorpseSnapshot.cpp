@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2026 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -30,6 +31,8 @@
 
 #include "CorpseError.h"
 
+#include <algorithm>
+#include <wtf/StdLibExtras.h>
 #if OS(DARWIN)
 #include <mach/mach.h>
 #include <mach/mach_error.h>
@@ -54,8 +57,10 @@ const Vector<Thread>& Snapshot::threads()
 
 Address Snapshot::symbol(const char* name)
 {
-    if (!name || !*name)
+    if (!name || !*name) {
+        CORPSE_REPORT("A symbol lookup needs a name");
         return { };
+    }
 
     auto entry = m_symbols.ensure<StringViewHashTranslator>(StringView::fromLatin1(name), [&] {
         return WTF::makeUnique<Symbol>(*this, name);
@@ -64,18 +69,40 @@ Address Snapshot::symbol(const char* name)
     return entry.iterator->value->address();
 }
 
+const Vector<Image>& Snapshot::images()
+{
+    if (!m_images)
+        m_images = Image::collect(*this);
+    return *m_images;
+}
+
+std::optional<CString> Snapshot::copyCString(Address address, size_t maxLength)
+{
+    Vector<char> characters;
+    size_t pageSize = Memory::pageSize();
+    size_t toPageEnd = pageSize - (address.toTargetVMAddress() & (pageSize - 1));
+    maxLength = std::min(toPageEnd, maxLength);
+    auto chunk = m_memory.span<char>(address, maxLength);
+    if (!chunk)
+        return std::nullopt;
+    size_t length = std::ranges::find(chunk, '\0') - chunk.begin();
+    return UTF8CString(byteCast<char8_t>(chunk.first(length)));
+}
+
 #if OS(DARWIN)
 
-// Returns MACH_PORT_NULL if the snapshot could not be taken, having reported why.
-static mach_port_t takeSnapshot(Process* process)
+// Returns a null handle if the snapshot could not be taken, having reported why.
+static OwnedTaskHandle takeSnapshot(Process* process)
 {
     if (!process || !process->isAttached())
-        return MACH_PORT_NULL;
+        return { };
 
+    // Snapshot the target into a corpse; only a read port is required from here
+    // on, and the corpse is independent of the live target.
     mach_port_t corpsePort = MACH_PORT_NULL;
     kern_return_t kr = task_generate_corpse(process->taskPort(), &corpsePort);
     if (kr == KERN_SUCCESS)
-        return corpsePort;
+        return OwnedTaskHandle::adopt(corpsePort);
 
     if (!process->holdsLiveTask()) {
         Error::report("Could not snapshot PID %d: the process has terminated",
@@ -84,26 +111,18 @@ static mach_port_t takeSnapshot(Process* process)
         Error::report("Could not snapshot PID %d: %s (0x%x)",
             static_cast<int>(process->pid()), mach_error_string(kr), kr);
     }
-    return MACH_PORT_NULL;
-}
-
-Snapshot::~Snapshot()
-{
-    if (isValid())
-        mach_port_deallocate(mach_task_self(), m_corpsePort);
+    return { };
 }
 
 #else
 
 // There is no corpse on Linux yet: the snapshot reads the live process.
-static TaskHandle takeSnapshot(Process* process)
+static OwnedTaskHandle takeSnapshot(Process* process)
 {
     if (!process || !process->isAttached())
-        return invalidTaskHandle;
-    return process->taskPort();
+        return { };
+    return OwnedTaskHandle::adopt(process->taskPort());
 }
-
-Snapshot::~Snapshot() = default;
 
 #endif // OS(DARWIN)
 
@@ -111,9 +130,11 @@ Snapshot::Snapshot(RefPtr<Process> process)
     : m_process(WTF::move(process))
     , m_corpsePort(takeSnapshot(m_process.get()))
     , m_id(s_nextId++)
-    , m_memory(m_corpsePort)
+    , m_memory(corpsePort())
 {
 }
+
+Snapshot::~Snapshot() = default;
 
 } // namespace Corpse
 } // namespace JSC
