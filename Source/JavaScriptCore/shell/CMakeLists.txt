@@ -116,6 +116,7 @@ if (DEVELOPER_MODE)
             ../corpse/tests/CorpseSymbolTest.cpp
             ../corpse/tests/CorpseThreadTest.cpp
             ../corpse/tests/LibJSCToolsTestUtilities.cpp
+            ../corpse/tests/TypeinfoTest.cpp
             ../corpse/tests/testLibJSCTools.cpp
         )
         set(testLibJSCTools_DEFINITIONS ${jsc_PRIVATE_DEFINITIONS})

@@ -34,6 +34,7 @@
 #include <string_view>
 #include <sys/types.h>
 #include <wtf/DataLog.h>
+#include <wtf/Function.h>
 #include <wtf/HexNumber.h>
 #include <wtf/MonotonicTime.h>
 #include <wtf/RefPtr.h>
@@ -69,6 +70,13 @@ void skipSuite(const char* name, const char* why);
 
 bool linuxSkip(const char* name, const char* why);
 
+
+#if ENABLE(MYA_HEAP)
+// Each compile unit that includes this header has its own copy, so a heap walk
+// must find each copy's type in the compile unit that defines it.
+constinit const ASCIILiteral copiedHeaderConstant = "copied header constant"_s;
+const ASCIILiteral* copiedHeaderConstantInUtilities();
+#endif
 
 // Announces a suite, times it, and reports on the way out. Destroyed on every path out
 // of a suite, including the early returns a suite takes when it cannot set itself up.
@@ -200,6 +208,13 @@ public:
 private:
     Vector<Thread*> m_threads;
 };
+
+// create() an object, then analyze() it in and out of process.
+void analyzeInAndOutOfProcess(JSC::Corpse::Address (*create)(), NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address object)>& analyze);
+
+// The main function for a copy of this process launched as `--target <offset>`: runs the
+// create function at `offset` into this executable and holds its object.
+int runCorpseTarget(const char* offsetText);
 
 } // namespace JSCToolsTest
 

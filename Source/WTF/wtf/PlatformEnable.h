@@ -1062,6 +1062,12 @@
 #endif
 #endif
 
+/* mya_heap reads debug info through liblldb, so it is off wherever liblldb's headers are missing. */
+#if ENABLE(MYA_HEAP) && (!ENABLE(LIB_JSC_TOOLS) || !__has_include(<lldb/API/LLDB.h>))
+#undef ENABLE_MYA_HEAP
+#define ENABLE_MYA_HEAP 0
+#endif
+
 /* Asserts, invariants for macro definitions */
 
 #if ENABLE(COCOA_WEBM_PLAYER) && !ENABLE(MEDIA_SOURCE)

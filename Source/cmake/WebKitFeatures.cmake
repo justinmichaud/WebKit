@@ -190,6 +190,14 @@ macro(WEBKIT_OPTION_BEGIN)
         SET_AND_EXPOSE_TO_BUILD(ENABLE_LIB_JSC_TOOLS ${ENABLE_JAVASCRIPTCORE_TOOLS})
     endif ()
 
+    if (NOT DEFINED ENABLE_MYA_HEAP_DEFAULT)
+        if (ENABLE_JAVASCRIPTCORE_TOOLS AND CMAKE_BUILD_TYPE STREQUAL "Debug")
+            set(ENABLE_MYA_HEAP_DEFAULT ON)
+        else ()
+            set(ENABLE_MYA_HEAP_DEFAULT OFF)
+        endif ()
+    endif ()
+
     # Annotating WTF's ref-counted base classes for Swift needs Swift 6.4 or newer;
     # older toolchains don't apply the annotation to derived classes. Cocoa ports
     # gate this in PlatformEnable.h on the SDK version instead.
@@ -286,6 +294,7 @@ macro(WEBKIT_OPTION_BEGIN)
     WEBKIT_OPTION_DEFINE(ENABLE_MINIBROWSER "Toggle MiniBrowser compilation." PRIVATE OFF)
     WEBKIT_OPTION_DEFINE(ENABLE_MODEL_ELEMENT "Toggle Model Element support" PRIVATE OFF)
     WEBKIT_OPTION_DEFINE(ENABLE_MOUSE_CURSOR_SCALE "Toggle Scaled mouse cursor support" PRIVATE OFF)
+    WEBKIT_OPTION_DEFINE(ENABLE_MYA_HEAP "Include additional debug info in the build to support mya heap analysis features." PRIVATE ${ENABLE_MYA_HEAP_DEFAULT})
     WEBKIT_OPTION_DEFINE(ENABLE_NAVIGATOR_STANDALONE "Toogle standalone navigator support" PRIVATE OFF)
     WEBKIT_OPTION_DEFINE(ENABLE_NOTIFICATIONS "Toggle Notifications support" PRIVATE ON)
     WEBKIT_OPTION_DEFINE(ENABLE_OFFSCREEN_CANVAS "Toggle OffscreenCanvas support" PRIVATE OFF)
