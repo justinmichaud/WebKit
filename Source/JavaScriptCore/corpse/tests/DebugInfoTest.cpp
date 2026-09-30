@@ -1,0 +1,288 @@
+/*
+ * Copyright (C) 2026 Igalia S.L.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ *
+ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
+ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
+ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
+ * THE POSSIBILITY OF SUCH DAMAGE.
+ */
+
+#include "config.h"
+
+#include "LibJSCToolsTestUtilities.h"
+#include <JavaScriptCore/CorpsePlatform.h>
+
+#if HAVE(LLDB)
+
+#include <JavaScriptCore/CorpseAddress.h>
+#include <JavaScriptCore/CorpseSnapshot.h>
+#include <JavaScriptCore/CorpseSnapshotDebugInfo.h>
+#include <JavaScriptCore/CorpseTargetType.h>
+#include <JavaScriptCore/CorpseTargetValue.h>
+#include <JavaScriptCore/Watchpoint.h>
+#include <stdexcept>
+#include <string_view>
+#include <unistd.h>
+#include <wtf/HashMap.h>
+#include <wtf/NeverDestroyed.h>
+#include <wtf/text/StringHash.h>
+#include <wtf/text/WTFString.h>
+
+#endif // HAVE(LLDB)
+
+namespace JSCToolsTest {
+
+#if HAVE(LLDB)
+
+namespace {
+
+using JSC::Corpse::Address;
+using JSC::Corpse::Snapshot;
+using JSC::Corpse::SnapshotDebugInfo;
+using JSC::Corpse::TargetType;
+using JSC::Corpse::TargetValue;
+
+constexpr const char* sameImageString = "debug-info-target";
+constexpr uint64_t crossImageMarker = 0x6d79612d74657374;
+
+// Defined here and derived from a JavaScriptCore class, so its vtable and
+// debug info are in this executable while its base's are in JavaScriptCore.
+class CrossImageFireDetail final : public JSC::FireDetail {
+public:
+    ~CrossImageFireDetail() final = default;
+    void dump(PrintStream&) const final { }
+
+    uint64_t m_marker { crossImageMarker };
+    bool m_flag : 1 { true };
+    unsigned m_small : 5 { 21 };
+    int m_signed : 4 { -3 };
+};
+
+// The first vtable slot of LaterDestructor is SlotZeroBase::first, which it
+// does not override, so only the destructor names the class.
+class SlotZeroBase {
+public:
+    virtual void first() { }
+    virtual ~SlotZeroBase() = default;
+};
+
+class LaterDestructor final : public SlotZeroBase {
+public:
+    ~LaterDestructor() final = default;
+
+    uint64_t m_marker { crossImageMarker };
+};
+
+// Diamond reaches VirtualBase through both Left and Right, and holds one VirtualBase.
+class VirtualBase {
+public:
+    virtual ~VirtualBase() = default;
+
+    uint64_t m_base { 1 };
+};
+
+class Left : public virtual VirtualBase {
+public:
+    uint64_t m_left { 2 };
+};
+
+class Right : public virtual VirtualBase {
+public:
+    uint64_t m_right { 3 };
+};
+
+class Diamond final : public Left, public Right {
+public:
+    ~Diamond() final = default;
+
+    uint64_t m_diamond { 4 };
+};
+
+// The complete object at `object`, as its dynamic type.
+std::optional<TargetValue> completeObjectAt(Snapshot& snapshot, Address object)
+{
+    RefPtr debugInfo = SnapshotDebugInfo::create(snapshot);
+    TEST_ASSERT(debugInfo, "a snapshot has debug info");
+    if (!debugInfo)
+        return std::nullopt;
+    auto value = TargetValue::completeObjectAt(snapshot, *debugInfo, object);
+    TEST_ASSERT(value, "an object with a virtual destructor has a dynamic type");
+    TEST_ASSERT(!value || value->address() == object, "an object held through its primary base starts where its complete object does");
+    return value;
+}
+
+Address createSameImageObject()
+{
+    static JSC::StringFireDetail object(sameImageString);
+    return Address { static_cast<JSC::FireDetail*>(&object) };
+}
+
+void analyzeSameImageObject(Snapshot& snapshot, Address object)
+{
+    auto value = completeObjectAt(snapshot, object);
+    if (!value)
+        return;
+    TEST_ASSERT(std::string_view { value->type().name().legacyCStringPointer() } == "JSC::StringFireDetail",
+        "the dynamic type is the class the object really is, not the one it is held as");
+    TEST_ASSERT_EQ(value->type().byteSize(), sizeof(JSC::StringFireDetail), "the debug info gives the class its size");
+
+    auto string = value->properField("m_string").as<uint64_t>();
+    if (!string)
+        return;
+    std::string_view expected { sameImageString };
+    auto characters = snapshot.memory().span<char>(Address { *string }.stripped(), expected.size() + 1);
+    TEST_ASSERT(characters && (std::string_view { characters.data(), expected.size() } == expected) && !characters[expected.size()],
+        "the field holds the target's string");
+}
+
+Address createCrossImageObject()
+{
+    static CrossImageFireDetail object;
+    return Address { static_cast<JSC::FireDetail*>(&object) };
+}
+
+void analyzeCrossImageObject(Snapshot& snapshot, Address object)
+{
+    auto value = completeObjectAt(snapshot, object);
+    if (!value)
+        return;
+    TEST_ASSERT_EQ(value->type().byteSize(), sizeof(CrossImageFireDetail), "the debug info gives the class its size");
+    auto marker = value->properField("m_marker").as<uint64_t>();
+    TEST_ASSERT(marker && *marker == crossImageMarker, "the field holds the target's value");
+    TEST_ASSERT(value->properField("m_flag").integer() == 1, "a one-bit field reads alone");
+    TEST_ASSERT(value->properField("m_small").integer() == 21, "an unsigned bitfield reads without its neighbours");
+    TEST_ASSERT(value->properField("m_signed").integer() == -3, "a signed bitfield is sign extended");
+    ExpectedErrors expectedErrors;
+    TEST_ASSERT(!value->properField("m_small").as<uint32_t>(), "a bitfield reads only as an integer");
+}
+
+Address createLaterDestructorObject()
+{
+    static LaterDestructor object;
+    return Address { static_cast<SlotZeroBase*>(&object) };
+}
+
+void analyzeLaterDestructorObject(Snapshot& snapshot, Address object)
+{
+    auto value = completeObjectAt(snapshot, object);
+    if (!value)
+        return;
+    TEST_ASSERT_EQ(value->type().byteSize(), sizeof(LaterDestructor), "a class whose destructor is not its first virtual function is found by its destructor");
+    auto marker = value->properField("m_marker").as<uint64_t>();
+    TEST_ASSERT(marker && *marker == crossImageMarker, "the field holds the target's value");
+}
+
+Address createDiamondObject()
+{
+    static NeverDestroyed<Diamond> object;
+    return Address { static_cast<Left*>(&object.get()) };
+}
+
+void analyzeDiamondObject(Snapshot& snapshot, Address object)
+{
+    auto value = completeObjectAt(snapshot, object);
+    if (!value)
+        return;
+    HashMap<String, uint64_t> fields;
+    unsigned visits = 0;
+    value->forEachField([&](const TargetType::Field& field, const TargetValue& fieldValue) {
+        ++visits;
+        if (auto bits = fieldValue.as<uint64_t>())
+            fields.set(String::fromUTF8(field.name.legacyCStringPointer()), *bits);
+    });
+    TEST_ASSERT_EQ(visits, 4u, "every field is visited once, the shared virtual base's included");
+    TEST_ASSERT(fields.get("m_diamond"_s) == 4 && fields.get("m_left"_s) == 2 && fields.get("m_right"_s) == 3 && fields.get("m_base"_s) == 1,
+        "every field is read where the complete object puts it");
+}
+
+Address createSystemLibraryObject()
+{
+    static NeverDestroyed<std::runtime_error> object("debug-info-system-library");
+    return Address { static_cast<std::exception*>(&object.get()) };
+}
+
+void analyzeSystemLibraryObject(Snapshot& snapshot, Address object)
+{
+#if OS(DARWIN)
+    // The OS ships no debug info for the libraries in the shared cache.
+    RefPtr debugInfo = SnapshotDebugInfo::create(snapshot);
+    TEST_ASSERT(debugInfo, "a snapshot has debug info");
+    if (!debugInfo)
+        return;
+    ExpectedErrors expectedErrors;
+    Address completeObject;
+    TEST_ASSERT(!debugInfo->dynamicTypeAt(snapshot, object, completeObject), "a class in the shared cache has no dynamic type");
+#else
+    auto value = completeObjectAt(snapshot, object);
+    TEST_ASSERT(value && value->type().byteSize() == sizeof(std::runtime_error),
+        "a class in a system library resolves through that library's separate debug info");
+#endif
+}
+
+} // anonymous namespace
+
+void testDebugInfo()
+{
+    SuiteTracer tracer("DebugInfo");
+    if (!tracer.shouldRun())
+        return;
+
+    analyzeInAndOutOfProcess(createSameImageObject, analyzeSameImageObject);
+    analyzeInAndOutOfProcess(createCrossImageObject, analyzeCrossImageObject);
+    analyzeInAndOutOfProcess(createLaterDestructorObject, analyzeLaterDestructorObject);
+    analyzeInAndOutOfProcess(createDiamondObject, analyzeDiamondObject);
+    analyzeInAndOutOfProcess(createSystemLibraryObject, analyzeSystemLibraryObject);
+
+    // Everything is read from the snapshot, so the process may be gone.
+    analyzeAfterTargetExits(createSameImageObject, analyzeSameImageObject);
+    analyzeAfterTargetExits(createCrossImageObject, analyzeCrossImageObject);
+
+    {
+        RefPtr<JSC::Corpse::Process> process = JSC::Corpse::Process::create(getpid());
+        TEST_ASSERT(process->attach(), "attaching to this process succeeds");
+        Snapshot snapshot(process);
+        RefPtr debugInfo = SnapshotDebugInfo::create(snapshot);
+        TEST_ASSERT(debugInfo, "a snapshot has debug info");
+        if (debugInfo) {
+            Address completeObject;
+            ExpectedErrors expectedErrors(2);
+            TEST_ASSERT(!debugInfo->dynamicTypeAt(snapshot, Address { }, completeObject), "a null address has no dynamic type");
+            TEST_ASSERT(!debugInfo->dynamicTypeAt(snapshot, Address { static_cast<uint64_t>(0x10) }, completeObject), "unreadable memory has no dynamic type");
+        }
+    }
+}
+
+#else // No SB API, so there is nothing to ask.
+
+void testDebugInfo()
+{
+    SuiteTracer tracer("DebugInfo");
+    if (!tracer.shouldRun())
+        return;
+
+#if ENABLE(MYA_HEAP)
+    TEST_ASSERT(false, "mya_heap is enabled but liblldb's headers were not found");
+#else
+    skipSuite("DebugInfo", "mya_heap is not enabled");
+#endif
+}
+
+#endif // HAVE(LLDB)
+
+} // namespace JSCToolsTest

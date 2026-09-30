@@ -37,9 +37,6 @@
 #if OS(DARWIN)
 #include <mach-o/dyld_images.h>
 #include <mach-o/loader.h>
-#include <mach/mach.h>
-#include <mach/mach_error.h>
-#include <mach/task_info.h>
 #endif
 #include <optional>
 #include <span>
@@ -257,30 +254,15 @@ Address Symbol::lookUpName(Snapshot& snapshot)
     Memory& memory = snapshot.memory();
 
     // dyld publishes the list of loaded images; search each one in turn.
-    task_dyld_info_data_t dyldInfo;
-    mach_msg_type_number_t count = TASK_DYLD_INFO_COUNT;
-    kern_return_t kr = task_info(snapshot.corpsePort(), TASK_DYLD_INFO, reinterpret_cast<task_info_t>(&dyldInfo), &count);
-    if (kr != KERN_SUCCESS) {
-        CORPSE_REPORT("Could not read dyld information: %s (0x%x)", mach_error_string(kr), kr);
+    auto allImages = snapshot.dyldAllImageInfos();
+    if (!allImages)
         return { };
-    }
-
-    Address allImageInfosAddress { dyldInfo.all_image_info_addr };
-    if (!allImageInfosAddress) {
-        CORPSE_REPORT("dyld reports no image list");
-        return { };
-    }
-    auto allImages = memory.ptr<dyld_all_image_infos>(allImageInfosAddress);
-    if (!allImages) {
-        CORPSE_REPORT("Could not read dyld_all_image_infos at 0x%llx", allImageInfosAddress.toTargetVMAddress());
-        return { };
-    }
 
     Address arrayAddress = Address { allImages->infoArray }.stripped();
     uint32_t imageCount = allImages->infoArrayCount;
     if (!arrayAddress || !imageCount) {
         CORPSE_REPORT("dyld_all_image_infos v%u at 0x%llx lists no images",
-            allImages->version, allImageInfosAddress.toTargetVMAddress());
+            allImages->version, allImages.address().toTargetVMAddress());
         return { };
     }
     // Each image below costs a Mach round-trip and two buffer reads, so an

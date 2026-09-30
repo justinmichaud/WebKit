@@ -30,6 +30,7 @@
 #if ENABLE(MYA)
 
 #include <JavaScriptCore/CorpseAddress.h>
+#include <JavaScriptCore/CorpseImage.h>
 #include <JavaScriptCore/CorpseMemory.h>
 #include <JavaScriptCore/CorpseProcess.h>
 #include <JavaScriptCore/CorpseSymbol.h>
@@ -46,6 +47,10 @@
 #include <wtf/text/StringHash.h>
 #include <wtf/text/StringView.h>
 #include <wtf/text/WTFString.h>
+
+#if OS(DARWIN)
+struct dyld_all_image_infos;
+#endif
 
 namespace JSC {
 namespace Corpse {
@@ -81,8 +86,14 @@ public:
         return m_memory;
     }
 
-    // The threads captured in this corpse, read and cached on the first call.
+    // The threads and images captured in this corpse, read and cached on the first call.
     const Vector<Thread>& threads();
+    const Vector<Image>& images();
+
+#if OS(DARWIN)
+    // dyld's record of the loaded images. Invalid, having reported why, if it cannot be read.
+    Memory::Ptr<dyld_all_image_infos> dyldAllImageInfos();
+#endif
 
     // The address of `name` in this corpse, null if it is not there.
     Address symbol(const char* name);
@@ -95,6 +106,7 @@ private:
     unsigned m_id;
 
     std::optional<Vector<Thread>> m_threads;
+    std::optional<Vector<Image>> m_images;
     HashMap<String, std::unique_ptr<Symbol>> m_symbols;
     Memory m_memory;
 

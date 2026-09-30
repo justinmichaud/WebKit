@@ -32,8 +32,10 @@
 #include "CorpseError.h"
 
 #if OS(DARWIN)
+#include <mach-o/dyld_images.h>
 #include <mach/mach.h>
 #include <mach/mach_error.h>
+#include <mach/task_info.h>
 #endif
 #include <wtf/TZoneMallocInlines.h>
 
@@ -57,6 +59,45 @@ const Vector<Thread>& Snapshot::threads()
         m_threads = Thread::collect(*this);
     return *m_threads;
 }
+
+const Vector<Image>& Snapshot::images()
+{
+    if (!m_images) {
+        if (!isValid()) {
+            CORPSE_REPORT("Cannot list the images of an invalid snapshot");
+            m_images = Vector<Image> { };
+        } else {
+            CORPSE_DIAGNOSTICS(diagnostics, "listing the images of pid %d", static_cast<int>(process()->pid()));
+            m_images = Image::collect(*this);
+        }
+    }
+    return *m_images;
+}
+
+#if OS(DARWIN)
+
+Memory::Ptr<dyld_all_image_infos> Snapshot::dyldAllImageInfos()
+{
+    task_dyld_info_data_t dyldInfo;
+    mach_msg_type_number_t count = TASK_DYLD_INFO_COUNT;
+    kern_return_t kr = task_info(corpsePort(), TASK_DYLD_INFO, reinterpret_cast<task_info_t>(&dyldInfo), &count);
+    if (kr != KERN_SUCCESS) {
+        CORPSE_REPORT("Could not read dyld information: %s (0x%x)", mach_error_string(kr), kr);
+        return { };
+    }
+
+    Address address { dyldInfo.all_image_info_addr };
+    if (!address) {
+        CORPSE_REPORT("dyld reports no image list");
+        return { };
+    }
+    auto allImages = memory().ptr<dyld_all_image_infos>(address);
+    if (!allImages)
+        CORPSE_REPORT("Could not read dyld_all_image_infos at 0x%llx", address.toTargetVMAddress());
+    return allImages;
+}
+
+#endif // OS(DARWIN)
 
 Address Snapshot::symbol(const char* name)
 {

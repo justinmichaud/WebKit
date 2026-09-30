@@ -29,18 +29,85 @@
 
 #include "LibJSCToolsTestUtilities.h"
 
+#include <JavaScriptCore/CorpseImage.h>
 #include <JavaScriptCore/CorpseProcess.h>
 #include <JavaScriptCore/CorpseSnapshot.h>
+#include <JavaScriptCore/JSContextRef.h>
+#include <algorithm>
+#include <dlfcn.h>
+#include <stdlib.h>
 #if OS(DARWIN)
 #include <mach/mach.h>
+#else
+#include <sys/stat.h>
 #endif
 #include <unistd.h>
 
 namespace JSCToolsTest {
 
+using JSC::Corpse::Address;
+using JSC::Corpse::Image;
 using JSC::Corpse::Process;
 using JSC::Corpse::Snapshot;
 using JSC::Corpse::TaskHandle;
+
+static const Image* imageContaining(const Vector<Image>& images, const void* function)
+{
+    Dl_info info;
+    if (!dladdr(function, &info) || !info.dli_fbase) {
+        TEST_ASSERT(false, "dladdr finds the image of every function the test looks for");
+        return nullptr;
+    }
+    Address base { info.dli_fbase };
+    for (const Image& image : images) {
+        if (image.loadAddress() != base)
+            continue;
+#if OS(LINUX)
+        struct stat fromSnapshot;
+        struct stat fromPath;
+        TEST_ASSERT(!fstat(image.fileDescriptor(), &fromSnapshot) && !stat(info.dli_fname, &fromPath)
+            && fromSnapshot.st_dev == fromPath.st_dev && fromSnapshot.st_ino == fromPath.st_ino,
+            "an image's file descriptor is the file the loader mapped there");
+#endif
+        return &image;
+    }
+    return nullptr;
+}
+
+static void testImages(RefPtr<Process> process)
+{
+    Snapshot snapshot(process);
+    const Vector<Image>& images = snapshot.images();
+    TEST_ASSERT(!images.isEmpty(), "a snapshot lists the images of its process");
+    TEST_ASSERT(&snapshot.images() == &images, "the image list is read once");
+
+    const Image* executable = imageContaining(images, reinterpret_cast<const void*>(&testSnapshot));
+    TEST_ASSERT(executable, "the image list has this executable, at the address the loader put it");
+    const Image* javaScriptCore = imageContaining(images, reinterpret_cast<const void*>(&JSGlobalContextCreate));
+    TEST_ASSERT(javaScriptCore, "the image list has JavaScriptCore, at the address the loader put it");
+
+#if OS(DARWIN)
+    unsigned withoutUUID = 0;
+    unsigned withoutPath = 0;
+    for (const Image& image : images) {
+        if (std::ranges::all_of(image.uuid(), [](uint8_t byte) { return !byte; }))
+            ++withoutUUID;
+        if (!image.path().length())
+            ++withoutPath;
+    }
+    TEST_ASSERT_EQ(withoutUUID, 0u, "every image has a UUID");
+    TEST_ASSERT_EQ(withoutPath, 0u, "every image has a path");
+    if (executable && javaScriptCore)
+        TEST_ASSERT(executable->uuid() != javaScriptCore->uuid(), "two images have two UUIDs");
+
+    // Shared-cache images have no debug info, so they are left out.
+    TEST_ASSERT(!imageContaining(images, reinterpret_cast<const void*>(&malloc)),
+        "a shared-cache image is not listed");
+#else
+    TEST_ASSERT(imageContaining(images, reinterpret_cast<const void*>(&malloc)),
+        "the image list has libc");
+#endif
+}
 
 void testSnapshot()
 {
@@ -90,11 +157,13 @@ void testSnapshot()
         TEST_ASSERT(later.id() > firstId + 1, "identifiers are not reused after a snapshot is destroyed");
     }
     {
-        ExpectedErrors expectedErrors(3);
+        ExpectedErrors expectedErrors(4);
         RefPtr<Process> unattached = Process::create(getpid());
         Snapshot snapshot(unattached);
         TEST_ASSERT(!snapshot.isValid(), "a snapshot of an unattached process is invalid");
         TEST_ASSERT(snapshot.threads().isEmpty(), "an invalid snapshot reports no threads");
+        TEST_ASSERT(snapshot.images().isEmpty(), "an invalid snapshot reports no images");
+        TEST_ASSERT(snapshot.images().isEmpty(), "and reports it once");
         TEST_ASSERT(!snapshot.symbol("g_config"), "an invalid snapshot resolves no symbol");
     }
     {
@@ -111,6 +180,7 @@ void testSnapshot()
         TEST_ASSERT(!snapshot.symbol(nullptr), "an unnamed symbol resolves to nothing");
         TEST_ASSERT(!snapshot.symbol(""), "an empty symbol name resolves to nothing");
     }
+    testImages(process);
 
 #if OS(DARWIN)
     {

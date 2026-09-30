@@ -69,6 +69,9 @@ else ()
 
         unix/UniStdExtrasUnix.cpp
     )
+    list(APPEND WTF_PUBLIC_HEADERS
+        unix/UnixFileDescriptor.h
+    )
 endif ()
 
 if (WIN32)

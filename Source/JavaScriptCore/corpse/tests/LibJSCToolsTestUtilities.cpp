@@ -302,6 +302,8 @@ void ParkedThreads::stopAndJoin()
 
 using CreateTargetObject = JSC::Corpse::Address (*)();
 
+enum class TargetAfterSnapshot : bool { KeepsRunning, Exits };
+
 static uintptr_t executableBase()
 {
     Dl_info info;
@@ -343,7 +345,7 @@ static std::unique_ptr<JSC::Corpse::Snapshot> takeSnapshot(pid_t pid)
     return snapshot;
 }
 
-static void spawnAndAnalyze(const char* executable, char* const* arguments, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
+static void spawnAndAnalyze(const char* executable, char* const* arguments, TargetAfterSnapshot after, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
 {
     std::array<int, 2> addressPipe { -1, -1 };
     bool opened = !pipe(addressPipe.data());
@@ -381,18 +383,19 @@ static void spawnAndAnalyze(const char* executable, char* const* arguments, NOES
     if (!reported)
         return;
 
-    if (auto snapshot = takeSnapshot(child))
-        analyze(*snapshot, JSC::Corpse::Address { address });
+    auto snapshot = takeSnapshot(child);
+    if (!snapshot)
+        return;
+    if (after == TargetAfterSnapshot::Exits) {
+        killChild.release();
+        kill(child, SIGKILL);
+        while (waitpid(child, nullptr, 0) < 0 && errno == EINTR) { }
+    }
+    analyze(*snapshot, JSC::Corpse::Address { address });
 }
 
-void analyzeInAndOutOfProcess(CreateTargetObject create, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
+static void analyzeOutOfProcess(CreateTargetObject create, TargetAfterSnapshot after, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
 {
-    {
-        JSC::Corpse::Address object = create();
-        if (auto snapshot = takeSnapshot(getpid()))
-            analyze(*snapshot, object);
-    }
-
     if (linuxSkip("analysis of a separate process", "attaching to another process is not implemented on Linux yet"))
         return;
 
@@ -415,7 +418,22 @@ void analyzeInAndOutOfProcess(CreateTargetObject create, NOESCAPE const Function
         const_cast<char*>(offsetText.legacyCStringPointer()),
         nullptr
     };
-    spawnAndAnalyze(executablePath.legacyCStringPointer(), arguments, analyze);
+    spawnAndAnalyze(executablePath.legacyCStringPointer(), arguments, after, analyze);
+}
+
+void analyzeInAndOutOfProcess(CreateTargetObject create, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
+{
+    {
+        JSC::Corpse::Address object = create();
+        if (auto snapshot = takeSnapshot(getpid()))
+            analyze(*snapshot, object);
+    }
+    analyzeOutOfProcess(create, TargetAfterSnapshot::KeepsRunning, analyze);
+}
+
+void analyzeAfterTargetExits(CreateTargetObject create, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
+{
+    analyzeOutOfProcess(create, TargetAfterSnapshot::Exits, analyze);
 }
 
 #endif // ENABLE(MYA)

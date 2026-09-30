@@ -362,6 +362,10 @@ if (NOT HAS_RUN_WEBKIT_COMMON)
         set(CMAKE_VISIBILITY_INLINES_HIDDEN OFF)
         WEBKIT_APPEND_GLOBAL_CXX_FLAGS(-frtti)
         WEBKIT_APPEND_GLOBAL_COMPILER_FLAGS(-fstandalone-debug)
+        if (NOT APPLE)
+            string(APPEND CMAKE_EXE_LINKER_FLAGS " -Wl,--build-id")
+            string(APPEND CMAKE_SHARED_LINKER_FLAGS " -Wl,--build-id")
+        endif ()
     endif ()
 
     # This has to come after Options${PORT} to see any ENABLE_THREAD_SAFETY_WARNING.

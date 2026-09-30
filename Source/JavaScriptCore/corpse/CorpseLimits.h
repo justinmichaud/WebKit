@@ -51,6 +51,15 @@ namespace Corpse {
 constexpr size_t maxLoadCommandsSize = 128 * KB; // About 17× the measured maximum.
 constexpr size_t maxExportsTrieSize = 16 * MB; // About 8× the measured maximum.
 constexpr uint32_t maxImageCount = 16 * 1024; // About 6× the measured maximum.
+constexpr size_t maxImagePathLength = 4 * KB; // 4× PATH_MAX.
+constexpr size_t maxVTableSlots = 64 * 1024; // Well above the few hundred virtual functions of the largest WebCore classes.
+
+// A JS heap holds a few hundred BlockDirectories, and no container walked out of
+// it comes near these element counts.
+constexpr unsigned maxBlockDirectories = 64 * 1024;
+constexpr unsigned maxLinkedListLength = 64 * 1024;
+constexpr unsigned maxHashTableSize = 64 * 1024 * 1024;
+constexpr unsigned maxVectorSize = 16 * 1024 * 1024;
 
 // A lookup that finds nothing will read every image's load commands and exports
 // trie, which measured 101 MB for the ~2,800 image process above and 0.4 MB for

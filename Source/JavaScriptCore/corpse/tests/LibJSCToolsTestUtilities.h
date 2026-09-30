@@ -72,8 +72,10 @@ bool linuxSkip(const char* name, const char* why);
 
 void testAddress();
 void testByteParser();
+void testDebugInfo();
 void testDiagnostics();
 void testExportsTrie();
+void testHeapWalk();
 void testProcess();
 void testSymbol();
 void testRegion();
@@ -81,7 +83,6 @@ void testMemory();
 void testSnapshot();
 void testThreads();
 void fuzzExportsTrie(uint64_t seed, unsigned iterations);
-void testTypeinfo();
 void testVM();
 
 // Announces a suite, times it, and reports on the way out. Destroyed on every path out
@@ -229,6 +230,10 @@ private:
 
 // create() an object, then analyze() it in and out of process.
 void analyzeInAndOutOfProcess(JSC::Corpse::Address (*create)(), NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address object)>& analyze);
+
+// create() an object in a separate process, snapshot it, and analyze() the
+// snapshot only after that process has exited.
+void analyzeAfterTargetExits(JSC::Corpse::Address (*create)(), NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address object)>& analyze);
 
 // The main function for a copy of this process launched as `--target <offset>`: runs the
 // create function at `offset` into this executable and holds its object.

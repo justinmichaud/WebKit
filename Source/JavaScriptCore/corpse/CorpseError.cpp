@@ -118,6 +118,18 @@ static ASCIILiteral label(DiagnosticCounter counter)
         return "thread states read"_s;
     case DiagnosticCounter::UnreadableThreadStates:
         return "threads with unreadable state"_s;
+    case DiagnosticCounter::ImagesWithoutPath:
+        return "images without a readable path"_s;
+    case DiagnosticCounter::MappedFilesListed:
+        return "mapped files listed"_s;
+    case DiagnosticCounter::UnopenableMappedFiles:
+        return "mapped files that could not be opened"_s;
+    case DiagnosticCounter::MappedFilesWithoutELFHeader:
+        return "mapped files without an ELF header"_s;
+    case DiagnosticCounter::ImagesWithoutDebugInfo:
+        return "images liblldb could not open"_s;
+    case DiagnosticCounter::VTableSlotsNotDestructors:
+        return "vtable slots that are not a destructor"_s;
     }
     RELEASE_ASSERT_NOT_REACHED();
 }

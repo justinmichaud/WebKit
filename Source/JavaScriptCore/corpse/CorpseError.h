@@ -72,8 +72,14 @@ enum class DiagnosticCounter : uint8_t {
     ThreadsListed,
     ThreadStatesRead,
     UnreadableThreadStates,
+    ImagesWithoutPath,
+    MappedFilesListed,
+    UnopenableMappedFiles,
+    MappedFilesWithoutELFHeader,
+    ImagesWithoutDebugInfo,
+    VTableSlotsNotDestructors,
 };
-constexpr size_t numberOfDiagnosticCounters = static_cast<size_t>(DiagnosticCounter::UnreadableThreadStates) + 1;
+constexpr size_t numberOfDiagnosticCounters = static_cast<size_t>(DiagnosticCounter::VTableSlotsNotDestructors) + 1;
 
 // Mya may be used on corrupted target heaps; we must be able to
 // use and test it in these cases without crashing, and
