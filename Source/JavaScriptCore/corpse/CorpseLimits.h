@@ -52,6 +52,9 @@ constexpr size_t maxLoadCommandsSize = 128 * KB; // About 17× the measured maxi
 constexpr size_t maxExportsTrieSize = 16 * MB; // About 8× the measured maximum.
 constexpr uint32_t maxImageCount = 16 * 1024; // About 6× the measured maximum.
 constexpr size_t maxImagePathLength = 4 * KB; // 4× PATH_MAX.
+constexpr size_t maxAuxiliaryVectorEntries = 128; // Linux gives about 20.
+constexpr uint64_t maxProgramHeaders = 256; // An ELF object has about 12.
+constexpr size_t maxDynamicEntries = 4096; // A shared library has about 40.
 constexpr size_t maxVTableSlots = 64 * 1024; // Well above the few hundred virtual functions of the largest WebCore classes.
 
 // A JS heap holds a few hundred BlockDirectories, and no container walked out of

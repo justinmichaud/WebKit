@@ -51,27 +51,18 @@ static UTF8CString copyOf(const char* string)
     return UTF8CString(byteCast<char8_t>(unsafeSpan(string)));
 }
 
-TargetType::TargetType(SnapshotDebugInfo& debugInfo, const lldb::SBType& type)
+TargetType::TargetType(SnapshotDebugInfo& debugInfo, const lldb::SBType& canonicalType)
     : m_debugInfo(debugInfo)
-    , m_type(makeUniqueWithoutFastMallocCheck<lldb::SBType>(lldb::SBType(type).GetCanonicalType()))
+    , m_type(makeUniqueWithoutFastMallocCheck<lldb::SBType>(canonicalType))
+    , m_byteSize(m_type->GetByteSize())
 {
 }
 
 TargetType::~TargetType() = default;
 
-Ref<TargetType> TargetType::wrap(const lldb::SBType& type) const
-{
-    return adoptRef(*new TargetType(m_debugInfo.get(), type));
-}
-
 UTF8CString TargetType::name() const
 {
     return copyOf(m_type->GetName());
-}
-
-size_t TargetType::byteSize() const
-{
-    return m_type->GetByteSize();
 }
 
 static bool isSignedInteger(lldb::SBType type)
@@ -127,7 +118,14 @@ static bool isIntegerBasicType(lldb::BasicType type)
     }
 }
 
-TargetType::Layout TargetType::layout() const
+const TargetType::Layout& TargetType::layout() const
+{
+    if (!m_layout)
+        m_layout.emplace(readLayout());
+    return *m_layout;
+}
+
+TargetType::Layout TargetType::readLayout() const
 {
     uint32_t typeClass = m_type->GetTypeClass();
 
@@ -139,10 +137,14 @@ TargetType::Layout TargetType::layout() const
             lldb::SBTypeMember member = m_type->GetFieldAtIndex(index);
             uint64_t offsetInBits = member.GetOffsetInBits();
             bool isBitfield = member.IsBitfield();
+            // A flexible array member, like CStringBuffer's characters, starts where
+            // the class ends: it is storage after the class, not part of it.
+            if (offsetInBits / 8 >= m_byteSize)
+                continue;
             result.properFields.append(Field {
                 copyOf(member.GetName()),
                 static_cast<size_t>(offsetInBits / 8),
-                wrap(member.GetType()),
+                m_debugInfo.type(member.GetType()),
                 isBitfield ? static_cast<unsigned>(offsetInBits % 8) : 0,
                 isBitfield ? member.GetBitfieldSizeInBits() : 0,
             });
@@ -151,7 +153,7 @@ TargetType::Layout TargetType::layout() const
         uint32_t virtualBaseCount = m_type->GetNumberOfVirtualBaseClasses();
         for (uint32_t index = 0; index < virtualBaseCount; ++index) {
             lldb::SBTypeMember member = m_type->GetVirtualBaseClassAtIndex(index);
-            result.virtualBases.append(Base { static_cast<size_t>(member.GetOffsetInBytes()), wrap(member.GetType()) });
+            result.virtualBases.append(Base { static_cast<size_t>(member.GetOffsetInBytes()), m_debugInfo.type(member.GetType()) });
         }
 
         uint32_t baseCount = m_type->GetNumberOfDirectBaseClasses();
@@ -166,15 +168,15 @@ TargetType::Layout TargetType::layout() const
             }
             if (isVirtual)
                 continue;
-            result.bases.append(Base { static_cast<size_t>(member.GetOffsetInBytes()), wrap(baseType) });
+            result.bases.append(Base { static_cast<size_t>(member.GetOffsetInBytes()), m_debugInfo.type(baseType) });
         }
         return result;
     }
 
     if (typeClass & lldb::eTypeClassPointer)
-        return Pointer { wrap(m_type->GetPointeeType()) };
+        return Pointer { m_debugInfo.type(m_type->GetPointeeType()) };
     if (typeClass & lldb::eTypeClassReference)
-        return Pointer { wrap(m_type->GetDereferencedType()) };
+        return Pointer { m_debugInfo.type(m_type->GetDereferencedType()) };
 
     if (typeClass & lldb::eTypeClassEnumeration)
         return Integer { isSignedInteger(m_type->GetEnumerationIntegerType()) };
@@ -207,12 +209,7 @@ UTF8CString TargetType::name() const
     RELEASE_ASSERT_NOT_REACHED();
 }
 
-size_t TargetType::byteSize() const
-{
-    RELEASE_ASSERT_NOT_REACHED();
-}
-
-TargetType::Layout TargetType::layout() const
+const TargetType::Layout& TargetType::layout() const
 {
     RELEASE_ASSERT_NOT_REACHED();
 }

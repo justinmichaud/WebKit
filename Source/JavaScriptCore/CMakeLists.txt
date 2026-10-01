@@ -1635,9 +1635,16 @@ if (USE_INSPECTOR_SOCKET_SERVER)
     )
 endif ()
 
-# A machine without liblldb still builds, but the mya_heap tests fail.
+# A machine without liblldb still builds, but the mya_heap tests fail. liblldb 18
+# cannot resolve addresses in an ELF segment that a PT_TLS segment starts at,
+# such as libstdc++'s vtables; 19 can.
 if (ENABLE_MYA_HEAP)
-    find_package(LLDB)
+    find_package(LLDB 19)
+    if (LLDB_VERSION AND LLDB_VERSION VERSION_LESS 19)
+        message(FATAL_ERROR "mya_heap needs liblldb 19 or newer, but found liblldb ${LLDB_VERSION} "
+            "(${LLDB_LIBRARY}). Install liblldb-22-dev from apt.llvm.org, then configure again "
+            "with -ULLDB_INCLUDE_DIR -ULLDB_LIBRARY.")
+    endif ()
     if (NOT LLDB_FOUND)
         message(WARNING "mya_heap is on but liblldb was not found. "
             "Install liblldb-dev (Debian, Ubuntu), lldb-devel (Fedora) or llvm (Homebrew), "

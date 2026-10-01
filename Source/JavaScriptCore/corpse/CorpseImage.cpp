@@ -38,21 +38,17 @@
 #include <mach-o/dyld_images.h>
 #include <wtf/HashMap.h>
 #else
-#include <dirent.h>
+#include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
-#include <sys/stat.h>
+#include <link.h>
+#include <unistd.h>
 #include <wtf/SafeStrerror.h>
-#include <wtf/Scope.h>
 #include <wtf/text/MakeString.h>
-#include <wtf/text/StringToIntegerConversion.h>
-#include <wtf/text/StringView.h>
 #endif
 
 namespace JSC {
 namespace Corpse {
-
-#if OS(DARWIN)
 
 static std::optional<UTF8CString> readPath(Memory& memory, Address address)
 {
@@ -72,6 +68,8 @@ static std::optional<UTF8CString> readPath(Memory& memory, Address address)
     }
     return std::nullopt;
 }
+
+#if OS(DARWIN)
 
 // dyld lists a UUID for every image outside the shared cache. Shared-cache
 // images have no debug info to find, so they are not listed here.
@@ -135,119 +133,103 @@ Vector<Image> Image::collect(Snapshot& snapshot)
 
 #else
 
-struct Mapping {
-    Address start;
-    Address end;
-};
-
-// The kernel names each entry of map_files by the range it maps, "<start>-<end>" in hex.
-static std::optional<Mapping> parseMapping(StringView name)
+// glibc's r_debug, found as ld.so's debugger interface says: the kernel's
+// auxiliary vector gives the executable's program headers, whose PT_DYNAMIC
+// has a DT_DEBUG entry that ld.so points at r_debug.
+static std::optional<Address> loaderDebugState(Memory& memory, int pid)
 {
-    size_t dash = name.find('-');
-    if (dash == notFound)
+    ASCIICString auxvPath = makeString("/proc/"_s, pid, "/auxv"_s).ascii();
+    int file = open(auxvPath.data(), O_RDONLY | O_CLOEXEC);
+    if (file < 0) {
+        CORPSE_REPORT("Could not open the auxiliary vector of pid %d: %s", pid, safeStrerror(errno).data());
         return std::nullopt;
-    auto start = parseInteger<uint64_t>(name.left(dash), 16);
-    auto end = parseInteger<uint64_t>(name.substring(dash + 1), 16);
-    if (!start || !end || *end <= *start)
-        return std::nullopt;
-    return Mapping { Address { *start }, Address { *end } };
-}
-
-// A loaded image's header mapping ends before the file does, or is followed
-// by more mappings of the file: ld.so fills the gaps between a library's
-// segments with them. A file mapped whole with mmap, as a debugger in the
-// process does, is one mapping at least as long as the file.
-static std::optional<Address> headerOfLoadedImage(const Vector<Mapping>& mappings, uint64_t fileSize)
-{
-    std::optional<Address> header;
-    for (const Mapping& mapping : mappings) {
-        bool hasPrevious = mappings.containsIf([&](const Mapping& other) {
-            return other.end == mapping.start;
-        });
-        bool hasNext = mappings.containsIf([&](const Mapping& other) {
-            return other.start == mapping.end;
-        });
-        bool shorterThanFile = mapping.end - mapping.start < fileSize;
-        if (!hasPrevious && (hasNext || shorterThanFile) && (!header || mapping.start < *header))
-            header = mapping.start;
     }
-    return header;
+    std::array<Elf64_auxv_t, maxAuxiliaryVectorEntries> auxv;
+    ssize_t length = read(file, auxv.data(), sizeof(auxv));
+    close(file);
+    Address programHeadersAddress;
+    uint64_t programHeaderCount = 0;
+    for (const Elf64_auxv_t& entry : std::span { auxv }.first(std::max<ssize_t>(length, 0) / sizeof(Elf64_auxv_t))) {
+        if (entry.a_type == AT_PHDR)
+            programHeadersAddress = Address { entry.a_un.a_val };
+        else if (entry.a_type == AT_PHNUM)
+            programHeaderCount = entry.a_un.a_val;
+    }
+    if (!programHeadersAddress || !programHeaderCount || programHeaderCount > maxProgramHeaders) {
+        CORPSE_REPORT("The auxiliary vector of pid %d gives %llu program headers at 0x%llx",
+            pid, static_cast<unsigned long long>(programHeaderCount), programHeadersAddress.toTargetVMAddress());
+        return std::nullopt;
+    }
+    auto programHeaders = memory.span<Elf64_Phdr>(programHeadersAddress, programHeaderCount);
+    if (!programHeaders) {
+        CORPSE_REPORT("Could not read the executable's program headers at 0x%llx", programHeadersAddress.toTargetVMAddress());
+        return std::nullopt;
+    }
+
+    // PT_PHDR is where the headers are before the slide.
+    std::optional<uint64_t> slide;
+    std::optional<uint64_t> dynamic;
+    for (const Elf64_Phdr& header : programHeaders) {
+        if (header.p_type == PT_PHDR)
+            slide = programHeadersAddress.toTargetVMAddress() - header.p_vaddr;
+        else if (header.p_type == PT_DYNAMIC)
+            dynamic = header.p_vaddr;
+    }
+    if (!slide || !dynamic) {
+        CORPSE_REPORT("The executable of pid %d has no PT_PHDR or no PT_DYNAMIC", pid);
+        return std::nullopt;
+    }
+
+    for (size_t index = 0; index < maxDynamicEntries; ++index) {
+        auto entry = memory.ptr<Elf64_Dyn>(Address { *slide + *dynamic } + index * sizeof(Elf64_Dyn));
+        if (!entry || entry->d_tag == DT_NULL)
+            break;
+        if (entry->d_tag == DT_DEBUG && entry->d_un.d_ptr)
+            return Address { entry->d_un.d_ptr };
+    }
+    CORPSE_REPORT("The executable of pid %d has no DT_DEBUG that ld.so filled in", pid);
+    return std::nullopt;
 }
 
-// Each mapped file is held open, so that it is read without going through its path.
+// ld.so lists every image it loaded in r_debug's link_map chain, as dyld does
+// in dyld_all_image_infos.
 Vector<Image> Image::collect(Snapshot& snapshot)
 {
     int pid = static_cast<int>(snapshot.process()->pid());
-    ASCIICString directoryPath = makeString("/proc/"_s, pid, "/map_files"_s).ascii();
-    DIR* directory = opendir(directoryPath.data());
-    if (!directory) {
-        CORPSE_REPORT("Could not list the mapped files of pid %d: %s", pid, safeStrerror(errno).data());
+    Memory& memory = snapshot.memory();
+    auto debugStateAddress = loaderDebugState(memory, pid);
+    if (!debugStateAddress)
+        return { };
+    auto debugState = memory.ptr<r_debug>(*debugStateAddress);
+    if (!debugState) {
+        CORPSE_REPORT("Could not read r_debug at 0x%llx", debugStateAddress->toTargetVMAddress());
         return { };
     }
-    auto closeDirectory = makeScopeExit([&] {
-        closedir(directory);
-    });
 
-    struct MappedFile {
-        dev_t device;
-        ino_t inode;
-        uint64_t size;
-        Vector<Mapping> mappings;
-        UnixFileDescriptor file;
-    };
-    Vector<MappedFile> files;
-
-    while (dirent* entry = readdir(directory)) {
-        auto mapping = parseMapping(StringView::fromLatin1(entry->d_name));
-        if (!mapping)
-            continue; // "." and "..".
-        Diagnostics::count(DiagnosticCounter::MappedFilesListed);
-
-        UnixFileDescriptor file { openat(dirfd(directory), entry->d_name, O_RDONLY | O_CLOEXEC), UnixFileDescriptor::Adopt };
-        if (!file) {
-            if (errno == EPERM) {
-                CORPSE_REPORT("Could not open the mapped files of pid %d: that needs CAP_CHECKPOINT_RESTORE", pid);
-                return { };
-            }
-            // The mapping may have gone away since the directory was read.
-            Diagnostics::count(DiagnosticCounter::UnopenableMappedFiles);
-            continue;
-        }
-        struct stat status;
-        if (fstat(file.value(), &status)) {
-            Diagnostics::count(DiagnosticCounter::UnopenableMappedFiles);
-            continue;
-        }
-
-        size_t index = files.findIf([&](const MappedFile& mapped) {
-            return mapped.device == status.st_dev && mapped.inode == status.st_ino;
-        });
-        if (index != notFound) {
-            files[index].mappings.append(*mapping);
-            continue;
-        }
-        if (files.size() >= maxImageCount) {
-            CORPSE_REPORT("pid %d maps more than %u files, too many to be a real process", pid, maxImageCount);
+    Vector<Image> result;
+    unsigned listed = 0;
+    for (Address next { debugState->r_map }; next; ++listed) {
+        if (listed >= maxImageCount) {
+            CORPSE_REPORT("pid %d has more than %u images, too many to be a real image list", pid, maxImageCount);
             return { };
         }
-        files.append({ status.st_dev, status.st_ino, static_cast<uint64_t>(status.st_size), { *mapping }, WTF::move(file) });
-    }
-
-    // Data files, like fonts and the locale archive, are mapped too; only an
-    // ELF object has its header where it is mapped.
-    constexpr std::array<uint8_t, 4> elfMagic { 0x7f, 'E', 'L', 'F' };
-    Memory& memory = snapshot.memory();
-    Vector<Image> result;
-    for (MappedFile& mapped : files) {
-        auto header = headerOfLoadedImage(mapped.mappings, mapped.size);
-        auto magic = header ? memory.ptr<std::array<uint8_t, 4>>(*header) : Memory::Ptr<std::array<uint8_t, 4>> { };
-        if (!magic || *magic != elfMagic) {
-            Diagnostics::count(DiagnosticCounter::MappedFilesWithoutELFHeader);
+        auto entry = memory.ptr<link_map>(next);
+        if (!entry) {
+            CORPSE_REPORT("Could not read the link_map at 0x%llx", next.toTargetVMAddress());
+            break;
+        }
+        next = Address { entry->l_next };
+        auto path = readPath(memory, Address { entry->l_name });
+        // Only the executable's entry has no name.
+        if (path && !path->length())
+            path = snapshot.process()->executablePath();
+        if (!path || !path->length()) {
+            Diagnostics::count(DiagnosticCounter::ImagesWithoutPath);
             continue;
         }
-        result.append(Image { *header, WTF::move(mapped.file) });
+        result.append(Image { Address { entry->l_addr }, WTF::move(*path) });
     }
-    Diagnostics::count(DiagnosticCounter::ImagesListed, result.size());
+    Diagnostics::count(DiagnosticCounter::ImagesListed, listed);
     return result;
 }
 

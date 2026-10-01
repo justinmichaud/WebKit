@@ -231,6 +231,10 @@ private:
 // create() an object, then analyze() it in and out of process.
 void analyzeInAndOutOfProcess(JSC::Corpse::Address (*create)(), NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address object)>& analyze);
 
+// create() an object in a separate process only, then analyze() it there. For
+// an object create() reports itself, from a state it never returns from.
+void analyzeInSeparateProcess(JSC::Corpse::Address (*create)(), NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address object)>& analyze);
+
 // create() an object in a separate process, snapshot it, and analyze() the
 // snapshot only after that process has exited.
 void analyzeAfterTargetExits(JSC::Corpse::Address (*create)(), NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address object)>& analyze);
@@ -238,6 +242,10 @@ void analyzeAfterTargetExits(JSC::Corpse::Address (*create)(), NOESCAPE const Fu
 // The main function for a copy of this process launched as `--target <offset>`: runs the
 // create function at `offset` into this executable and holds its object.
 int runCorpseTarget(const char* offsetText);
+
+// What the target process does once it has its object: reports it to the
+// analysis and waits to be killed.
+[[noreturn]] void reportTargetObjectAndPark(JSC::Corpse::Address object);
 
 #endif // ENABLE(MYA)
 

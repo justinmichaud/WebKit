@@ -322,9 +322,13 @@ int runCorpseTarget(const char* offsetText)
     }
     // Warning: do not ever move this into a production binary!
     auto create = tagCodePtr<CreateTargetObject, CFunctionPtrTag>(std::bit_cast<void*>(base + *offset));
-    uint64_t address = create().toTargetVMAddress();
-    if (write(STDOUT_FILENO, &address, sizeof(address)) != sizeof(address))
-        return 1;
+    reportTargetObjectAndPark(create());
+}
+
+void reportTargetObjectAndPark(JSC::Corpse::Address object)
+{
+    uint64_t address = object.toTargetVMAddress();
+    RELEASE_ASSERT(write(STDOUT_FILENO, &address, sizeof(address)) == sizeof(address));
 
     // The analysis kills this process when it is done with the object.
     while (true)
@@ -396,9 +400,6 @@ static void spawnAndAnalyze(const char* executable, char* const* arguments, Targ
 
 static void analyzeOutOfProcess(CreateTargetObject create, TargetAfterSnapshot after, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
 {
-    if (linuxSkip("analysis of a separate process", "attaching to another process is not implemented on Linux yet"))
-        return;
-
     uintptr_t createAddress = reinterpret_cast<uintptr_t>(removeCodePtrTag(create));
     Dl_info info;
     bool inThisExecutable = dladdr(std::bit_cast<void*>(createAddress), &info) && reinterpret_cast<uintptr_t>(info.dli_fbase) == executableBase();
@@ -431,9 +432,20 @@ void analyzeInAndOutOfProcess(CreateTargetObject create, NOESCAPE const Function
     analyzeOutOfProcess(create, TargetAfterSnapshot::KeepsRunning, analyze);
 }
 
+void analyzeInSeparateProcess(CreateTargetObject create, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
+{
+    analyzeOutOfProcess(create, TargetAfterSnapshot::KeepsRunning, analyze);
+}
+
 void analyzeAfterTargetExits(CreateTargetObject create, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
 {
+#if OS(DARWIN)
     analyzeOutOfProcess(create, TargetAfterSnapshot::Exits, analyze);
+#else
+    UNUSED_PARAM(create);
+    UNUSED_PARAM(analyze);
+    skipSuite("analysis after the target exits", "a Linux snapshot reads the live process, which is gone once it exits");
+#endif
 }
 
 #endif // ENABLE(MYA)

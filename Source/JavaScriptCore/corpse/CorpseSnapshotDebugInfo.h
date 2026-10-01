@@ -31,14 +31,18 @@
 
 #include <JavaScriptCore/CorpseAddress.h>
 #include <memory>
+#include <wtf/HashMap.h>
 #include <wtf/RefCounted.h>
 #include <wtf/RefPtr.h>
 #include <wtf/TZoneMalloc.h>
 #include <wtf/Vector.h>
+#include <wtf/text/StringHash.h>
+#include <wtf/text/WTFString.h>
 
 namespace lldb {
 class SBDebugger;
 class SBTarget;
+class SBType;
 }
 
 namespace JSC {
@@ -59,19 +63,31 @@ public:
     // The class of the complete object containing the polymorphic object at
     // `address`, and where that complete object starts. The class must have a
     // virtual destructor: its vtable's destructor is what names the class.
-    RefPtr<TargetType> dynamicTypeAt(Snapshot&, Address, Address& completeObject);
+    const TargetType* dynamicTypeAt(Snapshot&, Address, Address& completeObject);
 
 private:
+    friend class TargetType;
+
     SnapshotDebugInfo(std::unique_ptr<lldb::SBDebugger>&&, std::unique_ptr<lldb::SBTarget>&&);
+
+    // The one TargetType for `type`, made the first time it is asked for, so
+    // that each type's layout is read from the debug info once.
+    const TargetType& type(const lldb::SBType&);
+
+    // The class the vtable at `vtable` belongs to, or null, having reported why.
+    const TargetType* classOfVTable(Snapshot&, Address vtable);
 
     // The class whose destructor starts at `function`, or null. `inImage` is
     // false when no image with debug info is mapped there, which is how a walk
     // over vtable slots ends.
-    RefPtr<TargetType> classOfDestructor(Address function, bool& inImage);
+    const TargetType* classOfDestructor(Address function, bool& inImage);
     bool isInImage(Address) const;
 
     std::unique_ptr<lldb::SBDebugger> m_debugger;
     std::unique_ptr<lldb::SBTarget> m_target;
+    // By name; types of one name from different images or anonymous namespaces share an entry.
+    HashMap<String, Vector<std::unique_ptr<TargetType>>> m_types;
+    HashMap<Address, const TargetType*> m_classesOfVTables;
 };
 
 } // namespace Corpse

@@ -96,7 +96,8 @@ OTHER_LDFLAGS = $(inherited) $(WK_COMMON_OTHER_LDFLAGS);
 // MYA_HEAP: mya features allowing the analysis of WebKit C++ heaps.
 WK_MYA_HEAP = NO;
 WK_MYA_HEAP[config=Debug][sdk=macosx*] = YES;
-WK_MYA_HEAP_PREPROCESSOR_DEFINITIONS_YES = ENABLE_MYA_HEAP=1;
+// PAS_BMALLOC_HIDDEN=0 exports libpas's API, which the heap walk's tests enumerate their own heap through.
+WK_MYA_HEAP_PREPROCESSOR_DEFINITIONS_YES = ENABLE_MYA_HEAP=1 PAS_BMALLOC_HIDDEN=0;
 
 WK_COMMON_OTHER_TAPI_FLAGS = -x objective-c++ -std=c++2b -fno-rtti $(WK_SANITIZER_OTHER_TAPI_FLAGS) $(WK_AVAILABILITY_OVERLAY_FLAGS);
 OTHER_TAPI_FLAGS = $(inherited) $(WK_COMMON_OTHER_TAPI_FLAGS);

@@ -33,11 +33,7 @@
 #include <array>
 #include <stdint.h>
 #include <wtf/Vector.h>
-#if OS(DARWIN)
 #include <wtf/text/CString.h>
-#else
-#include <wtf/unix/UnixFileDescriptor.h>
-#endif
 
 namespace JSC {
 namespace Corpse {
@@ -47,17 +43,16 @@ class Snapshot;
 // One image (the executable or a shared library) mapped into a snapshot.
 class Image {
 public:
-    Address loadAddress() const { return m_loadAddress; } // Where the image's header is mapped.
+    // Where the image's header is mapped. On Linux this is link_map's l_addr,
+    // the slide, which is where the header is in a position-independent image.
+    Address loadAddress() const { return m_loadAddress; }
+
+    // What the loader recorded when it loaded the image.
+    const UTF8CString& path() const { return m_path; }
 
 #if OS(DARWIN)
     using UUID = std::array<uint8_t, 16>;
-
-    // What dyld recorded when it loaded the image.
-    const UTF8CString& path() const { return m_path; }
     const UUID& uuid() const { return m_uuid; }
-#else
-    // The mapped file itself, held open by the snapshot.
-    int fileDescriptor() const { return m_file.value(); }
 #endif
 
 private:
@@ -71,19 +66,18 @@ private:
         , m_uuid(uuid)
     {
     }
+#else
+    Image(Address loadAddress, UTF8CString&& path)
+        : m_loadAddress(loadAddress)
+        , m_path(WTF::move(path))
+    {
+    }
+#endif
 
     Address m_loadAddress;
     UTF8CString m_path;
+#if OS(DARWIN)
     UUID m_uuid;
-#else
-    Image(Address loadAddress, UnixFileDescriptor&& file)
-        : m_loadAddress(loadAddress)
-        , m_file(WTF::move(file))
-    {
-    }
-
-    Address m_loadAddress;
-    UnixFileDescriptor m_file;
 #endif
 };
 

@@ -30,6 +30,7 @@
 #if ENABLE(MYA)
 
 #include <JavaScriptCore/CorpseAddress.h>
+#include <JavaScriptCore/CorpseSnapshotDebugInfo.h>
 #include <JavaScriptCore/CorpseTargetType.h>
 #include <optional>
 #include <span>
@@ -58,7 +59,7 @@ class TargetValue {
 public:
     // Invalid, and silent, for a null address: a null pointer is a state of
     // the heap, not a failure.
-    static TargetValue at(Snapshot&, Address, Ref<TargetType>&&);
+    static TargetValue at(Snapshot&, Address, const TargetType&);
 
     // The complete object containing the polymorphic object at `address`, as
     // its dynamic type. Reported and nullopt if there is none.
@@ -73,7 +74,7 @@ public:
     explicit operator bool() const { return m_isValid; }
 
     Address address() const { return m_address; }
-    const TargetType& type() const { return m_type.get(); }
+    const TargetType& type() const { return *m_type; }
     Snapshot& snapshot() const { return *m_snapshot; }
 
     // Sub-values, by type().layout(). Only the fields a class declares itself
@@ -105,12 +106,12 @@ public:
     std::optional<int64_t> integer() const; // By the type's width and sign.
 
 private:
-    TargetValue(Snapshot&, Address, Ref<TargetType>&&, bool isValid);
+    TargetValue(Snapshot&, Address, const TargetType&, bool isValid);
 
-    TargetValue invalidated() const { return TargetValue(*m_snapshot, m_address, Ref { m_type }, false); }
+    TargetValue invalidated() const { return TargetValue(*m_snapshot, m_address, *m_type, false); }
 
     // The value at `offset` within this one, reporting if it does not fit.
-    TargetValue member(size_t offset, Ref<TargetType>&&) const;
+    TargetValue member(size_t offset, const TargetType&) const;
 
     void forEachNonVirtualField(const Function<void(const TargetType::Field&, const TargetValue&)>&) const;
 
@@ -120,11 +121,12 @@ private:
     size_t bitfieldByteSize() const { return (m_bitOffset + m_bitSize + 7) / 8; }
 
     // The dynamic type, and where the complete object starts.
-    RefPtr<TargetType> dynamicType(Address& completeObject) const;
+    const TargetType* dynamicType(Address& completeObject) const;
 
     Snapshot* m_snapshot;
     Address m_address;
-    Ref<TargetType> m_type;
+    Ref<SnapshotDebugInfo> m_debugInfo; // Which owns m_type.
+    const TargetType* m_type;
     bool m_isValid;
     unsigned m_bitOffset { 0 };
     unsigned m_bitSize { 0 }; // Nonzero for a bitfield, which only integer() reads.

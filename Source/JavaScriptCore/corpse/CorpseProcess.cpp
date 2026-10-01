@@ -43,7 +43,9 @@
 #include <sys/proc.h>
 #include <sys/sysctl.h>
 #else
+#include <errno.h>
 #include <limits.h>
+#include <signal.h>
 #include <unistd.h>
 #include <wtf/text/MakeString.h>
 #endif
@@ -118,18 +120,20 @@ UTF8CString Process::executablePath() const
 
 #else
 
+// The handle is the pid, which process_vm_readv reads through. Reading needs
+// the permission ptrace needs, which a parent has over its child.
 bool Process::holdsLiveTask() const
 {
-    return isAttached();
+    return isAttached() && !(kill(m_pid, 0) && errno == ESRCH);
 }
 
 bool Process::isTranslated() const { return false; }
 
-// FIXME: Attach to processes other than this one.
 bool Process::attach()
 {
-    if (m_pid != getpid()) {
-        Error::report("Could not attach to PID %d: only this process can be attached to", static_cast<int>(m_pid));
+    if (kill(m_pid, 0) && errno == ESRCH) {
+        detach();
+        Error::report("No process with PID %d", static_cast<int>(m_pid));
         return false;
     }
     m_taskPort = OwnedTaskHandle::adopt(m_pid);

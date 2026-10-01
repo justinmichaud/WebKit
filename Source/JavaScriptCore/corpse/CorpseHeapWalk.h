@@ -50,6 +50,7 @@
 namespace JSC {
 
 class BlockDirectory;
+class Heap;
 class JSCell;
 class MarkedSpace;
 class Structure;
@@ -82,7 +83,8 @@ public:
     Remote<VM> vm() const { return m_vm; }
 
     // The cells MarkedSpace::forEachLiveCell would visit in the target inside
-    // a HeapIterationScope, which first stops every allocator.
+    // a HeapIterationScope, which first stops every allocator. The snapshot
+    // must be at a safe point: otherwise this reports it and visits nothing.
     void forEachLiveCell(const Function<IterationStatus(const Cell&)>&) const;
 
     // The cell at `address`, as a JSCell, and the Structure a cell's
@@ -92,12 +94,32 @@ public:
 
     using AtomBits = WTF::BitSet<MarkedBlock::atomsPerBlock>;
 
+    struct Allocation {
+        Address address;
+        uint64_t size;
+    };
+    struct Reach {
+        uint64_t bytesAllocated { 0 };
+        uint64_t bytesReached { 0 }; // Of the allocations the walk reaches any address in.
+        Vector<Allocation> largestMissed; // Largest first.
+    };
+
+    // How much of `allocations`, sorted by address, the walk reaches: every
+    // live cell, and every C++ object reached from the roots through a pointer
+    // whose pointee type is known and that lands inside an allocation.
+    Reach reach(const Vector<Allocation>&, size_t missedCount) const;
+
 private:
+    using BlockSet = UncheckedKeyHashSet<MarkedBlock*>;
+
+    bool isAtSafePoint(const Remote<Heap>&, const Remote<MarkedSpace>&) const;
+    Remote<MarkedBlock::Header> header(Address block) const;
     std::optional<HashMap<uint64_t, AtomBits>> stopAllocating(const Remote<MarkedSpace>&) const;
     IterationStatus walkBlock(const Remote<MarkedBlock*>&, const HashMap<uint64_t, AtomBits>& newlyAllocatedAfterStop, const MarkedSpaceState&, const Function<IterationStatus(const Cell&)>&) const;
     IterationStatus walkPreciseAllocations(const Remote<MarkedSpace>&, const Function<IterationStatus(const Cell&)>&) const;
 
     RefPtr<SnapshotDebugInfo> m_debugInfo;
+    std::optional<TargetValue> m_roots;
     Remote<VM> m_vm;
     std::optional<TargetValue> m_structure; // Any Structure, to retype from.
     std::optional<TargetValue> m_jsCell; // Any JSCell, to retype from.

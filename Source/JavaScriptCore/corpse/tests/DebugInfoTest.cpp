@@ -31,6 +31,7 @@
 #if HAVE(LLDB)
 
 #include <JavaScriptCore/CorpseAddress.h>
+#include <JavaScriptCore/CorpseRemote.h>
 #include <JavaScriptCore/CorpseSnapshot.h>
 #include <JavaScriptCore/CorpseSnapshotDebugInfo.h>
 #include <JavaScriptCore/CorpseTargetType.h>
@@ -40,6 +41,8 @@
 #include <string_view>
 #include <unistd.h>
 #include <wtf/HashMap.h>
+#include <wtf/HashSet.h>
+#include <wtf/SentinelLinkedList.h>
 #include <wtf/NeverDestroyed.h>
 #include <wtf/text/StringHash.h>
 #include <wtf/text/WTFString.h>
@@ -53,6 +56,8 @@ namespace JSCToolsTest {
 namespace {
 
 using JSC::Corpse::Address;
+using JSC::Corpse::Remote;
+using JSC::Corpse::RemoteTraits;
 using JSC::Corpse::Snapshot;
 using JSC::Corpse::SnapshotDebugInfo;
 using JSC::Corpse::TargetType;
@@ -229,10 +234,82 @@ void analyzeSystemLibraryObject(Snapshot& snapshot, Address object)
     Address completeObject;
     TEST_ASSERT(!debugInfo->dynamicTypeAt(snapshot, object, completeObject), "a class in the shared cache has no dynamic type");
 #else
+    // From /usr/lib/debug/.build-id, where libstdc++6-<version>-dbg puts it.
     auto value = completeObjectAt(snapshot, object);
     TEST_ASSERT(value && value->type().byteSize() == sizeof(std::runtime_error),
         "a class in a system library resolves through that library's separate debug info");
 #endif
+}
+
+// What the container wrappers read. The class is polymorphic so that its vtable gives its type.
+struct ContainerNode : public BasicRawSentinelNode<ContainerNode> {
+    uint64_t value { 0 };
+};
+using ContainerList = SentinelLinkedList<ContainerNode, BasicRawSentinelNode<ContainerNode>>;
+
+class Containers final {
+public:
+    virtual ~Containers() = default;
+
+    Vector<uint64_t> vector;
+    HashSet<uint64_t> set;
+    ContainerList list;
+    std::array<ContainerNode, 3> nodes;
+    ContainerNode* const node { nullptr }; // Only for its type.
+};
+
+Address createContainers()
+{
+    static NeverDestroyed<Containers> object;
+    Containers& containers = object.get();
+    containers.vector = { 10, 20, 30 };
+    // Removing half the values leaves deleted buckets among the full and empty ones.
+    for (uint64_t value = 1; value <= 100; ++value)
+        containers.set.add(value);
+    for (uint64_t value = 2; value <= 100; value += 2)
+        containers.set.remove(value);
+    for (size_t index = 0; index < containers.nodes.size(); ++index) {
+        containers.nodes[index].value = 7 + index;
+        containers.list.append(&containers.nodes[index]);
+    }
+    return Address { &containers };
+}
+
+void analyzeContainers(Snapshot& snapshot, Address object)
+{
+    auto value = completeObjectAt(snapshot, object);
+    if (!value)
+        return;
+
+    Remote<Vector<uint64_t>> vector { value->properField("vector") };
+    Vector<uint64_t> elements;
+    auto size = RemoteTraits<Vector<uint64_t>>::size(vector);
+    for (size_t index = 0; size && index < *size; ++index) {
+        if (auto element = RemoteTraits<Vector<uint64_t>>::element(vector, index).as<uint64_t>())
+            elements.append(*element);
+    }
+    TEST_ASSERT(elements == Vector<uint64_t>({ 10, 20, 30 }), "a Vector reads its elements");
+
+    Vector<uint64_t> values;
+    bool readable = RemoteTraits<HashSet<uint64_t>>::forEach(Remote<HashSet<uint64_t>> { value->properField("set") }, [&](const Remote<uint64_t>& bucket) {
+        if (auto element = bucket.as<uint64_t>())
+            values.append(*element);
+        return IterationStatus::Continue;
+    });
+    std::ranges::sort(values);
+    Vector<uint64_t> odd;
+    for (uint64_t element = 1; element <= 100; element += 2)
+        odd.append(element);
+    TEST_ASSERT(readable && values == odd, "a HashSet reads its values, and skips its empty and deleted buckets");
+
+    Remote<ContainerNode*> nodePointer { value->properField("node") };
+    Vector<uint64_t> nodes;
+    readable = RemoteTraits<ContainerList>::forEach(Remote<ContainerList> { value->properField("list") }, [&](const Remote<BasicRawSentinelNode<ContainerNode>>& node) {
+        if (auto element = nodePointer.pointeeAt(node.address()).field<uint64_t>("value").as<uint64_t>())
+            nodes.append(*element);
+        return IterationStatus::Continue;
+    });
+    TEST_ASSERT(readable && nodes == Vector<uint64_t>({ 7, 8, 9 }), "a SentinelLinkedList reads its nodes in order");
 }
 
 } // anonymous namespace
@@ -248,6 +325,7 @@ void testDebugInfo()
     analyzeInAndOutOfProcess(createLaterDestructorObject, analyzeLaterDestructorObject);
     analyzeInAndOutOfProcess(createDiamondObject, analyzeDiamondObject);
     analyzeInAndOutOfProcess(createSystemLibraryObject, analyzeSystemLibraryObject);
+    analyzeInAndOutOfProcess(createContainers, analyzeContainers);
 
     // Everything is read from the snapshot, so the process may be gone.
     analyzeAfterTargetExits(createSameImageObject, analyzeSameImageObject);

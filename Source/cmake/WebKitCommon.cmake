@@ -362,9 +362,12 @@ if (NOT HAS_RUN_WEBKIT_COMMON)
         set(CMAKE_VISIBILITY_INLINES_HIDDEN OFF)
         WEBKIT_APPEND_GLOBAL_CXX_FLAGS(-frtti)
         WEBKIT_APPEND_GLOBAL_COMPILER_FLAGS(-fstandalone-debug)
+        # The heap walk's tests enumerate their own libpas heap, through libpas's API.
+        add_compile_definitions(PAS_BMALLOC_HIDDEN=0)
         if (NOT APPLE)
-            string(APPEND CMAKE_EXE_LINKER_FLAGS " -Wl,--build-id")
-            string(APPEND CMAKE_SHARED_LINKER_FLAGS " -Wl,--build-id")
+            # liblldb reads .debug_names but not .gdb_index, so without it liblldb indexes every
+            # compile unit's DWARF by hand whenever it loads an image.
+            WEBKIT_APPEND_GLOBAL_COMPILER_FLAGS(-gpubnames)
         endif ()
     endif ()
 

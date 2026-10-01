@@ -31,8 +31,8 @@
 
 #include <JavaScriptCore/CorpseAddress.h>
 #include <memory>
-#include <wtf/Ref.h>
-#include <wtf/RefCounted.h>
+#include <optional>
+#include <wtf/Noncopyable.h>
 #include <wtf/TZoneMalloc.h>
 #include <wtf/Variant.h>
 #include <wtf/Vector.h>
@@ -47,28 +47,30 @@ namespace Corpse {
 
 class SnapshotDebugInfo;
 
-// A canonical type from a snapshot's debug info, described by its layout.
-class TargetType : public RefCounted<TargetType> {
+// A canonical type from a snapshot's debug info, described by its layout. The
+// SnapshotDebugInfo makes one TargetType per type, and owns it.
+class TargetType {
     WTF_MAKE_TZONE_ALLOCATED(TargetType);
+    WTF_MAKE_NONCOPYABLE(TargetType);
 public:
     ~TargetType();
 
     UTF8CString name() const;
-    size_t byteSize() const;
+    size_t byteSize() const { return m_byteSize; }
 
     SnapshotDebugInfo& debugInfo() const { return m_debugInfo; }
 
     struct Field {
         UTF8CString name;
         size_t offset;
-        Ref<TargetType> type;
+        const TargetType& type;
         // A bitfield starts bitOffset bits into the byte at `offset`; bitSize is 0 for any other field.
         unsigned bitOffset { 0 };
         unsigned bitSize { 0 };
     };
     struct Base {
         size_t offset;
-        Ref<TargetType> type;
+        const TargetType& type;
     };
 
     struct Class {
@@ -78,7 +80,7 @@ public:
         Vector<Base> virtualBases; // Direct and indirect, at their offsets in a complete object of this class.
     };
     struct Pointer {
-        Ref<TargetType> pointee; // Pointers and references.
+        const TargetType& pointee; // Pointers and references.
     };
     struct Integer {
         bool isSigned; // Integers, enumerations and bool.
@@ -86,15 +88,18 @@ public:
     struct Other { }; // Anything else, readable only as bytes.
     using Layout = Variant<Class, Pointer, Integer, Other>;
 
-    Layout layout() const;
+    // Read from the debug info the first time it is asked for.
+    const Layout& layout() const;
 
 private:
     TargetType(SnapshotDebugInfo&, const lldb::SBType&);
 
-    Ref<TargetType> wrap(const lldb::SBType&) const;
+    Layout readLayout() const;
 
-    const Ref<SnapshotDebugInfo> m_debugInfo;
+    SnapshotDebugInfo& m_debugInfo;
     const std::unique_ptr<lldb::SBType> m_type;
+    const size_t m_byteSize;
+    mutable std::optional<Layout> m_layout;
 
     friend class SnapshotDebugInfo;
 };

@@ -38,6 +38,7 @@
 #include <JavaScriptCore/DateInstance.h>
 #include <JavaScriptCore/HeapCell.h>
 #include <JavaScriptCore/HeapIterationScope.h>
+#include <JavaScriptCore/HeapObserver.h>
 #include <JavaScriptCore/Identifier.h>
 #include <JavaScriptCore/InitializeThreading.h>
 #include <JavaScriptCore/JSCJSValueInlines.h>
@@ -52,10 +53,16 @@
 #include <JavaScriptCore/StrongInlines.h>
 #include <JavaScriptCore/StructureID.h>
 #include <JavaScriptCore/VM.h>
+#include <bmalloc/pas_enumerator.h>
+#include <bmalloc/pas_heap_lock.h>
+#include <bmalloc/pas_root.h>
 #include <algorithm>
 #include <bit>
 #include <optional>
 #include <stdint.h>
+#include <stdlib.h>
+#include <unistd.h>
+#include <utility>
 #include <wtf/HashMap.h>
 #include <wtf/HexNumber.h>
 #include <wtf/IterationStatus.h>
@@ -102,6 +109,16 @@ constexpr ASCIILiteral lateScript = "globalThis.late = [];\n"
     "    late.push({ index: i, label: \"late-\" + i });\n"
     "late[0];\n"_s;
 
+constexpr std::array<size_t, 2> leakedSizes { 5000, 7000 };
+constexpr std::array<size_t, 2> freedSizes { 4000, 300000 };
+
+// C++ objects the reach walk has to find from the roots, a chain of two.
+struct ReachableObject {
+    WTF_DEPRECATED_MAKE_STRUCT_FAST_ALLOCATED(ReachableObject);
+    ReachableObject* next { nullptr };
+    std::array<uint8_t, 3000> bytes { };
+};
+
 // Where HeapWalk starts. Its vtable gives its type, and its fields give the
 // VM and the two types no field reached from the VM has.
 class MyaRoots {
@@ -116,6 +133,7 @@ public:
     JSC::VM* const vm;
     JSC::MarkedBlock::Header* const markedBlockHeader { nullptr };
     JSC::LocalAllocator* const localAllocator { nullptr };
+    ReachableObject* reachable { nullptr };
 };
 
 MyaRoots::~MyaRoots() = default;
@@ -132,7 +150,55 @@ struct HeapWalkFixture {
     uint64_t lateObject { 0 };
     uint64_t liveCells { 0 }; // What JSC's own forEachLiveCell visits, sorted.
     uint64_t liveCellCount { 0 };
+    std::array<uint64_t, 2> reachable { }; // Reachable from the roots.
+    std::array<uint64_t, 2> leaked { }; // Held only here, as integers.
+    std::array<uint64_t, 2> freed { }; // A small and a large object, freed before the enumeration.
+    uint64_t allocations { 0 }; // What libpas enumerates in the target, sorted.
+    uint64_t allocationCount { 0 };
 };
+
+// Every live libpas object of this process, as libpas enumerates a heap:
+// pas_enumerator reads through the reader, which here is this process's own
+// memory. The records go into a buffer from system malloc, allocated up front,
+// so that the enumeration allocates nothing from the heap it enumerates.
+struct EnumeratedAllocations {
+    HeapWalk::Allocation* buffer;
+    size_t count;
+    size_t capacity;
+};
+
+void* readOwnMemory(pas_enumerator*, void* address, size_t, void*)
+{
+    return address;
+}
+
+void recordObject(pas_enumerator*, void* address, size_t size, pas_enumerator_record_kind kind, void* argument)
+{
+    if (kind != pas_enumerator_object_record)
+        return;
+    auto& records = *static_cast<EnumeratedAllocations*>(argument);
+    RELEASE_ASSERT(records.count < records.capacity);
+    records.buffer[records.count++] = { Address { address }, size };
+}
+
+std::span<HeapWalk::Allocation> enumerateAllocations()
+{
+    constexpr size_t capacity = 16 * 1024 * 1024;
+    static EnumeratedAllocations records { static_cast<HeapWalk::Allocation*>(malloc(capacity * sizeof(HeapWalk::Allocation))), 0, capacity };
+    RELEASE_ASSERT(records.buffer);
+    records.count = 0;
+    // The heap lock keeps libpas's other threads from changing the heap during the enumeration.
+    pas_heap_lock_lock();
+    static pas_root* root = pas_root_create();
+    pas_enumerator* enumerator = pas_enumerator_create(root, readOwnMemory, nullptr, recordObject, &records,
+        pas_enumerator_do_not_record_meta_records, pas_enumerator_do_not_record_payload_records, pas_enumerator_record_object_records);
+    RELEASE_ASSERT(enumerator && pas_enumerator_enumerate_all(enumerator));
+    pas_enumerator_destroy(enumerator);
+    pas_heap_lock_unlock();
+    std::span<HeapWalk::Allocation> allocations { records.buffer, records.count };
+    std::ranges::sort(allocations, { }, &HeapWalk::Allocation::address);
+    return allocations;
+}
 
 // Makes a VM, evaluates targetScript in it, collects, then evaluates
 // lateScript, so that the live heap has cells from both sides of its last
@@ -140,7 +206,7 @@ struct HeapWalkFixture {
 Address createFixture()
 {
     static HeapWalkFixture fixture;
-    static LazyNeverDestroyed<MyaRoots> roots;
+    static NeverDestroyed<std::optional<MyaRoots>> roots; // Remade with each fixture.
     static NeverDestroyed<JSC::Strong<JSC::JSGlobalObject>> root;
 
     JSC::initialize();
@@ -157,8 +223,13 @@ Address createFixture()
     JSC::JSValue date = object->get(globalObject, JSC::Identifier::fromString(vm, "date"_s));
     RELEASE_ASSERT(date.isCell());
 
-    roots.construct(vm);
-    fixture.roots = std::bit_cast<uint64_t>(&roots.get());
+    roots->emplace(vm);
+    fixture.roots = std::bit_cast<uint64_t>(&roots->value());
+    auto* reachable = new ReachableObject;
+    reachable->next = new ReachableObject;
+    roots->value().reachable = reachable;
+    fixture.reachable = { std::bit_cast<uint64_t>(reachable), std::bit_cast<uint64_t>(reachable->next) };
+    fixture.leaked = { std::bit_cast<uint64_t>(fastMalloc(leakedSizes[0])), std::bit_cast<uint64_t>(fastMalloc(leakedSizes[1])) };
     fixture.vm = std::bit_cast<uint64_t>(&vm);
     fixture.object = std::bit_cast<uint64_t>(object);
     fixture.structure = std::bit_cast<uint64_t>(object->structure());
@@ -184,6 +255,16 @@ Address createFixture()
     std::ranges::sort(liveCells.get());
     fixture.liveCells = std::bit_cast<uint64_t>(liveCells->span().data());
     fixture.liveCellCount = liveCells->size();
+
+    // Last before the enumeration, so that nothing reuses them first.
+    for (size_t index = 0; index < freedSizes.size(); ++index) {
+        void* object = fastMalloc(freedSizes[index]);
+        fixture.freed[index] = std::bit_cast<uint64_t>(object);
+        fastFree(object);
+    }
+    auto allocations = enumerateAllocations();
+    fixture.allocations = std::bit_cast<uint64_t>(allocations.data());
+    fixture.allocationCount = allocations.size();
     return Address { &fixture };
 }
 
@@ -384,6 +465,59 @@ void checkFixture(Snapshot& snapshot, const HeapWalk& heap, const LiveCells& cel
     TEST_ASSERT(internalNumber && *internalNumber == dateMagic, "the date's C++ double reads back");
 }
 
+// The reach walk counts the objects reachable from the roots, and misses those the target leaked.
+void checkReach(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFixture& fixture)
+{
+    auto enumerated = snapshot.memory().span<HeapWalk::Allocation>(Address { fixture.allocations }, static_cast<size_t>(fixture.allocationCount));
+    TEST_ASSERT(enumerated && enumerated.size(), "the allocations libpas enumerated in the target read");
+    if (!enumerated)
+        return;
+    Vector<HeapWalk::Allocation> allocations { std::span<const HeapWalk::Allocation> { enumerated } };
+    auto allocationOf = [&](uint64_t address) -> const HeapWalk::Allocation* {
+        auto after = std::ranges::upper_bound(allocations, Address { address }, { }, &HeapWalk::Allocation::address);
+        if (after == allocations.begin() || address - (after - 1)->address.toTargetVMAddress() >= (after - 1)->size)
+            return nullptr;
+        return &*(after - 1);
+    };
+    auto isObject = [&](uint64_t address, size_t size) {
+        auto* allocation = allocationOf(address);
+        return allocation && allocation->address == Address { address } && allocation->size >= size;
+    };
+
+    unsigned overlapping = 0;
+    for (size_t index = 1; index < allocations.size(); ++index) {
+        if (allocations[index - 1].address + allocations[index - 1].size > allocations[index].address)
+            ++overlapping;
+    }
+    TEST_ASSERT_EQ(overlapping, 0u, "no two enumerated allocations overlap");
+    TEST_ASSERT(isObject(fixture.reachable[0], sizeof(ReachableObject)) && isObject(fixture.reachable[1], sizeof(ReachableObject))
+        && isObject(fixture.leaked[0], leakedSizes[0]) && isObject(fixture.leaked[1], leakedSizes[1]),
+        "libpas enumerates each of the fixture's C++ objects, at least as large as it was allocated");
+    TEST_ASSERT(!allocationOf(fixture.freed[0]) && !allocationOf(fixture.freed[1]), "libpas enumerates no freed object, small or large");
+    unsigned cellsOutside = 0;
+    heap.forEachLiveCell([&](const HeapWalk::Cell& cell) {
+        if (!allocationOf(cell.address.toTargetVMAddress()))
+            ++cellsOutside;
+        return IterationStatus::Continue;
+    });
+    TEST_ASSERT_EQ(cellsOutside, 0u, "every live cell is in an enumerated allocation: the JS heap's blocks are libpas objects");
+
+    HeapWalk::Reach reach = heap.reach(allocations, allocations.size());
+    auto isMissed = [&](uint64_t address) {
+        return reach.largestMissed.containsIf([&](const HeapWalk::Allocation& allocation) {
+            return allocation.address == Address { address };
+        });
+    };
+    TEST_ASSERT(std::ranges::none_of(fixture.reachable, isMissed), "the reach walk reaches the objects reachable from the roots");
+    TEST_ASSERT(std::ranges::all_of(fixture.leaked, isMissed), "and misses the objects the target leaked");
+    TEST_ASSERT(reach.bytesReached && reach.bytesReached <= reach.bytesAllocated, "the walk reaches part of the heap");
+    if (verbose) {
+        dataLogLn("    the walk reaches ", reach.bytesReached, " of ", reach.bytesAllocated, " bytes in ", allocations.size(), " libpas allocations");
+        for (size_t index = 0; index < std::min<size_t>(reach.largestMissed.size(), 5); ++index)
+            dataLogLn("    missed: ", reach.largestMissed[index].size, " bytes at 0x", hex(reach.largestMissed[index].address.toTargetVMAddress()));
+    }
+}
+
 // The walk and JSC's own MarkedSpace::forEachLiveCell, run in the target, must visit the same cells.
 void checkAgainstJSC(Snapshot& snapshot, const LiveCells& cells, const HeapWalkFixture& fixture)
 {
@@ -438,6 +572,80 @@ void analyze(Snapshot& snapshot, Address fixtureAddress)
     cells.checkHeaders();
     checkFixture(snapshot, heap, cells, *fixture);
     checkAgainstJSC(snapshot, cells, *fixture);
+    checkReach(snapshot, heap, *fixture);
+}
+
+// Runs `during` inside a full collection of the fixture's VM, from
+// HeapObserver::willGarbageCollect, which runs once Heap::m_collectionScope is set.
+class DuringCollection final : public JSC::HeapObserver {
+public:
+    explicit DuringCollection(Function<void()>&& during)
+        : m_during(WTF::move(during))
+    {
+    }
+
+    void willGarbageCollect() final
+    {
+        if (auto during = std::exchange(m_during, nullptr))
+            during();
+    }
+    void didGarbageCollect(JSC::CollectionScope) final { }
+
+private:
+    Function<void()> m_during;
+};
+
+void collectFixture(Address fixtureAddress, Function<void()>&& during)
+{
+    auto* fixture = std::bit_cast<HeapWalkFixture*>(static_cast<uintptr_t>(fixtureAddress.toTargetVMAddress()));
+    JSC::VM& vm = *std::bit_cast<JSC::VM*>(static_cast<uintptr_t>(fixture->vm));
+    JSC::JSLockHolder locker(vm);
+    DuringCollection observer(WTF::move(during));
+    vm.heap.addObserver(&observer);
+    vm.heap.collectSync(JSC::CollectionScope::Full);
+    vm.heap.removeObserver(&observer);
+}
+
+// For the target process: reports the fixture from inside a collection, and stays there.
+Address createFixtureInCollection()
+{
+    Address fixture = createFixture();
+    collectFixture(fixture, [fixture] {
+        reportTargetObjectAndPark(fixture);
+    });
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+// The block of the fixture's object, whose lock an allocation, a sweep or stopAllocating holds.
+WTF::CountingLock& fixtureBlockLock(Address fixtureAddress)
+{
+    auto* fixture = std::bit_cast<HeapWalkFixture*>(static_cast<uintptr_t>(fixtureAddress.toTargetVMAddress()));
+    return JSC::MarkedBlock::blockFor(std::bit_cast<void*>(static_cast<uintptr_t>(fixture->object)))->lock();
+}
+
+// For the target process: reports the fixture while a block is locked, and keeps it locked.
+Address createFixtureWithLockedBlock()
+{
+    Address fixture = createFixture();
+    fixtureBlockLock(fixture).lock();
+    reportTargetObjectAndPark(fixture);
+}
+
+void analyzeAwayFromSafePoint(Snapshot& snapshot, Address fixtureAddress)
+{
+    auto fixture = snapshot.memory().ptr<HeapWalkFixture>(fixtureAddress);
+    TEST_ASSERT(fixture, "the target's fixture reads");
+    if (!fixture)
+        return;
+    HeapWalk heap(snapshot, Address { fixture->roots });
+    TEST_ASSERT(heap.isValid(), "the heap of a VM away from a safe point is found from its roots");
+    ExpectedErrors expectedErrors;
+    unsigned visited = 0;
+    heap.forEachLiveCell([&](const HeapWalk::Cell&) {
+        ++visited;
+        return IterationStatus::Continue;
+    });
+    TEST_ASSERT_EQ(visited, 0u, "a snapshot away from a safe point is reported and not walked");
 }
 
 } // anonymous namespace
@@ -450,6 +658,25 @@ void testHeapWalk()
 
     analyzeInAndOutOfProcess(createFixture, analyze);
     analyzeAfterTargetExits(createFixture, analyze);
+
+    // In this process, the analysis runs away from the safe point; out of it, the target parks there.
+    auto analyzeSelf = [](Address fixture) {
+        SelfSnapshot self;
+        if (self.isValid())
+            analyzeAwayFromSafePoint(self.snapshot(), fixture);
+    };
+    Address fixture = createFixture();
+    collectFixture(fixture, [&] {
+        analyzeSelf(fixture);
+    });
+    analyzeInSeparateProcess(createFixtureInCollection, analyzeAwayFromSafePoint);
+
+    fixture = createFixture();
+    {
+        Locker locker { fixtureBlockLock(fixture) };
+        analyzeSelf(fixture);
+    }
+    analyzeInSeparateProcess(createFixtureWithLockedBlock, analyzeAwayFromSafePoint);
 }
 
 } // namespace JSCToolsTest

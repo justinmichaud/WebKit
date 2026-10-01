@@ -44,28 +44,29 @@ static unsigned long long forReport(Address address)
     return address.toTargetVMAddress();
 }
 
-TargetValue::TargetValue(Snapshot& snapshot, Address address, Ref<TargetType>&& type, bool isValid)
+TargetValue::TargetValue(Snapshot& snapshot, Address address, const TargetType& type, bool isValid)
     : m_snapshot(&snapshot)
     , m_address(address)
-    , m_type(WTF::move(type))
+    , m_debugInfo(type.debugInfo())
+    , m_type(&type)
     , m_isValid(isValid)
 {
 }
 
-TargetValue TargetValue::at(Snapshot& snapshot, Address address, Ref<TargetType>&& type)
+TargetValue TargetValue::at(Snapshot& snapshot, Address address, const TargetType& type)
 {
     if (!address)
-        return TargetValue(snapshot, address, WTF::move(type), false);
-    if (!type->byteSize()) {
-        CORPSE_REPORT("Type '%s' has no size, so nothing can be read as it", type->name());
-        return TargetValue(snapshot, address, WTF::move(type), false);
+        return TargetValue(snapshot, address, type, false);
+    if (!type.byteSize()) {
+        CORPSE_REPORT("Type '%s' has no size, so nothing can be read as it", type.name());
+        return TargetValue(snapshot, address, type, false);
     }
-    return TargetValue(snapshot, address, WTF::move(type), true);
+    return TargetValue(snapshot, address, type, true);
 }
 
 TargetValue TargetValue::at(Address address) const
 {
-    return at(*m_snapshot, address, Ref { m_type });
+    return at(*m_snapshot, address, *m_type);
 }
 
 TargetValue TargetValue::offsetBy(size_t count) const
@@ -75,24 +76,24 @@ TargetValue TargetValue::offsetBy(size_t count) const
     return at(m_address + count * m_type->byteSize());
 }
 
-TargetValue TargetValue::member(size_t offset, Ref<TargetType>&& type) const
+TargetValue TargetValue::member(size_t offset, const TargetType& type) const
 {
     if (!m_isValid)
-        return TargetValue(*m_snapshot, m_address, WTF::move(type), false);
+        return TargetValue(*m_snapshot, m_address, type, false);
     size_t total = m_type->byteSize();
-    size_t size = type->byteSize();
+    size_t size = type.byteSize();
     if (offset > total || size > total - offset) {
         CORPSE_REPORT("Bytes %zu to %zu are outside the %zu-byte '%s'", offset, offset + size, total, m_type->name());
-        return TargetValue(*m_snapshot, m_address, WTF::move(type), false);
+        return TargetValue(*m_snapshot, m_address, type, false);
     }
-    return at(*m_snapshot, m_address + offset, WTF::move(type));
+    return at(*m_snapshot, m_address + offset, type);
 }
 
 TargetValue TargetValue::properField(const char* name) const
 {
     if (!m_isValid)
         return invalidated();
-    TargetType::Layout layout = m_type->layout();
+    const TargetType::Layout& layout = m_type->layout();
     auto* klass = std::get_if<TargetType::Class>(&layout);
     if (!klass) {
         CORPSE_REPORT("Type '%s' is not a class, so it has no field '%s'", m_type->name(), name);
@@ -110,10 +111,10 @@ TargetValue TargetValue::properField(const char* name) const
 TargetValue TargetValue::field(const TargetType::Field& field) const
 {
     if (!field.bitSize)
-        return member(field.offset, Ref { field.type });
+        return member(field.offset, field.type);
     if (!m_isValid)
-        return TargetValue(*m_snapshot, m_address, Ref { field.type }, false);
-    TargetValue value(*m_snapshot, m_address + field.offset, Ref { field.type }, true);
+        return TargetValue(*m_snapshot, m_address, field.type, false);
+    TargetValue value(*m_snapshot, m_address + field.offset, field.type, true);
     value.m_bitOffset = field.bitOffset;
     value.m_bitSize = field.bitSize;
     size_t total = m_type->byteSize();
@@ -127,13 +128,13 @@ TargetValue TargetValue::field(const TargetType::Field& field) const
 
 TargetValue TargetValue::base(const TargetType::Base& base) const
 {
-    return member(base.offset, Ref { base.type });
+    return member(base.offset, base.type);
 }
 
 void TargetValue::forEachField(const Function<void(const TargetType::Field&, const TargetValue&)>& functor) const
 {
     forEachNonVirtualField(functor);
-    TargetType::Layout layout = m_type->layout();
+    const TargetType::Layout& layout = m_type->layout();
     if (auto* klass = std::get_if<TargetType::Class>(&layout)) {
         for (const TargetType::Base& virtualBase : klass->virtualBases)
             base(virtualBase).forEachNonVirtualField(functor);
@@ -144,7 +145,7 @@ void TargetValue::forEachNonVirtualField(const Function<void(const TargetType::F
 {
     if (!m_isValid)
         return;
-    TargetType::Layout layout = m_type->layout();
+    const TargetType::Layout& layout = m_type->layout();
     auto* klass = std::get_if<TargetType::Class>(&layout);
     if (!klass)
         return;
@@ -180,13 +181,13 @@ TargetValue TargetValue::pointeeAt(Address address) const
 {
     if (!m_isValid)
         return invalidated();
-    TargetType::Layout layout = m_type->layout();
+    const TargetType::Layout& layout = m_type->layout();
     auto* pointer = std::get_if<TargetType::Pointer>(&layout);
     if (!pointer) {
         CORPSE_REPORT("Type '%s' is not a pointer", m_type->name());
         return invalidated();
     }
-    return at(*m_snapshot, address, WTF::move(pointer->pointee));
+    return at(*m_snapshot, address, pointer->pointee);
 }
 
 bool TargetValue::readWhole(std::span<uint8_t> destination) const
@@ -224,7 +225,7 @@ std::optional<int64_t> TargetValue::integer() const
 {
     if (!m_isValid)
         return std::nullopt;
-    TargetType::Layout layout = m_type->layout();
+    const TargetType::Layout& layout = m_type->layout();
     auto* integer = std::get_if<TargetType::Integer>(&layout);
     if (!integer) {
         CORPSE_REPORT("Type '%s' is not an integer", m_type->name());
@@ -255,17 +256,17 @@ std::optional<int64_t> TargetValue::integer() const
 std::optional<TargetValue> TargetValue::completeObjectAt(Snapshot& snapshot, SnapshotDebugInfo& debugInfo, Address address)
 {
     Address completeObject;
-    RefPtr type = debugInfo.dynamicTypeAt(snapshot, address, completeObject);
+    auto* type = debugInfo.dynamicTypeAt(snapshot, address, completeObject);
     if (!type)
         return std::nullopt;
-    return at(snapshot, completeObject, type.releaseNonNull());
+    return at(snapshot, completeObject, *type);
 }
 
-RefPtr<TargetType> TargetValue::dynamicType(Address& completeObject) const
+const TargetType* TargetValue::dynamicType(Address& completeObject) const
 {
     if (!m_isValid)
         return nullptr;
-    TargetType::Layout layout = m_type->layout();
+    const TargetType::Layout& layout = m_type->layout();
     auto* klass = std::get_if<TargetType::Class>(&layout);
     if (!klass || !klass->isPolymorphic) {
         CORPSE_REPORT("Type '%s' is not polymorphic, so it has no dynamic type", m_type->name());

@@ -73,9 +73,6 @@ enum class DiagnosticCounter : uint8_t {
     ThreadStatesRead,
     UnreadableThreadStates,
     ImagesWithoutPath,
-    MappedFilesListed,
-    UnopenableMappedFiles,
-    MappedFilesWithoutELFHeader,
     ImagesWithoutDebugInfo,
     VTableSlotsNotDestructors,
 };

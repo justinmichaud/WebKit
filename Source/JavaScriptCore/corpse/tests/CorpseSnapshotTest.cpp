@@ -63,11 +63,11 @@ static const Image* imageContaining(const Vector<Image>& images, const void* fun
         if (image.loadAddress() != base)
             continue;
 #if OS(LINUX)
-        struct stat fromSnapshot;
-        struct stat fromPath;
-        TEST_ASSERT(!fstat(image.fileDescriptor(), &fromSnapshot) && !stat(info.dli_fname, &fromPath)
-            && fromSnapshot.st_dev == fromPath.st_dev && fromSnapshot.st_ino == fromPath.st_ino,
-            "an image's file descriptor is the file the loader mapped there");
+        struct stat fromImage;
+        struct stat fromLoader;
+        TEST_ASSERT(!stat(image.path().legacyCStringPointer(), &fromImage) && !stat(info.dli_fname, &fromLoader)
+            && fromImage.st_dev == fromLoader.st_dev && fromImage.st_ino == fromLoader.st_ino,
+            "an image's path names the file the loader mapped there");
 #endif
         return &image;
     }
@@ -86,17 +86,20 @@ static void testImages(RefPtr<Process> process)
     const Image* javaScriptCore = imageContaining(images, reinterpret_cast<const void*>(&JSGlobalContextCreate));
     TEST_ASSERT(javaScriptCore, "the image list has JavaScriptCore, at the address the loader put it");
 
-#if OS(DARWIN)
-    unsigned withoutUUID = 0;
     unsigned withoutPath = 0;
     for (const Image& image : images) {
-        if (std::ranges::all_of(image.uuid(), [](uint8_t byte) { return !byte; }))
-            ++withoutUUID;
         if (!image.path().length())
             ++withoutPath;
     }
-    TEST_ASSERT_EQ(withoutUUID, 0u, "every image has a UUID");
     TEST_ASSERT_EQ(withoutPath, 0u, "every image has a path");
+
+#if OS(DARWIN)
+    unsigned withoutUUID = 0;
+    for (const Image& image : images) {
+        if (std::ranges::all_of(image.uuid(), [](uint8_t byte) { return !byte; }))
+            ++withoutUUID;
+    }
+    TEST_ASSERT_EQ(withoutUUID, 0u, "every image has a UUID");
     if (executable && javaScriptCore)
         TEST_ASSERT(executable->uuid() != javaScriptCore->uuid(), "two images have two UUIDs");
 

@@ -40,7 +40,9 @@
 #include <bit>
 #include <span>
 #include <wtf/BitSet.h>
+#include <algorithm>
 #include <wtf/HashMap.h>
+#include <wtf/HashSet.h>
 #include <wtf/Markable.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/Vector.h>
@@ -66,6 +68,7 @@ HeapWalk::HeapWalk(Snapshot& snapshot, Address rootsAddress)
     auto roots = TargetValue::completeObjectAt(snapshot, *m_debugInfo, rootsAddress);
     if (!roots)
         return;
+    m_roots = *roots;
     m_vm = Remote<VM*>(roots->properField("vm")).dereference();
     if (!m_vm) {
         CORPSE_REPORT("The roots at 0x%llx name no VM", forReport(rootsAddress));
@@ -101,12 +104,10 @@ HeapWalk::HeapWalk(Snapshot& snapshot, Address rootsAddress)
     m_localAllocatorPointer = WTF::move(localAllocatorPointer);
 }
 
-// What MarkedBlock::Handle::isLive reads from the MarkedSpace and the Heap.
+// What MarkedBlock::Handle::isLive reads from the MarkedSpace.
 struct MarkedSpaceState {
     HeapVersion markingVersion;
     HeapVersion newlyAllocatedVersion;
-    bool isMarking;
-    bool isFullCollection;
 };
 
 namespace {
@@ -122,17 +123,9 @@ struct BlockState {
     AtomBits newlyAllocated;
 };
 
-// MarkedBlock::marksConveyLivenessDuringMarking(HeapVersion, HeapVersion).
-bool marksConveyLivenessDuringMarking(const MarkedSpaceState& space, HeapVersion myMarkingVersion)
-{
-    if (!space.isFullCollection)
-        return false;
-    return myMarkingVersion == MarkedSpace::nullVersion
-        || MarkedSpace::nextVersion(myMarkingVersion) == space.markingVersion;
-}
-
-// The locked path of MarkedBlock::Handle::isLive. Nothing in a corpse runs
-// concurrently, so the optimistic path it tries first gives the same answer.
+// The locked path of MarkedBlock::Handle::isLive, at a safe point, where
+// isMarking is false. Nothing in a corpse runs concurrently, so the optimistic
+// path it tries first gives the same answer.
 bool isLive(const MarkedSpaceState& space, const BlockState& block, size_t atom)
 {
     if (block.isAllocated)
@@ -141,12 +134,8 @@ bool isLive(const MarkedSpaceState& space, const BlockState& block, size_t atom)
     if (block.newlyAllocatedVersion == space.newlyAllocatedVersion)
         return block.newlyAllocated.get(atom);
 
-    if (block.markingVersion != space.markingVersion) {
-        if (!space.isMarking)
-            return false;
-        if (!marksConveyLivenessDuringMarking(space, block.markingVersion))
-            return false;
-    }
+    if (block.markingVersion != space.markingVersion)
+        return false;
 
     return block.marks.get(atom);
 }
@@ -273,17 +262,14 @@ void HeapWalk::forEachLiveCell(const Function<IterationStatus(const Cell&)>& fun
     Remote<MarkedSpace> space = heap.field<MarkedSpace>("m_objectSpace");
     auto markingVersion = space.field<HeapVersion>("m_markingVersion").as<HeapVersion>();
     auto newlyAllocatedVersion = space.field<HeapVersion>("m_newlyAllocatedVersion").as<HeapVersion>();
-    auto isMarking = space.field<bool>("m_isMarking").as<bool>();
-    auto collectionScope = heap.field<Markable<CollectionScope>>("m_collectionScope").as<Markable<CollectionScope>>();
-    if (!markingVersion || !newlyAllocatedVersion || !isMarking || !collectionScope)
+    if (!markingVersion || !newlyAllocatedVersion || !isAtSafePoint(heap, space))
         return;
-    MarkedSpaceState state { *markingVersion, *newlyAllocatedVersion, *isMarking, *collectionScope && collectionScope->value() == CollectionScope::Full };
+    MarkedSpaceState state { *markingVersion, *newlyAllocatedVersion };
 
     auto newlyAllocatedAfterStop = stopAllocating(space);
     if (!newlyAllocatedAfterStop)
         return;
 
-    using BlockSet = UncheckedKeyHashSet<MarkedBlock*>;
     IterationStatus result = IterationStatus::Continue;
     RemoteTraits<BlockSet>::forEach(space.field<void>("m_blocks").field<BlockSet>("m_set"), [&](const Remote<MarkedBlock*>& block) {
         result = walkBlock(block, *newlyAllocatedAfterStop, state, functor);
@@ -292,6 +278,40 @@ void HeapWalk::forEachLiveCell(const Function<IterationStatus(const Cell&)>& fun
     if (result == IterationStatus::Done)
         return;
     walkPreciseAllocations(space, functor);
+}
+
+// Where the mutator could start a collection: no collection is in progress, and
+// no block is locked by an allocation, a sweep or stopAllocating. The walk relies
+// on every invariant JSC keeps between collections, so it walks nothing else.
+bool HeapWalk::isAtSafePoint(const Remote<Heap>& heap, const Remote<MarkedSpace>& space) const
+{
+    auto isMarking = space.field<bool>("m_isMarking").as<bool>();
+    auto collectionScope = heap.field<Markable<CollectionScope>>("m_collectionScope").as<Markable<CollectionScope>>();
+    if (!isMarking || !collectionScope)
+        return false;
+    if (*isMarking || *collectionScope) {
+        CORPSE_REPORT("The snapshot is not at a safe point: the heap at 0x%llx is in a collection", forReport(heap.address()));
+        return false;
+    }
+
+    // CountingLock::isHeldBit, which is private.
+    constexpr unsigned isHeldBit = 1;
+    bool atSafePoint = true;
+    bool readable = RemoteTraits<BlockSet>::forEach(space.field<void>("m_blocks").field<BlockSet>("m_set"), [&](const Remote<MarkedBlock*>& block) {
+        auto blockAddress = block.pointerValue();
+        auto lock = blockAddress ? header(*blockAddress).field<void>("m_lock").field<unsigned>("m_word").as<unsigned>() : std::nullopt;
+        if (lock && *lock & isHeldBit)
+            CORPSE_REPORT("The snapshot is not at a safe point: the block at 0x%llx is locked", forReport(*blockAddress));
+        atSafePoint = lock && !(*lock & isHeldBit);
+        return atSafePoint ? IterationStatus::Continue : IterationStatus::Done;
+    });
+    return readable && atSafePoint;
+}
+
+// MarkedBlock::header().
+Remote<MarkedBlock::Header> HeapWalk::header(Address block) const
+{
+    return Remote<MarkedBlock::Header*>(TargetValue { *m_blockHeaderPointer }).pointeeAt(block + MarkedBlock::headerAtom * MarkedBlock::atomSize);
 }
 
 // MarkedSpace::stopAllocating: BlockDirectory::stopAllocating for each
@@ -355,8 +375,7 @@ IterationStatus HeapWalk::walkBlock(const Remote<MarkedBlock*>& blockPointer, co
     auto blockAddress = blockPointer.pointerValue();
     if (!blockAddress)
         return IterationStatus::Continue;
-    // MarkedBlock::header().
-    Remote<MarkedBlock::Header> header = Remote<MarkedBlock::Header*>(TargetValue { *m_blockHeaderPointer }).pointeeAt(*blockAddress + MarkedBlock::headerAtom * MarkedBlock::atomSize);
+    Remote<MarkedBlock::Header> header = this->header(*blockAddress);
     Remote<MarkedBlock::Handle> handleValue = header.field<MarkedBlock::Handle*>("m_handle").dereference();
     auto handle = readHandle(handleValue);
     if (!handle)
@@ -423,6 +442,77 @@ IterationStatus HeapWalk::walkPreciseAllocations(const Remote<MarkedSpace>& spac
             return IterationStatus::Done;
     }
     return IterationStatus::Continue;
+}
+
+HeapWalk::Reach HeapWalk::reach(const Vector<Allocation>& allocations, size_t missedCount) const
+{
+    Reach result;
+    if (!isValid())
+        return result;
+    Vector<bool> reached;
+    reached.fill(false, allocations.size());
+    // The allocation `size` bytes at `address` lie in, if any.
+    auto allocationOf = [&](Address address, uint64_t size) -> std::optional<size_t> {
+        auto after = std::ranges::upper_bound(allocations, address, { }, &Allocation::address);
+        if (after == allocations.begin())
+            return std::nullopt;
+        const Allocation& allocation = *(after - 1);
+        if (address - allocation.address > allocation.size || size > allocation.size - (address - allocation.address))
+            return std::nullopt;
+        return (after - 1) - allocations.begin();
+    };
+
+    forEachLiveCell([&](const Cell& cell) {
+        if (auto index = allocationOf(cell.address, cell.size))
+            reached[*index] = true;
+        return IterationStatus::Continue;
+    });
+
+    // Each object is visited once as each type it is reached as.
+    HashSet<std::pair<uint64_t, uint64_t>> visited;
+    Vector<TargetValue> worklist { *m_roots };
+    auto enqueue = [&](const TargetValue& value) {
+        if (visited.add({ value.address().toTargetVMAddress(), std::bit_cast<uint64_t>(&value.type()) }).isNewEntry)
+            worklist.append(value);
+    };
+    while (!worklist.isEmpty()) {
+        TargetValue value = worklist.takeLast();
+        value.forEachField([&](const TargetType::Field& field, const TargetValue& fieldValue) {
+            if (field.bitSize)
+                return;
+            const TargetType::Layout& layout = field.type.layout();
+            if (std::holds_alternative<TargetType::Class>(layout)) {
+                enqueue(fieldValue);
+                return;
+            }
+            auto* pointer = std::get_if<TargetType::Pointer>(&layout);
+            if (!pointer || !pointer->pointee.byteSize())
+                return;
+            auto address = fieldValue.pointerValue();
+            if (!address || !*address)
+                return;
+            // Only into an allocation, so that neither a pointer into static data nor
+            // a union's other member read as a pointer leads anywhere.
+            auto index = allocationOf(*address, pointer->pointee.byteSize());
+            if (!index)
+                return;
+            reached[*index] = true;
+            enqueue(TargetValue::at(value.snapshot(), *address, pointer->pointee));
+        });
+    }
+
+    Vector<Allocation> missed;
+    for (size_t index = 0; index < allocations.size(); ++index) {
+        result.bytesAllocated += allocations[index].size;
+        if (reached[index])
+            result.bytesReached += allocations[index].size;
+        else
+            missed.append(allocations[index]);
+    }
+    std::ranges::sort(missed, std::ranges::greater { }, &Allocation::size);
+    missed.shrink(std::min(missed.size(), missedCount));
+    result.largestMissed = WTF::move(missed);
+    return result;
 }
 
 Remote<JSCell> HeapWalk::jsCell(Address address) const

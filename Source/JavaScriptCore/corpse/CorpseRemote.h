@@ -93,7 +93,7 @@ public:
     {
         if (!requireType("base"))
             return { };
-        TargetType::Layout layout = m_value->type().layout();
+        const TargetType::Layout& layout = m_value->type().layout();
         auto* klass = std::get_if<TargetType::Class>(&layout);
         if (!klass || index >= klass->bases.size()) {
             if (*this)

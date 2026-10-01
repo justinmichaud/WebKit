@@ -2,6 +2,7 @@
 # Once done, this will define
 #
 #  LLDB_FOUND - LLDB's SB API was found
+#  LLDB_VERSION - the version of that LLDB
 #  LLDB_INCLUDE_DIRS - the LLDB include directories
 #  LLDB_LIBRARIES - link these to use LLDB.
 #  LLDB::LLDB - an imported target
@@ -56,9 +57,24 @@ if (LLDB_INCLUDE_DIR)
     )
 endif ()
 
+# The SB headers carry no version, but the installed library's name does
+# (liblldb-18.so.1 on Debian, liblldb.22.1.8.dylib from Homebrew), as does the
+# directory of an install (/usr/lib/llvm-18, Cellar/llvm/22.1.8).
+if (LLDB_LIBRARY)
+    file(REAL_PATH "${LLDB_LIBRARY}" _LLDB_REAL_LIBRARY)
+    file(REAL_PATH "${LLDB_INCLUDE_DIR}" _LLDB_REAL_INCLUDE_DIR)
+    get_filename_component(_LLDB_LIBRARY_NAME "${_LLDB_REAL_LIBRARY}" NAME)
+    if (_LLDB_LIBRARY_NAME MATCHES "lldb[-.]([0-9]+(\\.[0-9]+)*)")
+        set(LLDB_VERSION "${CMAKE_MATCH_1}")
+    elseif (_LLDB_REAL_INCLUDE_DIR MATCHES "llvm[-/]([0-9]+(\\.[0-9]+)*)")
+        set(LLDB_VERSION "${CMAKE_MATCH_1}")
+    endif ()
+endif ()
+
 include(FindPackageHandleStandardArgs)
 find_package_handle_standard_args(LLDB
     REQUIRED_VARS LLDB_INCLUDE_DIR LLDB_LIBRARY
+    VERSION_VAR LLDB_VERSION
 )
 
 mark_as_advanced(
