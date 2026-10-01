@@ -124,6 +124,8 @@ static ASCIILiteral label(DiagnosticCounter counter)
         return "images liblldb could not open"_s;
     case DiagnosticCounter::VTableSlotsNotDestructors:
         return "vtable slots that are not a destructor"_s;
+    case DiagnosticCounter::ClassesWithoutHome:
+        return "classes without an out-of-line destructor to describe them"_s;
     }
     RELEASE_ASSERT_NOT_REACHED();
 }

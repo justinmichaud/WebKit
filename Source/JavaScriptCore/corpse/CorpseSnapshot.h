@@ -33,6 +33,7 @@
 #include <JavaScriptCore/CorpseImage.h>
 #include <JavaScriptCore/CorpseMemory.h>
 #include <JavaScriptCore/CorpseProcess.h>
+#include <JavaScriptCore/CorpseRegion.h>
 #include <JavaScriptCore/CorpseSymbol.h>
 #include <JavaScriptCore/CorpseThread.h>
 #include <memory>
@@ -89,6 +90,7 @@ public:
     // The threads and images captured in this corpse, read and cached on the first call.
     const Vector<Thread>& threads();
     const Vector<Image>& images();
+    const Vector<Region>& regions(); // Without their page counts.
 
 #if OS(DARWIN)
     // dyld's record of the loaded images. Invalid, having reported why, if it cannot be read.
@@ -107,6 +109,7 @@ private:
 
     std::optional<Vector<Thread>> m_threads;
     std::optional<Vector<Image>> m_images;
+    std::optional<Vector<Region>> m_regions;
     HashMap<String, std::unique_ptr<Symbol>> m_symbols;
     Memory m_memory;
 

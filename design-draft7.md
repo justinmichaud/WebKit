@@ -9,9 +9,9 @@ This design adds three things:
 - every type taken from the process's own debug info, read through liblldb;
 - a measurement of how much of the heap the walk reaches.
 
-It lands as small patches, each with exactly the code its test needs. Patches 1
-to 8 are implemented. Patches 9 to 12 are designed, under "The next patches",
-from a measurement of what the walk still misses.
+It lands as small patches, each with exactly the code its test needs. All 12
+are implemented. Patches 9 to 12 were designed from a measurement of what the
+walk missed after patch 8, and "What the walk still misses" measures it again.
 
 This branch represents the final state. Iterate on this, we will split it up later.
 
@@ -45,7 +45,9 @@ This branch represents the final state. Iterate on this, we will split it up lat
     the `ClassInfo`'s own size and parent (patch 10).
 
   A name in mya's source may recognise a type the walk has already reached, to
-  pick how to read it (patch 11), but never finds one.
+  pick how to read it (patch 11), but never finds one. The one type a reader
+  needs that its value does not give, `JSString::m_fiber`'s `StringImpl`, is
+  taken from the classes the walk has reached.
 - **liblldb is never given a process.** mya reads all memory itself
   (`RELEASE_ASSERT(!target.GetProcess().IsValid())`), so a walk never depends on
   the process still running.
@@ -94,6 +96,9 @@ Tools/Scripts/run-javascriptcore-tests --jsc-only --debug --no-build --testlibjs
 On Linux the DebugInfo suite needs libstdc++'s debug info in
 `/usr/lib/debug/.build-id` (patch 6). On Debian that is `libstdc++6-dbgsym`,
 from the `debian-debug` archive. Without it, the system-library test fails.
+
+`--verbose` prints, for the HeapWalk suite, the walk's reach and the
+attribution report of patch 12, in and out of process.
 
 ## The patches
 
@@ -402,8 +407,9 @@ walk reaches any address in it.
   That keeps pointers into static data, and the other members of unions read as
   pointers, from leading anywhere.
 - Each object is walked once for each type it is reached as.
-- Pointees are taken at their static type. Patches 9 to 11 say what the walk
-  does not follow yet.
+- Pointees are taken at their static type. Patches 9 to 11 make the walk read
+  classes from their home descriptions, JS cells as their classes, and the
+  values the debug info cannot describe.
 
 **Counting allocations: libpas, in the target itself.** The target enumerates its
 own heap and records the result in the fixture, the same way it records JSC's own
@@ -442,7 +448,8 @@ bytes (48.7%) in 6,957 libpas allocations.
 - System malloc, which is not counted, held another 852,928 bytes.
 
 **Speed.** On a heap of 590,000 live cells and 206,000 libpas allocations, `reach`
-takes 1.4 to 1.7 s.
+took 1.4 to 1.7 s. That was before patches 9 to 11, which walk every cell's
+class and many more C++ objects, and has not been measured since.
 
 **Open.**
 - Every live JS cell is in an enumerated allocation (see Test), so the JS heap's
@@ -462,17 +469,15 @@ takes 1.4 to 1.7 s.
 - **The reach.** The walk reaches the first two objects, and lists the leaked
   two as missed.
 
-## The next patches
+### What the walk missed after patch 8
 
-### What the walk misses, and why
-
-On the test's VM, the walk misses about 984 KB of 1.92 MB. A conservative scan,
+On the test's VM, the walk missed about 984 KB of 1.92 MB. A conservative scan,
 run once by hand, attributed each missed allocation to the first word in the
 libpas heap that points into it:
 
 | Missed | First pointed to from | Cause |
 |---|---|---|
-| 406 KB | no word in the libpas heap | Mostly 19 all-zero 16 KB blocks that are not MarkedBlocks, still unidentified. Also the test's own list of live cells (57 KB), and the two objects it leaks on purpose (12 KB). |
+| 406 KB | no word in the libpas heap | Mostly 19 all-zero 16 KB blocks that are not MarkedBlocks. Also the test's own list of live cells (57 KB), and the two objects it leaks on purpose (12 KB). |
 | 277 KB | a C++ object the walk reached | The field is one the walk cannot follow: see below. |
 | 190 KB | only other missed allocations | Follows from the rest. |
 | 110 KB | a JS cell | The walk treats every cell as a bare `JSCell`. Mostly `JSString`'s `StringImpl` (74 KB in 2,300 strings), then `NativeExecutable`, `CodeBlock`, `UnlinkedCodeBlock`, `Structure` and `JSGlobalObject`. |
@@ -488,20 +493,21 @@ The fields the walk reached and could not follow:
 | `HashMap`s and `Vector`s of pointers | | Only the first bucket or element is followed. |
 | `CodePtr::m_value` | | A `void*`. |
 
-Patches 9 to 11 fix these, and patch 12 makes the scan a tool, so that each
-patch's effect is measured the same way. Each patch adds a planted case to the
-fixture, and the attribution test (patch 12) proves the walk follows it.
+Patches 9 to 11 fix these, and patch 12 makes the scan part of mya, so that
+each patch's effect is measured the same way. Each patch adds a planted case to
+the fixture.
 
 ### 9. Declared types, completed
 
-**The defect.** A compile unit describes only the types it uses whole. Every
-other type it mentions, such as the pointee of a `std::unique_ptr` to a
-forward-declared class, is a declaration with no size and no fields. liblldb
-does not complete a declaration from another compile unit on its own, so today
-the walk silently stops at every such pointer. Many of JSC's C++ objects are
-reached only through such pointers (see the table above), and WebCore's will be
-too. A walk
-that stops there cannot measure anything, and one that stops silently hides it.
+**The defect, as measured.** A compile unit describes only the types it uses
+whole. Every other type it mentions, such as the pointee of a `std::unique_ptr`
+to a forward-declared class, is a declaration with no size and no fields.
+Within one image, liblldb completes a declaration from the image's own
+definition: a class declared in one compile unit of the test and defined in
+another reads complete. Across images it does not. The test executable
+declares `JSC::JSONCache`, which libJavaScriptCore defines, so from the test's
+description of `VM`, `m_jsonCache` points to a type of size 0. The walk takes
+`VM` from the test's roots, so it stopped at every such pointer.
 
 **Why not look the definition up by its name.** DWARF has no link from a
 declaration to its definition other than the name: a forward declaration
@@ -510,224 +516,257 @@ name can find the wrong type (one in another image, or in an anonymous
 namespace), and it is slow for a WebCore-sized image. So the walk takes each
 type from the code that uses it whole instead.
 
-**A class's home description.** A function's `this` is described by the
-compile unit that compiled the function. A destructor destroys every member
-its class owns, so in its compile unit every owned member's type is complete:
-the `std::unique_ptr<JSONCache>` that `VM` owns is complete in the compile unit
-of `VM::~VM`, though not in the test's, from which the walk took `VM`. The walk
-reads every class from its home description, its destructor's `this`:
-1. **A polymorphic class** gets it from its vtable, as patch 2 does: no names.
-2. **Any other class** gets it from its destructor's declaration, which the
-   class's description lists (`SBType::GetMemberFunctionAtIndex`). The
-   declaration carries the destructor's linkage name
-   (`SBTypeMemberFunction::GetMangledName`). The walk resolves that symbol in the
-   images' symbol tables, in the order the loader would, takes the function
-   there, and the pointee of its `this`.
-   - A linkage name is the ABI's name for one symbol, which the linker and the
-     loader also use, so it names exactly one function; the walk never matches
-     type names.
-   - The function found must be a destructor (patch 2's check), and its class
-     must have the same size as the description it came from.
-   - This needs the declaration's linkage name. The Xcode build emits linkage
-     names everywhere. The CMake build passes `-dwarf-linkage-names=Abstract`,
-     which should keep them on declarations; that is the first thing this patch
-     checks.
-3. **A pointee that is only declared** may still be polymorphic. The walk tries
-   its vtable first (patch 2's rule, which never guesses), then its owner's home
-   description.
-
-A class without an out-of-line destructor has no home description; it is read
-as it is, and the walk counts what that leaves out (patch 12). Each class's home
-description is found once per snapshot and cached.
-
-**What this does not fix.** A raw pointer to a declared, non-polymorphic class
-that its owner does not destroy may still be a declaration in the owner's home
-description. Patch 12 counts these, by field, so that each can be taught.
+**A class's home description** is the description of its destructor's `this`.
+A destructor destroys every member its class owns, so the image that defines it
+has every owned member's type complete. `TargetType::home()` finds it once per
+type, and the walk reads every class it reaches as its home description:
+- The class's description lists its destructor's declaration
+  (`SBTypeMemberFunction` of kind `eMemberFunctionKindDestructor`), which
+  carries the destructor's linkage name. The CMake build's
+  `-dwarf-linkage-names=Abstract` keeps them on declarations: `VM`'s is
+  `_ZN3JSC2VMD1Ev`.
+- The walk resolves that symbol in the images' symbol tables, in the order the
+  loader searches them, and skips undefined symbols: the test executable has
+  `_ZN3JSC2VMD1Ev` as an import. It takes the function at the first definition,
+  and the pointee of its `this`.
+- The function must be a destructor (patch 2's check), and its class must have
+  the size of the description it came from; a mismatch is reported.
+- A class without an out-of-line destructor is its own home, and is counted
+  (`ClassesWithoutHome`).
+- A pointee that is still only declared may be polymorphic. The walk tries its
+  vtable (patch 2's rule, which never guesses), quietly, through
+  `SnapshotDebugInfo::dynamicTypeIfAnyAt`.
 
 **Test.**
-- A class declared in one compile unit of the test and defined in another is
-  owned through a `std::unique_ptr` by a class whose destructor is in the second
-  compile unit. Reached from the roots, its fields read.
-- A polymorphic class only declared where it is pointed to is read as its
-  dynamic type.
-- The element type of `BlockDirectory::m_blocks`, declared in the test and
-  defined in JavaScriptCore, is reached from `MarkedSpace`'s home description.
-- In the reach test, the `VM`'s `unique_ptr` members above are reached.
+- The test's description of `VM` declares `m_jsonCache`'s pointee with no size,
+  and `VM`'s home description, another description of the same size, defines
+  it. A home description is its own home.
+- The roots point to the VM's `RegExpCache`, which the test only declares; its
+  vtable gives `JSC::RegExpCache`, with its size, at the VM's object.
+- The VM's `JSONCache`, `BuiltinExecutables` and `RegExpCache` are reached.
+  JS cells also reach the VM, as JavaScriptCore describes it (patch 10), so this
+  alone does not isolate the patch. What does: with home descriptions, the walk
+  meets 2 pointers to declarations, one of them planted; without, 84. The test
+  allows at most 4.
+- Dropped from the design: two compile units of the test, which liblldb
+  completes on its own, and `BlockDirectory::m_blocks`, whose element type the
+  test defines.
 
 ### 10. JS cells as their C++ classes
 
 **Why this matters most.** mya exists to explain what a JS heap holds, and most
 of what it holds hangs off JS cells: a string's characters, a code block's
-bytecode and metadata, a global object's C++ state. The walk visits every live
-cell (patch 5), but as a bare `JSCell`, so it follows nothing out of one. Every
-pointer out of a JS cell must be followed.
+bytecode and metadata, a global object's C++ state.
 
-**A cell's C++ class comes from its `ClassInfo`.** Every cell's Structure holds
-the `ClassInfo` of its class (`Structure::m_classInfo`), and a `ClassInfo` is
-the static member `s_info` of the class it describes. JS cells have no vtable,
-and liblldb does not give the class that declares a static member from its
-address, so this is the one place the walk goes from a name to a type. Every
-answer is checked against the `ClassInfo` itself:
+**A cell's C++ class comes from its `ClassInfo`** (`HeapWalk::cellClass`). JS
+cells have no vtable, and liblldb does not give the class that declares a
+static member from its address, so this is the one place the walk goes from a
+name to a type. Every answer is checked against the target's data:
 1. Read the cell's StructureID, decode it (patch 5), and read the Structure's
    `m_classInfo`.
 2. Resolve that address to its symbol, such as `JSC::JSString::s_info`, in the
-   image that holds it.
-3. Look the enclosing class, `JSC::JSString`, up by that name in that image
-   only, then take that class's home description (patch 9). This lookup is the
-   exception the Rules allow.
-4. Check, against the target's data:
-   - the class has a static member `s_info` whose qualified name is the symbol's;
-   - its size is the `ClassInfo`'s `staticClassSize`, which is `sizeof` the
-     class it was made for;
-   - the class of `ClassInfo::parentClass`, checked the same way, is one of its
-     bases.
+   image that holds it (`SnapshotDebugInfo::classOfStaticMember`).
+3. Look the enclosing class up by that name, in that image only. The class must
+   declare a static member `s_info` whose linkage name is the symbol's. The
+   demangler spells nested template arguments `>>`, and liblldb's type names
+   `> >`, so the name is respelled. An offline audit of libJavaScriptCore's 391
+   `s_info` symbols: 367 resolve as spelled, and the other 24, all nested
+   templates such as `JSGenericTypedArrayViewPrototype<JSGenericTypedArrayView<Int8Adaptor>>`,
+   resolve respelled.
+4. Check that the class's size is the `ClassInfo`'s `staticClassSize`, and that
+   the class of `ClassInfo::parentClass`, checked the same way, is one of its
+   bases. Anything else is reported, never guessed.
+5. Cache the class per `ClassInfo`.
 
-   Anything else is reported, never guessed.
-5. Cache the class per `ClassInfo`, as the class of a vtable is cached.
+The walk reads each cell as its class's home description.
 
-**Cells bigger than their class.** A cell's size comes from its block. A cell may
-be bigger than its class's `byteSize()`:
-- variable-sized cells, such as a `JSFinalObject` with inline storage, a
-  `JSLexicalEnvironment` with its variables, or a `JSCellButterfly`;
-- a subclass that adds fields but reuses its base's `ClassInfo`.
-
-The walk reads the class's fields and counts the rest of the cell as not
-understood, by class (patch 12). Inline storage holds `JSValue`s, which point to
-cells that are visited anyway.
-
-**Edges out of a typed cell.**
-- `WriteBarrier<T>`, `JSValue` and pointers to cells lead to cells the walk
-  already visits; following them is harmless and gives the attribution its edges.
-- Pointers to C++ objects are followed as in patch 8, which is what reaches a
-  `CodeBlock`'s `UnlinkedCodeBlock` data, a global object's C++ members, and so
-  on.
-- Encoded fields, first of all `JSString::m_fiber`, need patch 11. A resolved
-  string's fiber is its `StringImpl*`, and a rope's has `isRopeInPointer` set and
-  holds its fibers compactly.
+**Cells bigger than their class**, such as objects with inline storage, are
+counted: 33.6 KB of the test VM's 5,244 cells.
 
 **Test.**
-- Every live JS cell gets a C++ class, and each class is no larger than its
-  cell. The fixture's object is a `JSFinalObject`, its date a `DateInstance`, and
-  the global object a `JSGlobalObject`.
-- A string made in the target (`"corpse-heap-walk"`) is a `JSString`, and its
-  `StringImpl`'s allocation is reached.
-- In the reach test, what JS cells lead to (110 KB above) is reached, except what
-  patch 11 still has to teach.
+- All 5,244 live JS cells get a class (88 classes), and no class is larger than
+  its cell. The fixture's object is a `JSFinalObject`, its date a
+  `DateInstance`, the global object a `JSGlobalObject`, and its name a
+  `JSString`.
+- The name is built with `join`, so it is not an atom and only its `JSString`
+  holds its `StringImpl`. That `StringImpl`'s allocation is reached. (A literal
+  would be an atom, which the atom table also reaches.)
+- No cell is walked without a class.
 
 ### 11. The other pointers the walk does not follow
 
-**Values read their own way.** Some values hold pointers the debug info cannot
-describe: a tagged or compact pointer in an integer, a union, a buffer whose
-length is in another field. `CorpseRemote.h` already reads some by the C++
-source's own logic. The walk will pick a `RemoteTraits` by recognising the type
-it has reached, by its qualified name, and fall back to `forEachField` otherwise.
-In order of what they miss:
-- `LazyUniqueRef` and `LazyRef` (`m_pointer`, with its tag bits).
-- `JSString::m_fiber`, and `JSRopeString`'s compact fibers.
-- `Vector`, `HashTable` (so `HashMap` and `HashSet`), `RefPtr`, `std::unique_ptr`
-  and `std::unique_ptr<T[]>`, `CompactPtr`, `PackedPtr` and `CompactRefPtr`:
-  every element or bucket, not only the first.
-- Each wrapper takes its logic from the C++ source and names it, as the
-  wrappers in patch 4 do. Each has a planted case in the fixture.
+**Values read their own way.** The walk picks a reader by recognising the
+qualified name of a class it has reached, and walks the class's members
+otherwise. Each reader names the C++ source it mirrors:
 
-**C arrays.** `TargetType::Layout` gains an array: its element type and count,
-from `SBType::GetArrayElementType` and the size. `forEachField` visits each
-element of an array field.
+| Class | How it is read |
+|---|---|
+| `WTF::Vector` | `VectorBufferBase`'s `m_buffer` and `m_size`: every element. The buffer's allocation is reached even with no elements. |
+| `WTF::HashTable` (so `HashMap` and `HashSet`) | Every bucket of `m_table`, with the size before the buckets (`tableSizeOffset`, which is private). An empty or deleted bucket points into no allocation. The other members are walked as usual: a Debug `HashTable` has a `unique_ptr<Lock>`. |
+| `WTF::LazyUniqueRef`, `WTF::LazyRef` | `m_pointer`, unless `lazyTag` or `initializingTag` is set, as the template argument's type. |
+| `WTF::CompactPtr` (so `CompactRefPtr`) | `m_ptr`, decoded as `CompactPtr::decode` does. An outsized pointer, on a 36-bit build, is counted. |
+| `WTF::PackedAlignedPtr` (so `Packed<T*>`) | The bytes of `m_storage`. One stored shifted by its alignment, a template argument the walk does not read, is counted. |
+| `JSC::JSString` | `m_fiber`: a resolved string's `StringImpl`, unless `isRopeInPointer` is set; a rope's fibers are cells. |
+| `JSC::PropertyTable` | `m_indexVector`, less `isCompactFlag`, reaches the index buffer's allocation. |
 
-**Dynamic types.** A pointer whose pointee is polymorphic is followed as the
-complete object's dynamic type (patch 2), which is cached per vtable. Failing to
-find it, such as for a class without a virtual destructor, is counted, not
-reported: in a walk of a whole heap, it is an expected case.
+A class's bases are walked as values of their own, so a reader recognises a
+base: a `Packed<T*>` is a `PackedAlignedPtr`.
 
-**`void*`** and other pointers to types without a size are only followed through
-a wrapper. Otherwise they are counted.
+**C arrays.** `TargetType::Layout` has an `Array`: its element type and count.
+The walk visits each element.
+
+**Dynamic types.** A pointer to a polymorphic class is followed as the complete
+object's dynamic type, quietly; failing to find one is counted
+(`NoDynamicType`), and the pointer is followed as its static type.
+
+**`void*`** and other pointers to types without a size are counted.
+
+**Not done:** `std::unique_ptr<T[]>`, whose element count is not in the
+target's data, and a `PackedAlignedPtr` stored shifted.
+
+**Test.** Five objects are planted behind the last element of a `Vector`, a
+`HashSet`'s value, the last element of a C array, a `CompactPtr` and an
+initialized `LazyUniqueRef`, each reached only through it. Each is reached;
+removing the readers makes the first four fail. (The C array's needs only the
+array layout.)
 
 ### 12. Attributing what the walk misses
 
 **Goal.** Say, for every byte the walk misses, why, in terms a person can act
 on: which class and field point to it, and why the walk did not follow that
-field. The table above was made once, by hand, with a throwaway scan; its
-figures are the baseline to beat. This makes that scan part of mya, and tests
-it.
+field. `HeapWalk::attribute(allocations, excluded, heapPages)` does it.
 
 **Three sources, combined.**
-- **What is live, from libpas.** The target's enumeration (patch 8) is what
-  "missed" means: every byte is in a live libpas object, and the walk either
-  reaches it or not. libpas also knows facts about each object that the walk
-  does not: its heap, its size class, its page kind (segregated, bitfit or
-  large), and, for a heap with a type, its `bmalloc_type`, with a size, an
-  alignment and a name. An IsoHeap's type is one class. A TZone heap's is a
-  bucket that several classes of one size and alignment share
-  (`TZoneHeapManager`), so it narrows an object to a few classes, not one. The
-  target records these facts with each object, from `pas_get_heap` and the
-  heap's type, while it enumerates.
-- **What the walk knows.** Whenever the walk sees a field it does not follow, it
-  records an edge not followed: the value's class, the field, the address it
-  holds if that lands in an allocation, and a reason: the pointee is an
-  uncompleted declaration, the field is an array, an integer, a `void*`, a
-  container past its first element, a polymorphic pointee without a dynamic
-  type, a cell bigger than its class, or a pointer outside every allocation.
-- **What the walk cannot see.** A conservative scan reads every word of every
-  allocation, reached or not, and every word of the snapshot's other memory:
-  images' writable data, thread stacks and registers (`Snapshot::threads()`), and
-  the rest of the snapshot's regions. A word that points into a missed
-  allocation is an edge. Words in a visited value are attributed to its class
-  and field. Words in a live JS cell are attributed to the cell's class (patch
-  10) and field. A word in an image's data is named by the symbol there, and a
-  word on a stack by its thread.
+- **What is live, from libpas.** As it enumerates its heap, the target records
+  libpas's facts with each object (`HeapWalk::AllocationFacts`): its
+  `pas_object_kind` from `pas_get_object_kind`, its heap from `pas_get_heap`,
+  both with `bmalloc_heap_config`, and the heap's `bmalloc_type`'s size,
+  alignment and name. Both lookups take the heap lock themselves, so they run
+  after the enumeration. An object of another heap config, such as the JIT
+  heap's, has no heap. The target also records libpas's payload records: the
+  pages it holds objects in.
+- **What the walk knows.** The walk records each value it reads that is not part
+  of another: the roots, each JS cell (with the cell's size), and each value
+  reached through a pointer or as a container's element.
+- **What the walk cannot see.** A conservative scan reads every 8-byte word at
+  8-byte alignment, then every 6-byte packed pointer at 2-byte alignment that is
+  not the low bytes of a word, labelled as packed. It reads:
+  - every allocation, reached or not;
+  - the live part of each thread's stack, from its stack pointer less the
+    128-byte red zone;
+  - out of process, every other readable, writable, non-executable region,
+    only its resident pages. One of the test target's reservations is 64 GB, so
+    reading it whole is out of the question. On Linux `/proc/<pid>/pagemap`
+    says which pages are present or swapped;
+  - in process, only the images' writable sections, which liblldb lists: the
+    analysis's own memory is in the other regions.
 
-**libpas checks the walk.** libpas's facts are independent of the debug info, so
-the report also checks every object the walk reached:
-- an object reached as a class must fit its allocation: the class's size is at
-  most the allocation's, and in a segregated heap, its size class is the
-  allocation's;
-- an object reached in an IsoHeap or TZone heap must be of a class the heap's
-  type fits: the same size class and alignment.
+  The scan leaves out what the caller excludes (the target's lists of
+  allocations and live cells), and the parts of libpas's pages that hold no
+  live allocation, since they are free memory with stale words.
 
-A failed check is a wrong type, so it is reported, with the field that led there.
-This checks patches 9 and 10 too, from outside the debug info.
+A word that points into a missed allocation is an edge. Its owner is, in order:
+- the class and field of the innermost value the walk read that holds it, found
+  by descending fields, bases and arrays and skipping empty classes such as a
+  `unique_ptr`'s deleter; the field's type gives the reason: an integer, a
+  `void*`, a pointer to a declaration, a pointer whose pointee does not fit, or
+  another type;
+- a JS cell's class, past the end of the class;
+- another missed allocation;
+- a reached allocation, outside every value read, by its libpas type;
+- a thread, by id and name;
+- a symbol in an image's data (`SnapshotDebugInfo::symbolAt`);
+- the region, for other memory.
 
-**The report.** `HeapWalk::reach` returns, with its totals:
-- for each missed allocation, its edges: where each is, as a class and field, a
-  cell's class, a symbol, a thread, or another missed allocation;
-- the missed bytes grouped by the first edge's class, field and reason, largest
-  first, which is the table above;
-- the missed bytes by libpas heap and type, which explains an allocation that
-  nothing points to, such as the 311 KB of zeroed 16 KB blocks above;
-- the missed bytes with no edge at all, by size;
-- every check libpas failed.
+**Attribution.** Each missed allocation is attributed to its most telling edge:
+one in a value the walk read, then a cell, image data, a stack, untyped bytes,
+other memory, and last another missed allocation. One that only other missed
+allocations point to is attributed through them, to the first edge on the way
+back that is not in one.
 
-A missed allocation that only other missed allocations point to is attributed
-through them: to the first edge on the way back that is not itself a missed
-allocation. The report is the verbose output of the reach test, and a mya
-command prints it for any snapshot.
+**libpas checks the walk.** libpas's facts are independent of the debug info:
+- a pointer to where an allocation starts whose pointee is bigger than the
+  allocation is of the wrong type;
+- an object reached at the start of an allocation of a heap with a type, such
+  as an IsoHeap or a TZone heap, must be no bigger than the type allows.
 
-**Avoiding what fooled the hand-made scan.** The throwaway scan found pointers
-in the analysis's own memory: in process, in mya's local copies of the target's
-pages, and out of process, in the fixture's list of allocations, which points
-at every allocation. The tool:
-- scans the snapshot's regions, never mya's own memory, so it runs out of
-  process, or in process with mya's own mappings left out;
-- leaves out the fixture's own buffers, which the fixture records;
-- reads 8-byte words at 8-byte alignment, and, as a second pass, 6-byte packed
-  pointers at 2-byte alignment, labelled as such.
+A failed check is listed in the report with the field that led there.
 
-**What it needs.** Two parts of the corpse library that only Darwin has:
-- the snapshot's regions (`CorpseRegion`). On Linux they come from
-  `/proc/<pid>/maps`, which a Linux snapshot can read, since the process is live;
-- the snapshot's threads (`CorpseThread`), for stacks and registers. On Linux
-  they come from `/proc/<pid>/task`, and their registers from ptrace.
+**The report** (`HeapWalk::Attribution`):
+- for each missed allocation, its first 16 edges and their count, and its
+  attribution;
+- the missed bytes grouped by attribution: reason and owner, with image data
+  grouped by symbol;
+- the missed bytes by libpas heap type;
+- the missed allocations with no edge at all, by size;
+- every failed check.
 
-**Test.**
-- The fixture plants one missed object for each reason: behind an uncompleted
-  declaration, in an integer, in a C array, as a `Vector`'s second element,
-  behind a `void*`, only on a stack, and only in a global. The report attributes
-  each to its reason, class and field, or to its thread or symbol. As patches 9
-  to 11 teach the walk, each planted case moves from missed to reached.
-- An object of a `WTF_MAKE_TZONE_ALLOCATED` class is reported with its TZone
-  bucket, and a missed one is counted under it.
-- A pointer planted with the wrong declared type, to an object of another size,
-  fails libpas's check and is reported.
+The verbose output of the HeapWalk suite prints it. A mya command does not yet:
+the walk needs roots, which only the test defines.
+
+**Linux.** The corpse library's regions and threads now work on Linux too:
+- `Region::all` reads `/proc/<pid>/maps`; `Region::findContaining` and
+  `Region::allWithPageCounts` read `smaps` for the resident and dirty page
+  counts. A page that was only read maps the shared zero page, which Linux does
+  not count as resident.
+- `Thread` lists `/proc/<pid>/task`: names from `comm`, run state and times
+  from `stat`, and, for a thread blocked in the kernel, the stack pointer from
+  `syscall`, which needs no ptrace. A running thread has no stack pointer to
+  read, and registers are not read.
+
+The Region and Thread suites now run on Linux.
+
+**Test.** The fixture plants one missed object for each kind of edge. The
+fixture records their addresses complemented, so that it holds no pointer to
+them itself:
+
+| Planted object | Attributed to |
+|---|---|
+| held only in `MyaRoots::integer`, a `uintptr_t` | an integer in `MyaRoots::integer` |
+| held only by that object | the same, through a missed allocation |
+| held only in `MyaRoots::opaque`, a `void*` | a pointer to a type without a size |
+| held only in `MyaRoots::declared`, a pointer to a class defined nowhere | a pointer to a class that is only declared |
+| held only on a parked thread's stack | the thread `myaStackHolder` |
+| held only in the global `onlyInAGlobal` | image data, by its symbol |
+| a 64-byte object held only in `MyaRoots::wrongType`, a pointer to a 4096-byte class | a pointer whose pointee does not fit, and a failed check naming the field |
+
+The objects the fixture leaks on purpose are attributed to the fixture. The
+missed allocations are exactly what the walk does not reach, and no missed byte
+is counted twice. In process and out of process, the only failed check is the
+planted one.
+
+Not done: the TZone case. TZone heaps exist only on Darwin
+(`USE_TZONE_MALLOC`), so it needs a Darwin run.
+
+### What the walk still misses
+
+On the test's VM on Linux, the walk now reaches 1,478,832 of 1,969,472 bytes
+(75.1%), against 48.7% after patch 8. Out of process, the attribution takes 6 s
+in a Debug build. In the final run it attributed all but 448 of the 488,912
+missed bytes; the figures vary by a few KB from run to run:
+
+| Missed | Attributed to | What it is |
+|---|---|---|
+| 311 KB in 19 allocations | image data: `slots` | bmalloc's prefault supply (`bmalloc_prefault_supply.c`), 16 KB blocks prefaulted ahead of demand. These were the unidentified zeroed blocks. |
+| 71 KB in 3 | image data: the test's `fixture` | Its own list of live cells (57 KB) and the objects it leaks on purpose. |
+| 34 KB in 560 | image data: `JSC::intlAvailableTimeZoneEntries()::entries` | A function-local static cache, which nothing reached from the VM points to. |
+| 9.6 KB in 123 | image data: `JSC::sharedCommonThunks()::thunks` | Likewise. |
+| 8.7 KB in 2 | image data: `JSC::Interpreter::opcodeIDTable()::opcodeIDTable` | Likewise. |
+| 8.5 KB in 58 | anonymous memory | Outside libpas's pages: system malloc. |
+| 9.8 KB in 40 | `WTF::CodePtr<…>::m_value` | A `void*` to JIT code's memory. |
+| 6 KB in 2 | `MyaRoots::integer` | Planted. |
+| 5.8 KB in 39 | untyped bytes of reached allocations | Words in reached allocations outside every value read, such as dead cells in a MarkedBlock. |
+| 5.3 KB in 38 | image data: WTF's `hashtable` | `ParkingLot`'s table. |
+| 1.2 KB in 9 | `JSC::CodeBlock::m_jitData` | A pointer to a class only declared in JavaScriptCore itself. |
+
+The rest is under 3 KB a group: the other planted objects, GC and JIT threads'
+stacks, and `JSC::theGlobalJITWorklist`. What is left for the walk is mostly
+memory that only static data holds. Reaching it needs roots in static data, not
+better readers.
+
+In process, the same attribution misplaces the prefault blocks: the analysis
+allocates from libpas, which refills `slots` before the scan reads it. The
+report is meant to run out of process.
 
 ## Build gotchas
 
@@ -760,6 +799,23 @@ at every allocation. The tool:
   `liblldb-22-dev` from apt.llvm.org, and `libstdc++6-dbgsym` from
   `debian-debug`, whose version must be libstdc++6's own. A build directory
   configured with an older liblldb needs `-ULLDB_INCLUDE_DIR -ULLDB_LIBRARY`.
+- **liblldb and type units.** Each compile unit's `.debug_names` lists the type
+  units it emitted (`-fdebug-types-section`), and LLD before 19 concatenates
+  the indexes rather than merging them. Every type unit LLD discards as a
+  duplicate leaves an entry with a tombstone offset: 371,947 of the 385,805 in
+  libJavaScriptCore. liblldb reads those entries' DIEs in the wrong unit, and
+  prints errors such as "GetDIE for DIE … is outside of its CU" or "abbreviation
+  code … too big". On Linux, `SnapshotDebugInfo` sets
+  `plugin.symbol-file.dwarf.ignore-file-indexes`, so liblldb indexes the DWARF
+  itself; without `DEBUG_FISSION` that costs nothing measurable here (the
+  HeapWalk suite ran in 19.7 s with it and 21.2 s without). With
+  `DEBUG_FISSION`, the type units are in the `.dwo` files and the indexes name
+  them by signature, so `-gpubnames` may help there again; that is unmeasured.
+- **liblldb and function-pointer template arguments.** Under
+  `-gsimple-template-names`, liblldb cannot name a class whose template argument
+  is a function pointer, such as `ICUDeleter<&udat_close_72>`, and prints
+  "refers to type … which was unable to be parsed". These are opaque ICU
+  handles, and the walk loses nothing.
 - **Reads cost a mapping each.** `Memory` maps a page for each read and releases
   it with the last reader. A read that keeps nothing costs a `process_vm_readv`
   and an `munmap` on Linux. The walk reads per block, so it is fast; the tests'
@@ -767,20 +823,33 @@ at every allocation. The tool:
 
 ## Where the branch stands
 
-The branch is `dev/mya-heap-walk-with-uuid`. Patches 1 to 8 are implemented;
-9 to 12 are the next ones, and none of them is started. The 311 KB of zeroed
-16 KB blocks that nothing points to are not identified yet; patch 12's libpas
-facts should say what they are.
+The branch is `dev/mya-heap-walk-with-uuid`. Patches 1 to 12 are implemented,
+and tested on Linux.
 
-On Linux (Debian 12, aarch64, clang 18, liblldb 22), testLibJSCTools runs 416
-assertions. All of them pass when libstdc++'s debug info is installed. Without
+On Linux (Debian 12, aarch64, clang 18, liblldb 22), testLibJSCTools runs 545
+assertions, and `run-javascriptcore-tests --testlibjsctools` reports no
+failures. All of them pass when libstdc++'s debug info is installed. Without
 it, the system-library assertions fail and say why. The skipped suites and
 cases are the ones printed as `SKIP`:
 - tests after the target exits, since a Linux snapshot reads the live process;
-- the Mach-O-only exports trie and memory arena suites, and the Region, Thread and
-  Symbol suites, which need corpses Linux does not have yet.
+- the Mach-O-only exports trie and memory arena suites, and the Symbol suite,
+  which needs corpses Linux does not have yet.
+
+Each new test was checked against a mutation, by making the change by hand and
+running the suite: walking classes as reached rather than as their home
+descriptions, leaving out the readers, leaving out `JSString::m_fiber`, and
+reading no cell as its class each fail it.
+
+Open:
+- The TZone case of patch 12, which needs Darwin.
+- A mya command that prints the report.
+- The walk's speed on a large heap, since patches 9 to 11.
 
 The Mac builds have not been run since these changes. The Darwin code that
 changed is: `TargetType` and `TargetValue`, the per-vtable cache,
 `FindLLDB.cmake`'s version (from Homebrew's `liblldb.<version>.dylib`),
-`CorpseImage.h`, the tests, `PlatformCocoa.cmake` and `CommonBase.xcconfig`.
+`CorpseImage.h`, the tests, `PlatformCocoa.cmake` and `CommonBase.xcconfig`;
+and, since, `SnapshotDebugInfo` (home descriptions, static members, symbols,
+writable sections), `Region::all` and `residentParts` on Darwin, which are
+written but not compiled, and the analysis thread's id through
+`pthread_threadid_np`.

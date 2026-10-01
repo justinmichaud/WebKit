@@ -43,6 +43,15 @@
 #include <mach/thread_status.h>
 #endif
 #include <optional>
+#if !OS(DARWIN)
+#include <charconv>
+#include <dirent.h>
+#include <errno.h>
+#include <string_view>
+#include <unistd.h>
+#include <wtf/SafeStrerror.h>
+#include <wtf/text/MakeString.h>
+#endif
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 
@@ -172,9 +181,131 @@ Vector<Thread> Thread::platformCollect(const Snapshot& snapshot)
 
 #else
 
-const char* Thread::runStateDescription() const { return "unknown"; }
+// The state letter of /proc/<pid>/task/<tid>/stat.
+const char* Thread::runStateDescription() const
+{
+    switch (m_runState) {
+    case 'R':
+        return "running";
+    case 'S':
+        return "sleeping";
+    case 'D':
+        return "uninterruptible";
+    case 'T':
+    case 't':
+        return "stopped";
+    case 'Z':
+        return "zombie";
+    case 'X':
+        return "dead";
+    case 'I':
+        return "idle";
+    default:
+        return "unknown";
+    }
+}
 
-Vector<Thread> Thread::platformCollect(const Snapshot&) { return { }; }
+// The fields of /proc/<pid>/task/<tid>/stat after the name, which is in
+// parentheses and may hold spaces: the first is the state, and the twelfth and
+// thirteenth the user and system times, in clock ticks.
+static Vector<std::string_view> statFieldsAfterName(std::string_view stat)
+{
+    Vector<std::string_view> fields;
+    size_t nameEnd = stat.rfind(')');
+    if (nameEnd == std::string_view::npos)
+        return fields;
+    std::string_view rest = stat.substr(nameEnd + 1);
+    while (!rest.empty()) {
+        size_t start = rest.find_first_not_of(" \n");
+        if (start == std::string_view::npos)
+            break;
+        rest.remove_prefix(start);
+        size_t end = std::min(rest.find_first_of(" \n"), rest.size());
+        fields.append(rest.substr(0, end));
+        rest.remove_prefix(end);
+    }
+    return fields;
+}
+
+// /proc/<pid>/task/<tid>/syscall holds, for a thread blocked in the kernel,
+// the syscall's number and arguments, then the stack pointer and the program
+// counter; or "running".
+static std::optional<Address> readStackPointer(pid_t pid, const std::string& task)
+{
+    auto syscall = readProcFile(pid, (task + "/syscall").c_str());
+    if (!syscall || syscall->starts_with("running"))
+        return std::nullopt;
+    std::string_view line { *syscall };
+    while (!line.empty() && (line.back() == '\n' || line.back() == ' '))
+        line.remove_suffix(1);
+    size_t pcStart = line.rfind(' ');
+    if (pcStart == std::string_view::npos)
+        return std::nullopt;
+    size_t spStart = line.rfind(' ', pcStart - 1);
+    std::string_view sp = line.substr(spStart == std::string_view::npos ? 0 : spStart + 1, pcStart - (spStart == std::string_view::npos ? 0 : spStart + 1));
+    if (sp.starts_with("0x"))
+        sp.remove_prefix(2);
+    uint64_t value = 0;
+    if (std::from_chars(sp.data(), sp.data() + sp.size(), value, 16).ec != std::errc { } || !value)
+        return std::nullopt;
+    return Address { value };
+}
+
+Vector<Thread> Thread::platformCollect(const Snapshot& snapshot)
+{
+    Vector<Thread> result;
+    pid_t pid = snapshot.process()->pid();
+    ASCIICString taskPath = makeString("/proc/"_s, pid, "/task"_s).ascii();
+    DIR* directory = opendir(taskPath.data());
+    if (!directory) {
+        CORPSE_REPORT("Could not list the threads of pid %d: %s", static_cast<int>(pid), safeStrerror(errno).data());
+        return result;
+    }
+    long ticksPerSecond = sysconf(_SC_CLK_TCK);
+    // Read once: a JS process has a GC thread for each core.
+    Vector<Region> regions = Region::allWithPageCounts(pid);
+    while (struct dirent* entry = readdir(directory)) {
+        uint64_t tid = 0;
+        std::string_view name { entry->d_name };
+        if (std::from_chars(name.data(), name.data() + name.size(), tid).ec != std::errc { } || !tid)
+            continue;
+        Diagnostics::count(DiagnosticCounter::ThreadsListed);
+        std::string task = "task/" + std::string(name);
+
+        Thread thread;
+        thread.m_id = tid;
+        if (auto comm = readProcFile(pid, (task + "/comm").c_str())) {
+            if (!comm->empty() && comm->back() == '\n')
+                comm->pop_back();
+            thread.m_name = WTF::move(*comm);
+        }
+        if (auto stat = readProcFile(pid, (task + "/stat").c_str())) {
+            auto fields = statFieldsAfterName(*stat);
+            if (!fields.isEmpty() && !fields[0].empty())
+                thread.m_runState = fields[0][0];
+            uint64_t userTicks = 0;
+            uint64_t systemTicks = 0;
+            if (fields.size() > 12 && ticksPerSecond > 0) {
+                std::from_chars(fields[11].data(), fields[11].data() + fields[11].size(), userTicks);
+                std::from_chars(fields[12].data(), fields[12].data() + fields[12].size(), systemTicks);
+                thread.m_userTimeUsec = userTicks * 1000000 / static_cast<uint64_t>(ticksPerSecond);
+                thread.m_systemTimeUsec = systemTicks * 1000000 / static_cast<uint64_t>(ticksPerSecond);
+            }
+        }
+
+        // The stack is the region the stack pointer points into. A running thread has
+        // no stack pointer to read without stopping it.
+        if (auto stackPointer = readStackPointer(pid, task)) {
+            Diagnostics::count(DiagnosticCounter::ThreadStatesRead);
+            thread.m_stackPointer = *stackPointer;
+            if (auto region = Region::findContaining(regions, thread.m_stackPointer))
+                thread.m_stackRegion = *region;
+        }
+        result.append(WTF::move(thread));
+    }
+    closedir(directory);
+    return result;
+}
 
 #endif // OS(DARWIN)
 

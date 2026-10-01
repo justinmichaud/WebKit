@@ -40,8 +40,11 @@
 #include "CorpseSnapshot.h"
 #include <lldb/API/LLDB.h>
 #include <mutex>
+#include <optional>
+#include <string>
 #include <string_view>
 #include <wtf/HexNumber.h>
+#include <wtf/text/MakeString.h>
 #include <wtf/text/StringBuilder.h>
 
 namespace JSC {
@@ -60,6 +63,7 @@ SnapshotDebugInfo::SnapshotDebugInfo(std::unique_ptr<lldb::SBDebugger>&& debugge
 
 SnapshotDebugInfo::~SnapshotDebugInfo()
 {
+    m_classesOfStaticMembers.clear();
     m_classesOfVTables.clear();
     m_types.clear();
     m_debugger->DeleteTarget(*m_target);
@@ -97,6 +101,14 @@ RefPtr<SnapshotDebugInfo> SnapshotDebugInfo::create(Snapshot& snapshot)
         CORPSE_REPORT("liblldb could not create a debugger");
         return nullptr;
     }
+#if !OS(DARWIN)
+    // Each compile unit's .debug_names lists the type units it emitted, and a
+    // linker that does not merge the indexes (LLD before 19) leaves an entry
+    // for every type unit it discarded as a duplicate, with a tombstone for its
+    // offset. liblldb then reads those entries' DIEs in the wrong unit. Its own
+    // index of the DWARF is as fast here.
+    lldb::SBDebugger::SetInternalVariable("plugin.symbol-file.dwarf.ignore-file-indexes", "true", debugger->GetInstanceName());
+#endif
     lldb::SBError error;
     // The target starts empty, so that every module is one of the snapshot's images, where the snapshot has it.
     auto target = makeUniqueWithoutFastMallocCheck<lldb::SBTarget>(debugger->CreateTarget(nullptr, nullptr, nullptr, false, error));
@@ -202,22 +214,45 @@ const TargetType* SnapshotDebugInfo::classOfDestructor(Address function, bool& i
 
 const TargetType* SnapshotDebugInfo::dynamicTypeAt(Snapshot& snapshot, Address address, Address& completeObject)
 {
+    return dynamicTypeAt(snapshot, address, completeObject, ReportFailures::Yes);
+}
+
+const TargetType* SnapshotDebugInfo::dynamicTypeIfAnyAt(Snapshot& snapshot, Address address, Address& completeObject)
+{
+    return dynamicTypeAt(snapshot, address, completeObject, ReportFailures::No);
+}
+
+#define CORPSE_REPORT_IF(reportFailures, format, ...) do { \
+        if (reportFailures == ReportFailures::Yes) \
+            CORPSE_REPORT(format __VA_OPT__(, __VA_ARGS__)); \
+    } while (0)
+
+const TargetType* SnapshotDebugInfo::dynamicTypeAt(Snapshot& snapshot, Address address, Address& completeObject, ReportFailures reportFailures)
+{
     if (!address) {
-        CORPSE_REPORT("There is no object at a null address");
+        CORPSE_REPORT_IF(reportFailures, "There is no object at a null address");
         return nullptr;
     }
-    CORPSE_DIAGNOSTICS(diagnostics, "resolving the dynamic type of the object at 0x%llx", address.toTargetVMAddress());
+    std::optional<Diagnostics> diagnostics;
+    if (reportFailures == ReportFailures::Yes)
+        diagnostics.emplace(CORPSE_DESCRIBE("resolving the dynamic type of the object at 0x%llx", address.toTargetVMAddress()));
     Memory& memory = snapshot.memory();
 
     auto vptr = memory.ptr<uint64_t>(address);
     if (!vptr) {
-        CORPSE_REPORT("Could not read the vtable pointer of the object at 0x%llx", address.toTargetVMAddress());
+        CORPSE_REPORT_IF(reportFailures, "Could not read the vtable pointer of the object at 0x%llx", address.toTargetVMAddress());
         return nullptr;
     }
     Address vtable = Address { *vptr }.stripped();
+    // An object that is not polymorphic, read as if it were, holds anything in
+    // its first word; only a pointer into an image's data can be a vtable.
+    if (!isInImage(vtable)) {
+        CORPSE_REPORT_IF(reportFailures, "The vtable at 0x%llx is in no image with debug info", vtable.toTargetVMAddress());
+        return nullptr;
+    }
     auto offsetToTop = memory.ptr<int64_t>(vtable - offsetToTopBeforeAddressPoint);
     if (!offsetToTop) {
-        CORPSE_REPORT("Could not read the offset to top of the vtable at 0x%llx", vtable.toTargetVMAddress());
+        CORPSE_REPORT_IF(reportFailures, "Could not read the offset to top of the vtable at 0x%llx", vtable.toTargetVMAddress());
         return nullptr;
     }
     completeObject = address + static_cast<uint64_t>(*offsetToTop);
@@ -226,32 +261,32 @@ const TargetType* SnapshotDebugInfo::dynamicTypeAt(Snapshot& snapshot, Address a
     if (*offsetToTop) {
         vptr = memory.ptr<uint64_t>(completeObject);
         if (!vptr) {
-            CORPSE_REPORT("Could not read the vtable pointer of the complete object at 0x%llx", completeObject.toTargetVMAddress());
+            CORPSE_REPORT_IF(reportFailures, "Could not read the vtable pointer of the complete object at 0x%llx", completeObject.toTargetVMAddress());
             return nullptr;
         }
         vtable = Address { *vptr }.stripped();
-    }
-    if (!isInImage(vtable)) {
-        CORPSE_REPORT("The vtable at 0x%llx is in no image with debug info", vtable.toTargetVMAddress());
-        return nullptr;
+        if (!isInImage(vtable)) {
+            CORPSE_REPORT_IF(reportFailures, "The vtable at 0x%llx is in no image with debug info", vtable.toTargetVMAddress());
+            return nullptr;
+        }
     }
 
     // A heap holds many objects of each class, so each vtable is looked up once.
     auto entry = m_classesOfVTables.ensure(vtable, [&] {
-        return classOfVTable(snapshot, vtable);
+        return classOfVTable(snapshot, vtable, reportFailures);
     });
     if (!entry.isNewEntry && !entry.iterator->value)
-        CORPSE_REPORT("The vtable at 0x%llx names no class, as an earlier lookup found", vtable.toTargetVMAddress());
+        CORPSE_REPORT_IF(reportFailures, "The vtable at 0x%llx names no class, as an earlier lookup found", vtable.toTargetVMAddress());
     return entry.iterator->value;
 }
 
-const TargetType* SnapshotDebugInfo::classOfVTable(Snapshot& snapshot, Address vtable)
+const TargetType* SnapshotDebugInfo::classOfVTable(Snapshot& snapshot, Address vtable, ReportFailures reportFailures)
 {
     Memory& memory = snapshot.memory();
     for (size_t slot = 0; slot < maxVTableSlots; ++slot) {
         auto entry = memory.ptr<uint64_t>(vtable + slot * sizeof(uint64_t));
         if (!entry) {
-            CORPSE_REPORT("Could not read slot %zu of the vtable at 0x%llx", slot, vtable.toTargetVMAddress());
+            CORPSE_REPORT_IF(reportFailures, "Could not read slot %zu of the vtable at 0x%llx", slot, vtable.toTargetVMAddress());
             return nullptr;
         }
         bool inImage = false;
@@ -261,8 +296,149 @@ const TargetType* SnapshotDebugInfo::classOfVTable(Snapshot& snapshot, Address v
             break;
         Diagnostics::count(DiagnosticCounter::VTableSlotsNotDestructors);
     }
-    CORPSE_REPORT("No destructor in the vtable at 0x%llx: its class needs a virtual destructor", vtable.toTargetVMAddress());
+    CORPSE_REPORT_IF(reportFailures, "No destructor in the vtable at 0x%llx: its class needs a virtual destructor", vtable.toTargetVMAddress());
     return nullptr;
+}
+
+// The pointee of the `this` of a member function, from its compile unit's debug info.
+static lldb::SBType thisPointee(lldb::SBTarget& target, lldb::SBFunction& function)
+{
+    lldb::SBValueList parameters = function.GetBlock().GetVariables(target, true, false, false);
+    if (!parameters.GetSize())
+        return { };
+    return parameters.GetValueAtIndex(0).GetType().GetPointeeType();
+}
+
+const TargetType& SnapshotDebugInfo::homeOf(const TargetType& type)
+{
+    lldb::SBType& description = *type.m_type;
+    if (!(description.GetTypeClass() & (lldb::eTypeClassClass | lldb::eTypeClassStruct | lldb::eTypeClassUnion)))
+        return type;
+
+    // The destructor's declaration in the class carries its linkage name, the
+    // name the loader binds; it names one function, never a type.
+    const char* linkageName = nullptr;
+    uint32_t count = description.GetNumberOfMemberFunctions();
+    for (uint32_t index = 0; index < count && !linkageName; ++index) {
+        lldb::SBTypeMemberFunction function = description.GetMemberFunctionAtIndex(index);
+        if (function.GetKind() == lldb::eMemberFunctionKindDestructor)
+            linkageName = function.GetMangledName();
+    }
+    if (!linkageName) {
+        Diagnostics::count(DiagnosticCounter::ClassesWithoutHome);
+        return type;
+    }
+
+    // The first image that defines the symbol, in the order the loader searches them.
+    uint32_t moduleCount = m_target->GetNumModules();
+    for (uint32_t moduleIndex = 0; moduleIndex < moduleCount; ++moduleIndex) {
+        lldb::SBSymbolContextList symbols = m_target->GetModuleAtIndex(moduleIndex).FindSymbols(linkageName, lldb::eSymbolTypeCode);
+        for (uint32_t index = 0; index < symbols.GetSize(); ++index) {
+            lldb::SBSymbol symbol = symbols.GetContextAtIndex(index).GetSymbol();
+            if (!symbol.IsValid() || symbol.GetType() != lldb::eSymbolTypeCode)
+                continue;
+            lldb::SBFunction destructor = symbol.GetStartAddress().GetFunction();
+            if (!destructor.IsValid() || !isDestructor(destructor))
+                continue;
+            lldb::SBType home = thisPointee(*m_target, destructor);
+            if (!home.IsValid() || !home.IsTypeComplete() || home.GetByteSize() != type.byteSize()) {
+                CORPSE_REPORT("The destructor '%s' of the %zu-byte '%s' destroys %llu bytes", linkageName, type.byteSize(), type.name().legacyCStringPointer(), static_cast<unsigned long long>(home.IsValid() ? home.GetByteSize() : 0));
+                return type;
+            }
+            return this->type(home);
+        }
+    }
+    Diagnostics::count(DiagnosticCounter::ClassesWithoutHome);
+    return type;
+}
+
+String SnapshotDebugInfo::symbolAt(Address address)
+{
+    lldb::SBAddress resolved = m_target->ResolveLoadAddress(address.toTargetVMAddress());
+    lldb::SBModule module = resolved.GetModule();
+    if (!module.IsValid())
+        return { };
+    lldb::SBSymbol symbol = resolved.GetSymbol();
+    if (symbol.IsValid() && symbol.GetName()) {
+        uint64_t offset = address.toTargetVMAddress() - symbol.GetStartAddress().GetLoadAddress(*m_target);
+        if (!offset)
+            return String::fromUTF8(symbol.GetName());
+        return makeString(String::fromUTF8(symbol.GetName()), "+0x"_s, hex(offset));
+    }
+    const char* file = module.GetFileSpec().GetFilename();
+    return makeString(String::fromUTF8(file ? file : "an image"), "+0x"_s, hex(resolved.GetFileAddress()));
+}
+
+static void appendWritableSections(lldb::SBTarget& target, lldb::SBSection section, Vector<std::pair<Address, size_t>>& result)
+{
+    uint32_t subsections = section.GetNumSubSections();
+    if (subsections) {
+        for (uint32_t index = 0; index < subsections; ++index)
+            appendWritableSections(target, section.GetSubSectionAtIndex(index), result);
+        return;
+    }
+    if (!(section.GetPermissions() & lldb::ePermissionsWritable) || !section.GetByteSize())
+        return;
+    lldb::addr_t loadAddress = section.GetLoadAddress(target);
+    if (loadAddress != LLDB_INVALID_ADDRESS)
+        result.append({ Address { loadAddress }, static_cast<size_t>(section.GetByteSize()) });
+}
+
+Vector<std::pair<Address, size_t>> SnapshotDebugInfo::writableSections() const
+{
+    Vector<std::pair<Address, size_t>> result;
+    uint32_t moduleCount = m_target->GetNumModules();
+    for (uint32_t moduleIndex = 0; moduleIndex < moduleCount; ++moduleIndex) {
+        lldb::SBModule module = m_target->GetModuleAtIndex(moduleIndex);
+        for (size_t index = 0; index < module.GetNumSections(); ++index)
+            appendWritableSections(*m_target, module.GetSectionAtIndex(index), result);
+    }
+    std::ranges::sort(result, { }, [](const auto& section) { return section.first; });
+    return result;
+}
+
+// The demangler spells a template argument list that ends another as ">>",
+// and liblldb's type names spell it "> >".
+static std::string asTypeName(std::string_view name)
+{
+    std::string result;
+    result.reserve(name.size());
+    for (char character : name) {
+        if (character == '>' && !result.empty() && result.back() == '>')
+            result += ' ';
+        result += character;
+    }
+    return result;
+}
+
+const TargetType* SnapshotDebugInfo::classOfStaticMember(Address address, const char* memberName)
+{
+    auto entry = m_classesOfStaticMembers.ensure(address, [&]() -> const TargetType* {
+        lldb::SBAddress resolved = m_target->ResolveLoadAddress(address.toTargetVMAddress());
+        lldb::SBSymbol symbol = resolved.GetSymbol();
+        if (!symbol.IsValid() || symbol.GetStartAddress() != resolved || !symbol.GetName() || !symbol.GetMangledName()) {
+            CORPSE_REPORT("No symbol starts at 0x%llx", address.toTargetVMAddress());
+            return nullptr;
+        }
+        std::string_view name { symbol.GetName() };
+        std::string suffix = std::string("::") + memberName;
+        if (!name.ends_with(suffix)) {
+            CORPSE_REPORT("The symbol at 0x%llx is '%s', not a static member '%s'", address.toTargetVMAddress(), symbol.GetName(), memberName);
+            return nullptr;
+        }
+        std::string className = asTypeName(name.substr(0, name.size() - suffix.size()));
+        lldb::SBTypeList candidates = resolved.GetModule().FindTypes(className.c_str());
+        for (uint32_t index = 0; index < candidates.GetSize(); ++index) {
+            lldb::SBType candidate = candidates.GetTypeAtIndex(index);
+            lldb::SBTypeStaticField member = candidate.GetStaticFieldWithName(memberName);
+            const char* linkageName = member.IsValid() ? member.GetMangledName() : nullptr;
+            if (linkageName && std::string_view { linkageName } == symbol.GetMangledName())
+                return &type(candidate);
+        }
+        CORPSE_REPORT("No class '%s' in the image of 0x%llx declares the static member '%s'", className.c_str(), address.toTargetVMAddress(), symbol.GetMangledName());
+        return nullptr;
+    });
+    return entry.iterator->value;
 }
 
 } // namespace Corpse
@@ -291,6 +467,31 @@ RefPtr<SnapshotDebugInfo> SnapshotDebugInfo::create(Snapshot&)
 }
 
 const TargetType* SnapshotDebugInfo::dynamicTypeAt(Snapshot&, Address, Address&)
+{
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+const TargetType* SnapshotDebugInfo::dynamicTypeIfAnyAt(Snapshot&, Address, Address&)
+{
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+const TargetType* SnapshotDebugInfo::classOfStaticMember(Address, const char*)
+{
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+const TargetType& SnapshotDebugInfo::homeOf(const TargetType&)
+{
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+String SnapshotDebugInfo::symbolAt(Address)
+{
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+Vector<std::pair<Address, size_t>> SnapshotDebugInfo::writableSections() const
 {
     RELEASE_ASSERT_NOT_REACHED();
 }

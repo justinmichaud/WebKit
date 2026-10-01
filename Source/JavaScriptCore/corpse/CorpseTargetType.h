@@ -82,14 +82,29 @@ public:
     struct Pointer {
         const TargetType& pointee; // Pointers and references.
     };
+    struct Array {
+        const TargetType& element;
+        size_t count; // Zero for an array of unknown bound.
+    };
     struct Integer {
         bool isSigned; // Integers, enumerations and bool.
     };
     struct Other { }; // Anything else, readable only as bytes.
-    using Layout = Variant<Class, Pointer, Integer, Other>;
+    using Layout = Variant<Class, Pointer, Array, Integer, Other>;
 
     // Read from the debug info the first time it is asked for.
     const Layout& layout() const;
+
+    // A class as the image that defines its destructor describes it: the
+    // description of the destructor's `this`. That image's debug info has the
+    // definition of every type the class owns, which a description from
+    // another image may only declare. The type itself if it is not a class
+    // with an out-of-line destructor. Found once, and cached.
+    const TargetType& home() const;
+
+    // The type of the `index`th template argument of a class template
+    // specialization, or null if it has no such type argument.
+    const TargetType* templateArgument(unsigned index) const;
 
 private:
     TargetType(SnapshotDebugInfo&, const lldb::SBType&);
@@ -100,6 +115,7 @@ private:
     const std::unique_ptr<lldb::SBType> m_type;
     const size_t m_byteSize;
     mutable std::optional<Layout> m_layout;
+    mutable const TargetType* m_home { nullptr };
 
     friend class SnapshotDebugInfo;
 };

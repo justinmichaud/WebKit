@@ -55,6 +55,7 @@ constexpr size_t maxImagePathLength = 4 * KB; // 4× PATH_MAX.
 constexpr size_t maxAuxiliaryVectorEntries = 128; // Linux gives about 20.
 constexpr uint64_t maxProgramHeaders = 256; // An ELF object has about 12.
 constexpr size_t maxDynamicEntries = 4096; // A shared library has about 40.
+constexpr size_t maxRegionCount = 1024 * 1024; // A large process maps tens of thousands.
 constexpr size_t maxVTableSlots = 64 * 1024; // Well above the few hundred virtual functions of the largest WebCore classes.
 
 // A JS heap holds a few hundred BlockDirectories, and no container walked out of
@@ -63,6 +64,7 @@ constexpr unsigned maxBlockDirectories = 64 * 1024;
 constexpr unsigned maxLinkedListLength = 64 * 1024;
 constexpr unsigned maxHashTableSize = 64 * 1024 * 1024;
 constexpr unsigned maxVectorSize = 16 * 1024 * 1024;
+constexpr unsigned maxClassInfoDepth = 64; // JSC's deepest ClassInfo chain is about 10.
 
 // A lookup that finds nothing will read every image's load commands and exports
 // trie, which measured 101 MB for the ~2,800 image process above and 0.4 MB for

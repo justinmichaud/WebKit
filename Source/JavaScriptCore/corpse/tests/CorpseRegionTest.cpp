@@ -50,8 +50,6 @@ void testRegion()
     SuiteTracer tracer("Region");
     if (!tracer.shouldRun())
         return;
-    if (linuxSkip("Region", "corpses are not implemented on Linux yet"))
-        return;
 
     size_t pageSize = static_cast<size_t>(getpagesize());
     static constexpr size_t mappedPages = 5;
@@ -135,8 +133,15 @@ void testRegion()
 
             uint64_t accessedKernelPages =
                 static_cast<uint64_t>((writtenPages + readPages) * pageSize / kernelPageSize);
+#if OS(DARWIN)
             TEST_ASSERT_EQ(region->residentPageCount(), accessedKernelPages,
                 "the pages that were accessed are the resident ones");
+#else
+            // A page that was only read maps the shared zero page, which Linux does not count as resident.
+            TEST_ASSERT(region->residentPageCount() >= static_cast<uint64_t>(writtenPages * pageSize / kernelPageSize)
+                && region->residentPageCount() <= accessedKernelPages,
+                "the pages that were written are resident, and no page that was never accessed is");
+#endif
 
             // Dirty does not mean written: an anonymous page has no pager to be re-read
             // from, so it counts as dirty from the moment a fault creates it, whether
@@ -171,9 +176,9 @@ void testRegion()
         TEST_ASSERT(!region, "an address in the hole above a region finds no region");
     }
     {
-        // The shared cache is mapped as a submap, which the search has to descend
-        // into before it can describe what is actually there. A function's address
-        // arrives signed on arm64e, and is an address only once stripped.
+        // On Darwin, the shared cache is mapped as a submap, which the search has to
+        // descend into before it can describe what is actually there. A function's
+        // address arrives signed on arm64e, and is an address only once stripped.
         Address inSharedCache = Address(reinterpret_cast<void*>(&memcpy)).stripped();
         auto region = Region::findContaining(corpsePort, inSharedCache);
         TEST_ASSERT(region, "an address in the shared cache finds a region");

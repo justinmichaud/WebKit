@@ -74,6 +74,18 @@ const Vector<Image>& Snapshot::images()
     return *m_images;
 }
 
+const Vector<Region>& Snapshot::regions()
+{
+    if (!m_regions) {
+        if (!isValid()) {
+            CORPSE_REPORT("Cannot list the regions of an invalid snapshot");
+            m_regions = Vector<Region> { };
+        } else
+            m_regions = Region::all(corpsePort());
+    }
+    return *m_regions;
+}
+
 #if OS(DARWIN)
 
 Memory::Ptr<dyld_all_image_infos> Snapshot::dyldAllImageInfos()

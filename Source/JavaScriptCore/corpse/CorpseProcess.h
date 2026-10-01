@@ -29,6 +29,8 @@
 
 #if ENABLE(MYA)
 
+#include <optional>
+#include <string>
 #include <sys/types.h>
 #include <wtf/Assertions.h>
 #include <wtf/Ref.h>
@@ -73,6 +75,13 @@ private:
     pid_t m_pid;
     OwnedTaskHandle m_taskPort;
 };
+
+#if !OS(DARWIN)
+// The whole of /proc/<pid>/<path>, such as "maps" or "task/<tid>/comm", or
+// nullopt if it cannot be read. Reading most of them needs the permission
+// ptrace needs.
+std::optional<std::string> readProcFile(pid_t, const char* path);
+#endif
 
 } // namespace Corpse
 } // namespace JSC

@@ -44,8 +44,6 @@ void testThreads()
     SuiteTracer tracer("Thread");
     if (!tracer.shouldRun())
         return;
-    if (linuxSkip("Thread", "corpses are not implemented on Linux yet"))
-        return;
 
     static constexpr const char* alphaName = "jsctools alpha";
     static constexpr const char* betaName = "jsctools beta";
