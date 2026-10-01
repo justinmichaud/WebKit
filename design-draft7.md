@@ -115,6 +115,8 @@ name for Apple's clang, which names a destructor's declaration with the unified
 
 ## Build and test
 
+Build on the machine you are on, the harness is broken. Do not build on a different machine or in a workspace for now
+
 ```
 Tools/Scripts/build-jsc --debug --xcode --export-compile-commands
 DYLD_FRAMEWORK_PATH=WebKitBuild/Debug WebKitBuild/Debug/testLibJSCTools --verbose

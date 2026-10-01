@@ -67,24 +67,17 @@ public:
 
     // dynamicTypeAt, for a walk that expects some objects to have none: a
     // failure is counted, not reported. A class without a virtual destructor
-    // has no dynamic type, and nor does an object that is not polymorphic.
+    // has no dynamic type, and nor does an object that is not polymorphic. A
+    // vtable whose symbol refuses the class its destructor gives is reported
+    // either way.
     const TargetType* dynamicTypeIfAnyAt(Snapshot&, Address, Address& completeObject);
 
-    // The class that declares the static data member at `address`, such as a
-    // JS cell class's s_info. The member's symbol names the class, which is
-    // looked up by that name in the image that holds the member only, and must
-    // declare a static member `memberName` with the symbol's linkage name.
-    // Null, having reported why, if there is none.
-    const TargetType* classOfStaticMember(Address, const char* memberName);
-
-    // The symbol `address` is in, and how far into it, such as
-    // "JSC::Options::s_options+0x10"; the image and its offset if no symbol
-    // covers it; null if it is in no image with debug info.
-    String symbolAt(Address);
-
-    // The writable sections of the images with debug info, such as their data
-    // and bss, where they are loaded.
-    Vector<std::pair<Address, size_t>> writableSections() const;
+    // The class among those of the compile unit that defines the global
+    // variable starting at `variable` whose static member `memberName` has the
+    // linkage name `linkageName`, or, if that is null, the variable's own
+    // symbol's. Exactly one class must match. Null, having reported why, if
+    // none does.
+    const TargetType* classInCompileUnitOf(Address variable, const char* memberName, const char* linkageName = nullptr);
 
 private:
     friend class TargetType;
@@ -95,14 +88,16 @@ private:
     // that each type's layout is read from the debug info once.
     const TargetType& type(const lldb::SBType&);
 
-    // TargetType::home().
-    const TargetType& homeOf(const TargetType&);
-
     enum class ReportFailures : bool { No, Yes };
     const TargetType* dynamicTypeAt(Snapshot&, Address, Address& completeObject, ReportFailures);
 
     // The class the vtable at `vtable` belongs to, or null, having reported why.
     const TargetType* classOfVTable(Snapshot&, Address vtable, ReportFailures);
+
+    // Whether the symbol the vtable at `vtable` lies in names the class whose
+    // destructor gave `type`. It never supplies a type, only refuses one, and
+    // reports why unless the image has no symbol table.
+    bool vtableSymbolNames(Address vtable, const TargetType&);
 
     // The class whose destructor starts at `function`, or null. `inImage` is
     // false when no image with debug info is mapped there, which is how a walk
@@ -115,7 +110,9 @@ private:
     // By name; types of one name from different images or anonymous namespaces share an entry.
     HashMap<String, Vector<std::unique_ptr<TargetType>>> m_types;
     HashMap<Address, const TargetType*> m_classesOfVTables;
-    HashMap<Address, const TargetType*> m_classesOfStaticMembers;
+    struct CompileUnitClasses;
+    // By the compile unit's image and source file.
+    HashMap<String, std::unique_ptr<CompileUnitClasses>> m_compileUnitClasses;
 };
 
 } // namespace Corpse

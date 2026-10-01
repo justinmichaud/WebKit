@@ -40,6 +40,10 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <type_traits>
+#include <algorithm>
+#include <span>
+#include <string_view>
+#include <wtf/HashMap.h>
 #include <wtf/HashSet.h>
 #include <wtf/HashTraits.h>
 #include <wtf/IterationStatus.h>
@@ -211,27 +215,151 @@ struct RemoteTraits<T*> {
     }
 };
 
+// The readers of WTF's containers. Each reads a container through a
+// TargetValue of its own type, so that the heap walk, through Remote<T>, and
+// the reach walk, through whatever type it reached, share one copy of each
+// container's layout.
+
+// A Vector's storage: VectorBufferBase's m_buffer and m_size, in the base of
+// the Vector's base. Nullopt, and reported, for a count no Vector reaches.
+struct VectorStorage {
+    TargetValue buffer; // m_buffer, a pointer to the first element.
+    size_t size;
+};
+
+inline std::optional<VectorStorage> vectorStorage(const TargetValue& vector)
+{
+    if (!vector)
+        return std::nullopt;
+    TargetValue storage = vector;
+    for (unsigned depth = 0; depth < 2; ++depth) {
+        auto* klass = std::get_if<TargetType::Class>(&storage.type().layout());
+        if (!klass || klass->bases.isEmpty()) {
+            CORPSE_REPORT("The Vector at 0x%llx has no VectorBufferBase", static_cast<unsigned long long>(vector.address().toTargetVMAddress()));
+            return std::nullopt;
+        }
+        storage = storage.base(klass->bases[0]);
+    }
+    TargetValue buffer = storage.properField("m_buffer");
+    auto size = storage.properField("m_size").integer();
+    if (!buffer || !size)
+        return std::nullopt;
+    if (*size < 0 || *size > maxVectorSize) {
+        CORPSE_REPORT("The Vector at 0x%llx claims %lld elements", static_cast<unsigned long long>(vector.address().toTargetVMAddress()), static_cast<long long>(*size));
+        return std::nullopt;
+    }
+    return VectorStorage { WTF::move(buffer), static_cast<size_t>(*size) };
+}
+
+// A HashTable's buckets: m_table, and the table size from the metadata before
+// the buckets. Size 0 for a table with no buckets. Nullopt, and reported, if
+// the size cannot be read or no table reaches it.
+struct HashTableBuckets {
+    TargetValue table; // m_table, a pointer to the first bucket.
+    unsigned size;
+};
+
+inline std::optional<HashTableBuckets> hashTableBuckets(const TargetValue& hashTable)
+{
+    TargetValue table = hashTable.properField("m_table");
+    auto buckets = table.pointerValue();
+    if (!buckets)
+        return std::nullopt;
+    if (!*buckets)
+        return HashTableBuckets { WTF::move(table), 0 };
+    constexpr int tableSizeOffset = -1; // HashTable::tableSizeOffset, in unsigneds before the buckets, which is private.
+    auto tableSize = table.snapshot().memory().ptr<unsigned>(*buckets - static_cast<uint64_t>(-tableSizeOffset) * sizeof(unsigned));
+    if (!tableSize) {
+        CORPSE_REPORT("Could not read the size of the HashTable at 0x%llx", static_cast<unsigned long long>(hashTable.address().toTargetVMAddress()));
+        return std::nullopt;
+    }
+    if (*tableSize > maxHashTableSize) {
+        CORPSE_REPORT("The HashTable at 0x%llx claims %u buckets", static_cast<unsigned long long>(hashTable.address().toTargetVMAddress()), *tableSize);
+        return std::nullopt;
+    }
+    return HashTableBuckets { WTF::move(table), *tableSize };
+}
+
+// How a bucket of a HashTable read without its C++ type is told empty or
+// deleted: as WTF's default HashTraits for an integer, pointer, smart pointer
+// or String key tell it, an empty key is all zeros and a deleted one all ones.
+// Nullopt for any other table, whose keys say nothing of the kind.
+struct DefaultHashTraits {
+    size_t keyOffset; // In a bucket: a HashSet's bucket is its key, a HashMap's a KeyValuePair.
+    size_t keySize;
+};
+
+inline std::optional<DefaultHashTraits> defaultHashTraits(const TargetType& hashTable)
+{
+    // HashTable<Key, Value, Extractor, HashFunctions, Traits, KeyTraits, Malloc>.
+    const TargetType* key = hashTable.templateArgument(0);
+    const TargetType* value = hashTable.templateArgument(1);
+    const TargetType* keyTraits = hashTable.templateArgument(5);
+    if (!key || !value || !keyTraits || !key->byteSize() || key->byteSize() > sizeof(uint64_t))
+        return std::nullopt;
+    auto traitsName = keyTraits->name();
+    if (!std::string_view { traitsName.legacyCStringPointer() }.starts_with("WTF::HashTraits<") || keyTraits->templateArgument(0) != key)
+        return std::nullopt;
+
+    const TargetType::Layout& layout = key->layout();
+    if (std::holds_alternative<TargetType::Class>(layout)) {
+        auto keyName = key->name();
+        std::string_view name { keyName.legacyCStringPointer() };
+        bool isSmartPointerOrString = name.starts_with("WTF::RefPtr<") || name.starts_with("WTF::Ref<")
+            || name.starts_with("std::unique_ptr<") || name.starts_with("std::__1::unique_ptr<")
+            || name == "WTF::String" || name == "WTF::AtomString";
+        if (!isSmartPointerOrString || key->byteSize() != sizeof(uint64_t))
+            return std::nullopt;
+    } else if (auto* integer = std::get_if<TargetType::Integer>(&layout)) {
+        // An enumeration's default traits are not an integer's.
+        if (integer->isEnumeration)
+            return std::nullopt;
+    } else if (!std::holds_alternative<TargetType::Pointer>(layout))
+        return std::nullopt;
+
+    if (value == key)
+        return DefaultHashTraits { 0, key->byteSize() };
+    auto* pair = std::get_if<TargetType::Class>(&value->layout());
+    if (!pair)
+        return std::nullopt;
+    for (const TargetType::Field& field : pair->properFields) {
+        if (std::string_view { field.name.legacyCStringPointer() } == "key" && &field.type == key && !field.bitSize)
+            return DefaultHashTraits { field.offset, key->byteSize() };
+    }
+    return std::nullopt;
+}
+
+// Nullopt, and reported, if the bucket's key cannot be read.
+inline std::optional<bool> isEmptyOrDeletedBucket(Snapshot& snapshot, Address bucket, const DefaultHashTraits& traits)
+{
+    auto bytes = snapshot.memory().span<uint8_t>(bucket + traits.keyOffset, traits.keySize);
+    if (!bytes) {
+        CORPSE_REPORT("Could not read the key of the HashTable bucket at 0x%llx", static_cast<unsigned long long>(bucket.toTargetVMAddress()));
+        return std::nullopt;
+    }
+    std::span<const uint8_t> key { bytes };
+    return std::ranges::all_of(key, [](uint8_t byte) { return !byte; }) || std::ranges::all_of(key, [](uint8_t byte) { return byte == 0xff; });
+}
+
 // A Vector holds its elements, wherever its buffer is.
 template<typename T, size_t inlineCapacity, typename OverflowHandler, size_t minCapacity, typename Malloc>
 struct RemoteTraits<Vector<T, inlineCapacity, OverflowHandler, minCapacity, Malloc>> {
     using VectorType = Vector<T, inlineCapacity, OverflowHandler, minCapacity, Malloc>;
 
-    // Nullopt, and reported, for a count no Vector reaches.
     static std::optional<size_t> size(const Remote<VectorType>& vector)
     {
-        auto size = storage(vector).template field<unsigned>("m_size").integer();
-        if (!size)
+        auto storage = RemoteTraits::storage(vector);
+        if (!storage)
             return std::nullopt;
-        if (*size < 0 || *size > maxVectorSize) {
-            CORPSE_REPORT("The Vector at 0x%llx claims %lld elements", static_cast<unsigned long long>(vector.address().toTargetVMAddress()), static_cast<long long>(*size));
-            return std::nullopt;
-        }
-        return static_cast<size_t>(*size);
+        return storage->size;
     }
 
     static Remote<T> element(const Remote<VectorType>& vector, size_t index)
     {
-        return storage(vector).template field<T*>("m_buffer").dereference().offsetBy(index);
+        auto storage = RemoteTraits::storage(vector);
+        if (!storage)
+            return { };
+        return Remote<T*>(WTF::move(storage->buffer)).dereference().offsetBy(index);
     }
 
     template<typename Visitor>
@@ -246,53 +374,70 @@ struct RemoteTraits<Vector<T, inlineCapacity, OverflowHandler, minCapacity, Mall
     }
 
 private:
-    // The buffer and count live in VectorBufferBase, the base of the Vector's base.
-    static Remote<void> storage(const Remote<VectorType>& vector)
+    static std::optional<VectorStorage> storage(const Remote<VectorType>& vector)
     {
-        return vector.template base<void>(0).template base<void>(0);
+        if (!vector.typed()) {
+            if (vector)
+                CORPSE_REPORT("The Vector at 0x%llx has no type", static_cast<unsigned long long>(vector.address().toTargetVMAddress()));
+            return std::nullopt;
+        }
+        return vectorStorage(*vector.typed());
     }
 };
 
-// A HashSet holds the values in its table's buckets that are neither empty nor
-// deleted, as HashTable's iterators skip them.
+// The buckets of a HashSet's or a HashMap's table that are neither empty nor
+// deleted, as HashTable's iterators skip them, told apart by the container's
+// own KeyTraits. False, and reported, if the table cannot be read.
+template<typename Bucket, typename KeyTraits, typename KeyOf, typename Container, typename Functor>
+bool forEachHashTableBucket(const Remote<Container>& container, const KeyOf& keyOf, const Functor& functor)
+{
+    static_assert(std::is_trivially_copyable_v<Bucket>, "A bucket is copied out of the target to test it");
+    Remote<void> impl = container.template field<void>("m_impl");
+    auto buckets = impl.typed() ? hashTableBuckets(*impl.typed()) : std::nullopt;
+    if (!buckets)
+        return false;
+    if (!buckets->size)
+        return true;
+    Remote<Bucket> first = Remote<Bucket*>(WTF::move(buckets->table)).dereference();
+    for (unsigned index = 0; index < buckets->size; ++index) {
+        Remote<Bucket> bucket = first.offsetBy(index);
+        auto value = bucket.template as<Bucket>();
+        if (!value)
+            return false;
+        // HashTable::isEmptyOrDeletedBucket.
+        if (WTF::isHashTraitsEmptyValue<KeyTraits>(keyOf(*value)) || KeyTraits::isDeletedValue(keyOf(*value)))
+            continue;
+        if (functor(bucket) == IterationStatus::Done)
+            return true;
+    }
+    return true;
+}
+
 template<typename Value, typename HashArg, typename TraitsArg, typename TableTraitsArg, WTF::ShouldValidateKey shouldValidateKey>
 struct RemoteTraits<HashSet<Value, HashArg, TraitsArg, TableTraitsArg, shouldValidateKey>> {
     using SetType = HashSet<Value, HashArg, TraitsArg, TableTraitsArg, shouldValidateKey>;
     using ValueType = typename SetType::ValueType;
-    static_assert(std::is_trivially_copyable_v<ValueType>, "A bucket is copied out of the target to test it");
 
-    static constexpr int tableSizeOffset = -1; // HashTable::tableSizeOffset, in unsigneds before the buckets.
-
-    // False, and reported, if the table cannot be read.
+    // Calls `functor` with each value. False, and reported, if the table cannot be read.
     template<typename Functor>
     static bool forEach(const Remote<SetType>& set, const Functor& functor)
     {
-        Remote<ValueType*> table = set.template field<void>("m_impl").template field<ValueType*>("m_table");
-        auto buckets = table.pointerValue();
-        if (!buckets)
-            return false;
-        if (!*buckets)
-            return true;
-        auto tableSize = Remote<unsigned>(set.snapshot(), *buckets - static_cast<uint64_t>(-tableSizeOffset) * sizeof(unsigned)).template as<unsigned>();
-        if (!tableSize)
-            return false;
-        if (*tableSize > maxHashTableSize) {
-            CORPSE_REPORT("The HashSet at 0x%llx claims %u buckets", static_cast<unsigned long long>(set.address().toTargetVMAddress()), *tableSize);
-            return false;
-        }
-        Remote<ValueType> first = table.dereference();
-        for (unsigned index = 0; index < *tableSize; ++index) {
-            Remote<ValueType> bucket = first.offsetBy(index);
-            auto value = bucket.template as<ValueType>();
-            if (!value)
-                return false;
-            // HashTable::isEmptyOrDeletedBucket, with a HashSet's IdentityExtractor.
-            if (WTF::isHashTraitsEmptyValue<TraitsArg>(*value) || TraitsArg::isDeletedValue(*value))
-                continue;
-            if (functor(bucket) == IterationStatus::Done)
-                return true;
-        }
-        return true;
+        // A HashSet's IdentityExtractor: the bucket is its key.
+        return forEachHashTableBucket<ValueType, TraitsArg>(set, [](const ValueType& value) -> const ValueType& { return value; }, functor);
+    }
+};
+
+template<typename KeyArg, typename MappedArg, typename HashArg, typename KeyTraitsArg, typename MappedTraitsArg, typename TableTraitsArg, WTF::ShouldValidateKey shouldValidateKey, typename Malloc>
+struct RemoteTraits<HashMap<KeyArg, MappedArg, HashArg, KeyTraitsArg, MappedTraitsArg, TableTraitsArg, shouldValidateKey, Malloc>> {
+    using MapType = HashMap<KeyArg, MappedArg, HashArg, KeyTraitsArg, MappedTraitsArg, TableTraitsArg, shouldValidateKey, Malloc>;
+    using ValueType = typename MapType::KeyValuePairType;
+
+    // Calls `functor` with each entry, a KeyValuePair. False, and reported, if the table cannot be read.
+    template<typename Functor>
+    static bool forEach(const Remote<MapType>& map, const Functor& functor)
+    {
+        // A HashMap's KeyValuePairKeyExtractor.
+        return forEachHashTableBucket<ValueType, KeyTraitsArg>(map, [](const ValueType& entry) -> const KeyArg& { return entry.key; }, functor);
     }
 };
 

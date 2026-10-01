@@ -38,6 +38,7 @@
 #include "CorpseLimits.h"
 #include "CorpseProcess.h"
 #include "CorpseSnapshot.h"
+#include <cxxabi.h>
 #include <lldb/API/LLDB.h>
 #include <mutex>
 #include <optional>
@@ -63,25 +64,31 @@ SnapshotDebugInfo::SnapshotDebugInfo(std::unique_ptr<lldb::SBDebugger>&& debugge
 
 SnapshotDebugInfo::~SnapshotDebugInfo()
 {
-    m_classesOfStaticMembers.clear();
+    m_compileUnitClasses.clear();
     m_classesOfVTables.clear();
     m_types.clear();
     m_debugger->DeleteTarget(*m_target);
     lldb::SBDebugger::Destroy(*m_debugger);
 }
 
-#if OS(DARWIN)
-static UTF8CString uuidString(const Image::UUID& uuid)
+// The image's identity, as AddModule takes it: liblldb refuses a file whose
+// UUID or build-id is not this one, so a rebuilt image is refused, not misread.
+static UTF8CString identityString(const Image& image)
 {
     StringBuilder builder;
+#if OS(DARWIN)
+    const Image::UUID& uuid = image.uuid();
     for (size_t index = 0; index < uuid.size(); ++index) {
         if (index == 4 || index == 6 || index == 8 || index == 10)
             builder.append('-');
         builder.append(hex(uuid[index], 2));
     }
+#else
+    for (uint8_t byte : image.buildID())
+        builder.append(hex(byte, 2));
+#endif
     return builder.toString().utf8();
 }
-#endif
 
 RefPtr<SnapshotDebugInfo> SnapshotDebugInfo::create(Snapshot& snapshot)
 {
@@ -122,11 +129,7 @@ RefPtr<SnapshotDebugInfo> SnapshotDebugInfo::create(Snapshot& snapshot)
     size_t opened = 0;
 
     for (const Image& image : images) {
-#if OS(DARWIN)
-        lldb::SBModule module = lldbTarget.AddModule(image.path().legacyCStringPointer(), nullptr, uuidString(image.uuid()).legacyCStringPointer());
-#else
-        lldb::SBModule module = lldbTarget.AddModule(image.path().legacyCStringPointer(), nullptr, nullptr);
-#endif
+        lldb::SBModule module = lldbTarget.AddModule(image.path().legacyCStringPointer(), nullptr, identityString(image).legacyCStringPointer());
         if (!module.IsValid()) {
             Diagnostics::count(DiagnosticCounter::ImagesWithoutDebugInfo);
             continue;
@@ -290,8 +293,9 @@ const TargetType* SnapshotDebugInfo::classOfVTable(Snapshot& snapshot, Address v
             return nullptr;
         }
         bool inImage = false;
-        if (auto* type = classOfDestructor(Address { *entry }.stripped(), inImage))
-            return type;
+        Address function = Address { *entry }.stripped();
+        if (auto* type = classOfDestructor(function, inImage))
+            return vtableSymbolNames(vtable, *type) ? type : nullptr;
         if (!inImage)
             break;
         Diagnostics::count(DiagnosticCounter::VTableSlotsNotDestructors);
@@ -300,159 +304,156 @@ const TargetType* SnapshotDebugInfo::classOfVTable(Snapshot& snapshot, Address v
     return nullptr;
 }
 
-// The pointee of the `this` of a member function, from its compile unit's debug info.
-static lldb::SBType thisPointee(lldb::SBTarget& target, lldb::SBFunction& function)
+// abi::__cxa_demangle's spelling of a linkage name, or empty.
+static std::string demangled(const char* linkageName)
 {
-    lldb::SBValueList parameters = function.GetBlock().GetVariables(target, true, false, false);
-    if (!parameters.GetSize())
+    int status = 0;
+    std::unique_ptr<char, decltype(&free)> result { abi::__cxa_demangle(linkageName, nullptr, nullptr, &status), &free };
+    if (status || !result)
         return { };
-    return parameters.GetValueAtIndex(0).GetType().GetPointeeType();
+    return result.get();
 }
 
-const TargetType& SnapshotDebugInfo::homeOf(const TargetType& type)
+// Whether `member`, a demangled member function, is a member of the class
+// `className` itself: "className::name(...)", with no further scope in `name`.
+static bool isMemberOf(std::string_view member, std::string_view className)
 {
-    lldb::SBType& description = *type.m_type;
-    if (!(description.GetTypeClass() & (lldb::eTypeClassClass | lldb::eTypeClassStruct | lldb::eTypeClassUnion)))
-        return type;
-
-    // The destructor's declaration in the class carries its linkage name, the
-    // name the loader binds; it names one function, never a type.
-    const char* linkageName = nullptr;
-    uint32_t count = description.GetNumberOfMemberFunctions();
-    for (uint32_t index = 0; index < count && !linkageName; ++index) {
-        lldb::SBTypeMemberFunction function = description.GetMemberFunctionAtIndex(index);
-        if (function.GetKind() == lldb::eMemberFunctionKindDestructor)
-            linkageName = function.GetMangledName();
+    if (!member.starts_with(className) || !member.substr(className.size()).starts_with("::"))
+        return false;
+    std::string_view name = member.substr(className.size() + 2);
+    unsigned depth = 0;
+    for (size_t index = 0; index < name.size(); ++index) {
+        char character = name[index];
+        if (character == '<')
+            ++depth;
+        else if (character == '>' && depth)
+            --depth;
+        else if (!depth && character == '(')
+            return index > 0;
+        else if (!depth && name.substr(index).starts_with("::"))
+            return false;
     }
-    if (!linkageName || !*linkageName) {
-        Diagnostics::count(DiagnosticCounter::ClassesWithoutHome);
-        return type;
-    }
-    // Apple's clang gives a destructor's declaration the unified name D4, which
-    // no symbol has: the symbols are its complete-object (D1) and base-object (D2) destructors.
-    Vector<std::string, 2> linkageNames;
-    std::string declared { linkageName };
-    constexpr std::string_view unified = "D4Ev";
-    if (declared.ends_with(unified)) {
-        std::string stem = declared.substr(0, declared.size() - unified.size());
-        linkageNames.append(stem + "D1Ev");
-        linkageNames.append(stem + "D2Ev");
-    } else
-        linkageNames.append(WTF::move(declared));
-
-    // The first image that defines the symbol, in the order the loader searches them.
-    uint32_t moduleCount = m_target->GetNumModules();
-    for (const std::string& name : linkageNames) {
-        linkageName = name.c_str();
-        for (uint32_t moduleIndex = 0; moduleIndex < moduleCount; ++moduleIndex) {
-            lldb::SBSymbolContextList symbols = m_target->GetModuleAtIndex(moduleIndex).FindSymbols(linkageName, lldb::eSymbolTypeCode);
-            for (uint32_t index = 0; index < symbols.GetSize(); ++index) {
-                lldb::SBSymbol symbol = symbols.GetContextAtIndex(index).GetSymbol();
-                if (!symbol.IsValid() || symbol.GetType() != lldb::eSymbolTypeCode)
-                    continue;
-                lldb::SBFunction destructor = symbol.GetStartAddress().GetFunction();
-                if (!destructor.IsValid() || !isDestructor(destructor))
-                    continue;
-                lldb::SBType home = thisPointee(*m_target, destructor);
-                if (!home.IsValid() || !home.IsTypeComplete() || home.GetByteSize() != type.byteSize()) {
-                    CORPSE_REPORT("The destructor '%s' of the %zu-byte '%s' destroys %llu bytes", linkageName, type.byteSize(), type.name().legacyCStringPointer(), static_cast<unsigned long long>(home.IsValid() ? home.GetByteSize() : 0));
-                    return type;
-                }
-                return this->type(home);
-            }
-        }
-    }
-    Diagnostics::count(DiagnosticCounter::ClassesWithoutHome);
-    return type;
+    return false;
 }
 
-String SnapshotDebugInfo::symbolAt(Address address)
-{
-    lldb::SBAddress resolved = m_target->ResolveLoadAddress(address.toTargetVMAddress());
-    lldb::SBModule module = resolved.GetModule();
-    if (!module.IsValid())
-        return { };
-    lldb::SBSymbol symbol = resolved.GetSymbol();
-    if (symbol.IsValid() && symbol.GetName()) {
-        uint64_t offset = address.toTargetVMAddress() - symbol.GetStartAddress().GetLoadAddress(*m_target);
-        if (!offset)
-            return String::fromUTF8(symbol.GetName());
-        return makeString(String::fromUTF8(symbol.GetName()), "+0x"_s, hex(offset));
-    }
-    const char* file = module.GetFileSpec().GetFilename();
-    return makeString(String::fromUTF8(file ? file : "an image"), "+0x"_s, hex(resolved.GetFileAddress()));
-}
-
-static void appendWritableSections(lldb::SBTarget& target, lldb::SBSection section, Vector<std::pair<Address, size_t>>& result)
-{
-    uint32_t subsections = section.GetNumSubSections();
-    if (subsections) {
-        for (uint32_t index = 0; index < subsections; ++index)
-            appendWritableSections(target, section.GetSubSectionAtIndex(index), result);
-        return;
-    }
-    if (!(section.GetPermissions() & lldb::ePermissionsWritable) || !section.GetByteSize())
-        return;
-    lldb::addr_t loadAddress = section.GetLoadAddress(target);
-    if (loadAddress != LLDB_INVALID_ADDRESS)
-        result.append({ Address { loadAddress }, static_cast<size_t>(section.GetByteSize()) });
-}
-
-Vector<std::pair<Address, size_t>> SnapshotDebugInfo::writableSections() const
-{
-    Vector<std::pair<Address, size_t>> result;
-    uint32_t moduleCount = m_target->GetNumModules();
-    for (uint32_t moduleIndex = 0; moduleIndex < moduleCount; ++moduleIndex) {
-        lldb::SBModule module = m_target->GetModuleAtIndex(moduleIndex);
-        for (size_t index = 0; index < module.GetNumSections(); ++index)
-            appendWritableSections(*m_target, module.GetSectionAtIndex(index), result);
-    }
-    std::ranges::sort(result, { }, [](const auto& section) { return section.first; });
-    return result;
-}
-
-// The demangler spells a template argument list that ends another as ">>",
-// and liblldb's type names spell it "> >".
-static std::string asTypeName(std::string_view name)
+// A member function the class declares, demangled: its destructor if liblldb
+// lists one, and otherwise any other. liblldb leaves the implicit members out
+// of a class, so a class whose destructor is implicit lists none. liblldb
+// computes each one's linkage name with clang's mangler from the class itself.
+static std::string declaredMember(lldb::SBType& type)
 {
     std::string result;
-    result.reserve(name.size());
-    for (char character : name) {
-        if (character == '>' && !result.empty() && result.back() == '>')
-            result += ' ';
-        result += character;
+    uint32_t count = type.GetNumberOfMemberFunctions();
+    for (uint32_t index = 0; index < count; ++index) {
+        lldb::SBTypeMemberFunction function = type.GetMemberFunctionAtIndex(index);
+        const char* linkageName = function.GetMangledName();
+        std::string member = linkageName ? demangled(linkageName) : std::string { };
+        if (member.empty())
+            continue;
+        if (function.GetKind() == lldb::eMemberFunctionKindDestructor)
+            return member;
+        if (result.empty())
+            result = WTF::move(member);
     }
     return result;
 }
 
-const TargetType* SnapshotDebugInfo::classOfStaticMember(Address address, const char* memberName)
+// One function can be the destructor of two classes: clang makes a derived
+// class's destructor an alias of its base's when it does nothing more, and
+// linkers fold identical functions. Neither folds a vtable, which is
+// relocated data, so the vtable's own symbol checks the class.
+bool SnapshotDebugInfo::vtableSymbolNames(Address vtable, const TargetType& type)
 {
-    auto entry = m_classesOfStaticMembers.ensure(address, [&]() -> const TargetType* {
-        lldb::SBAddress resolved = m_target->ResolveLoadAddress(address.toTargetVMAddress());
-        lldb::SBSymbol symbol = resolved.GetSymbol();
-        if (!symbol.IsValid() || symbol.GetStartAddress() != resolved || !symbol.GetName() || !symbol.GetMangledName()) {
-            CORPSE_REPORT("No symbol starts at 0x%llx", address.toTargetVMAddress());
-            return nullptr;
-        }
-        std::string_view name { symbol.GetName() };
-        std::string suffix = std::string("::") + memberName;
-        if (!name.ends_with(suffix)) {
-            CORPSE_REPORT("The symbol at 0x%llx is '%s', not a static member '%s'", address.toTargetVMAddress(), symbol.GetName(), memberName);
-            return nullptr;
-        }
-        std::string className = asTypeName(name.substr(0, name.size() - suffix.size()));
-        lldb::SBTypeList candidates = resolved.GetModule().FindTypes(className.c_str());
-        for (uint32_t index = 0; index < candidates.GetSize(); ++index) {
-            lldb::SBType candidate = candidates.GetTypeAtIndex(index);
-            lldb::SBTypeStaticField member = candidate.GetStaticFieldWithName(memberName);
-            const char* linkageName = member.IsValid() ? member.GetMangledName() : nullptr;
-            if (linkageName && std::string_view { linkageName } == symbol.GetMangledName())
-                return &type(candidate);
-        }
-        CORPSE_REPORT("No class '%s' in the image of 0x%llx declares the static member '%s'", className.c_str(), address.toTargetVMAddress(), symbol.GetMangledName());
+    lldb::SBSymbol symbol = m_target->ResolveLoadAddress(vtable.toTargetVMAddress()).GetSymbol();
+    const char* vtableName = symbol.IsValid() ? symbol.GetMangledName() : nullptr;
+    if (!vtableName) {
+        // A stripped image: the object is read as its static type.
+        Diagnostics::count(DiagnosticCounter::VTablesWithoutSymbol);
+        return false;
+    }
+    // Anything but a complete object's vtable, such as a construction vtable (_ZTC), names no class.
+    std::string vtableClass = std::string_view { vtableName }.starts_with("_ZTV") ? demangled(vtableName) : std::string { };
+    constexpr std::string_view vtablePrefix = "vtable for ";
+    if (!vtableClass.starts_with(vtablePrefix)) {
+        CORPSE_REPORT("The vtable at 0x%llx is in '%s', which is not a class's vtable", vtable.toTargetVMAddress(), vtableName);
+        return false;
+    }
+    vtableClass.erase(0, vtablePrefix.size());
+
+    // The class rule 1 found must be the vtable's: its own members are named
+    // as members of that class, and a base's, a derived class's or a nested
+    // class's are not.
+    std::string member = declaredMember(*type.m_type);
+    if (member.empty()) {
+        CORPSE_REPORT("'%s', the class of the destructor in the vtable at 0x%llx, declares no member function with a linkage name", type.name().legacyCStringPointer(), vtable.toTargetVMAddress());
+        return false;
+    }
+    if (!isMemberOf(member, vtableClass)) {
+        CORPSE_REPORT("The vtable at 0x%llx is the vtable of '%s', but the class its destructor gives declares '%s'", vtable.toTargetVMAddress(), vtableClass.c_str(), member.c_str());
+        return false;
+    }
+    return true;
+}
+
+// The classes of a compile unit, listed once.
+struct SnapshotDebugInfo::CompileUnitClasses {
+    Vector<lldb::SBType> classes;
+};
+
+const TargetType* SnapshotDebugInfo::classInCompileUnitOf(Address variable, const char* memberName, const char* linkageName)
+{
+    lldb::SBAddress resolved = m_target->ResolveLoadAddress(variable.toTargetVMAddress());
+    lldb::SBSymbol symbol = resolved.GetSymbol();
+    if (!symbol.IsValid() || symbol.GetStartAddress() != resolved || !symbol.GetMangledName()) {
+        CORPSE_REPORT("No variable starts at 0x%llx", variable.toTargetVMAddress());
         return nullptr;
-    });
-    return entry.iterator->value;
+    }
+    if (!linkageName)
+        linkageName = symbol.GetMangledName();
+
+    // A data address is in no compile unit's code, so liblldb finds the global
+    // variable that contains it, and the compile unit that defines that.
+    lldb::SBSymbolContext context = m_target->ResolveSymbolContextForAddress(resolved, lldb::eSymbolContextCompUnit | lldb::eSymbolContextVariable);
+    lldb::SBCompileUnit unit = context.GetCompileUnit();
+    lldb::SBFileSpec unitFile = unit.GetFileSpec();
+    lldb::SBFileSpec moduleFile = context.GetModule().GetFileSpec();
+    if (!unit.IsValid() || !unitFile.GetFilename()) {
+        CORPSE_REPORT("No compile unit defines '%s' at 0x%llx", symbol.GetName(), variable.toTargetVMAddress());
+        return nullptr;
+    }
+
+    auto string = [](const char* characters) {
+        return String::fromUTF8(characters ? characters : "");
+    };
+    String key = makeString(string(moduleFile.GetDirectory()), '/', string(moduleFile.GetFilename()), '\n', string(unitFile.GetDirectory()), '/', string(unitFile.GetFilename()));
+    auto& unitClasses = m_compileUnitClasses.ensure(key, [&] {
+        auto result = makeUniqueWithoutFastMallocCheck<CompileUnitClasses>();
+        lldb::SBTypeList types = unit.GetTypes(lldb::eTypeClassClass | lldb::eTypeClassStruct);
+        for (uint32_t index = 0; index < types.GetSize(); ++index)
+            result->classes.append(types.GetTypeAtIndex(index));
+        return result;
+    }).iterator->value;
+
+    // liblldb names a static member with clang's own mangler, from the class
+    // it built, so a match means this class declares that member.
+    std::optional<lldb::SBType> match;
+    std::string_view expected { linkageName };
+    for (lldb::SBType& candidate : unitClasses->classes) {
+        lldb::SBTypeStaticField member = candidate.GetStaticFieldWithName(memberName);
+        const char* candidateName = member.IsValid() ? member.GetMangledName() : nullptr;
+        if (!candidateName || std::string_view { candidateName } != expected)
+            continue;
+        if (match && !(*match == candidate)) {
+            CORPSE_REPORT("Two classes of the compile unit of 0x%llx declare '%s'", variable.toTargetVMAddress(), linkageName);
+            return nullptr;
+        }
+        match = candidate;
+    }
+    if (!match) {
+        CORPSE_REPORT("No class of the compile unit of 0x%llx declares '%s'", variable.toTargetVMAddress(), linkageName);
+        return nullptr;
+    }
+    return &type(*match);
 }
 
 } // namespace Corpse
@@ -490,22 +491,7 @@ const TargetType* SnapshotDebugInfo::dynamicTypeIfAnyAt(Snapshot&, Address, Addr
     RELEASE_ASSERT_NOT_REACHED();
 }
 
-const TargetType* SnapshotDebugInfo::classOfStaticMember(Address, const char*)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-}
-
-const TargetType& SnapshotDebugInfo::homeOf(const TargetType&)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-}
-
-String SnapshotDebugInfo::symbolAt(Address)
-{
-    RELEASE_ASSERT_NOT_REACHED();
-}
-
-Vector<std::pair<Address, size_t>> SnapshotDebugInfo::writableSections() const
+const TargetType* SnapshotDebugInfo::classInCompileUnitOf(Address, const char*, const char*)
 {
     RELEASE_ASSERT_NOT_REACHED();
 }

@@ -31,6 +31,7 @@
 #include <span>
 #include <stdint.h>
 #include <string_view>
+#include <sys/types.h>
 #include <wtf/DataLog.h>
 #include <wtf/Function.h>
 #include <wtf/HexNumber.h>
@@ -228,6 +229,15 @@ private:
     Vector<Thread*> m_threads;
 };
 
+// A snapshot of `pid`, which must be this process or, out of process, the
+// target, or null, having failed the test.
+std::unique_ptr<JSC::Corpse::Snapshot> takeSnapshot(pid_t);
+
+// Initializes JSC as a target whose heap is measured runs (A8): no thread but
+// the mutator touches the JS heap or the objects hanging off it, and libpas
+// holds no spare blocks. Before anything else initializes it.
+void initializeQuietJSC();
+
 // create() an object, then analyze() it in and out of process.
 void analyzeInAndOutOfProcess(JSC::Corpse::Address (*create)(), NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address object)>& analyze);
 
@@ -239,12 +249,21 @@ void analyzeInSeparateProcess(JSC::Corpse::Address (*create)(), NOESCAPE const F
 // snapshot only after that process has exited.
 void analyzeAfterTargetExits(JSC::Corpse::Address (*create)(), NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address object)>& analyze);
 
+// create() an object in a separate process run from a copy of this executable,
+// replace that copy's file with another executable once the object is
+// reported, then snapshot it and analyze() it: a rebuilt executable.
+void analyzeAfterExecutableReplaced(JSC::Corpse::Address (*create)(), NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address object)>& analyze);
+
 // The main function for a copy of this process launched as `--target <offset>`: runs the
 // create function at `offset` into this executable and holds its object.
 int runCorpseTarget(const char* offsetText);
 
 // What the target process does once it has its object: reports it to the
-// analysis and waits to be killed.
+// analysis, which snapshots it once it has the report. On Linux, the target
+// reports a copy of itself, which it makes first.
+void reportTargetObject(JSC::Corpse::Address object);
+
+// reportTargetObject, then waits to be killed.
 [[noreturn]] void reportTargetObjectAndPark(JSC::Corpse::Address object);
 
 #endif // ENABLE(MYA)

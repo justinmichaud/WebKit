@@ -302,7 +302,7 @@ add_compile_options("$<$<NOT:$<COMPILE_LANGUAGE:Swift>>:-Wno-null-conversion>")
 add_compile_options("$<$<NOT:$<COMPILE_LANGUAGE:Swift>>:-fobjc-weak>")
 
 # Per-target ObjC visibility; global -fvisibility=hidden hides _OBJC_CLASS_$_ symbols.
-# Under MYA_HEAP, RTTI needs the type_infos of base classes exported across images.
+# MYA_HEAP builds keep default visibility.
 if (NOT ENABLE_MYA_HEAP)
     add_compile_options(
         "$<$<COMPILE_LANGUAGE:C,CXX>:-fvisibility=hidden>"

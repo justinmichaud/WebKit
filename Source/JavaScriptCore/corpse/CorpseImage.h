@@ -53,6 +53,9 @@ public:
 #if OS(DARWIN)
     using UUID = std::array<uint8_t, 16>;
     const UUID& uuid() const { return m_uuid; }
+#else
+    // The NT_GNU_BUILD_ID note of the image as it is mapped.
+    const Vector<uint8_t>& buildID() const { return m_buildID; }
 #endif
 
 private:
@@ -67,9 +70,10 @@ private:
     {
     }
 #else
-    Image(Address loadAddress, UTF8CString&& path)
+    Image(Address loadAddress, UTF8CString&& path, Vector<uint8_t>&& buildID)
         : m_loadAddress(loadAddress)
         , m_path(WTF::move(path))
+        , m_buildID(WTF::move(buildID))
     {
     }
 #endif
@@ -78,6 +82,8 @@ private:
     UTF8CString m_path;
 #if OS(DARWIN)
     UUID m_uuid;
+#else
+    Vector<uint8_t> m_buildID;
 #endif
 };
 

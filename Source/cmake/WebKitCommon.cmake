@@ -360,14 +360,30 @@ if (NOT HAS_RUN_WEBKIT_COMMON)
         set(CMAKE_C_VISIBILITY_PRESET default)
         set(CMAKE_CXX_VISIBILITY_PRESET default)
         set(CMAKE_VISIBILITY_INLINES_HIDDEN OFF)
-        WEBKIT_APPEND_GLOBAL_CXX_FLAGS(-frtti)
+        # So that each image describes the types it uses.
         WEBKIT_APPEND_GLOBAL_COMPILER_FLAGS(-fstandalone-debug)
+        # The vtable check needs every destructor's linkage name, and with
+        # Abstract linkage names an implicit destructor has none.
+        foreach (_flags CMAKE_C_FLAGS CMAKE_OBJC_FLAGS CMAKE_CXX_FLAGS CMAKE_OBJCXX_FLAGS)
+            string(REPLACE "-mllvm -dwarf-linkage-names=Abstract" "" ${_flags} "${${_flags}}")
+        endforeach ()
         # The heap walk's tests enumerate their own libpas heap, through libpas's API.
         add_compile_definitions(PAS_BMALLOC_HIDDEN=0)
         if (NOT APPLE)
-            # liblldb reads .debug_names but not .gdb_index, so without it liblldb indexes every
-            # compile unit's DWARF by hand whenever it loads an image.
-            WEBKIT_APPEND_GLOBAL_COMPILER_FLAGS(-gpubnames)
+            # The build-id is what refuses an image rebuilt since it was loaded. lld
+            # writes none unless asked, and only some distributions' clang asks.
+            add_link_options("LINKER:--build-id")
+        endif ()
+        # liblldb reads .debug_names but not .gdb_index, so with split DWARF it
+        # indexes every .dwo file by hand whenever it loads an image.
+        set(DEBUG_FISSION OFF)
+    endif ()
+
+    if (DEBUG_FISSION)
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -gsplit-dwarf")
+        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -gsplit-dwarf")
+        if (LD_SUPPORTS_GDB_INDEX)
+            add_link_options("LINKER:--gdb-index")
         endif ()
     endif ()
 

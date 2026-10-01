@@ -56,7 +56,10 @@ struct dyld_all_image_infos;
 namespace JSC {
 namespace Corpse {
 
-// Owns a corpse (a read-only Mach snapshot of a process)
+// Owns a corpse: a read-only Mach snapshot of a process on Darwin, and on
+// Linux a copy of the process that forkCopy made. A snapshot of another
+// Linux process that made no copy reads that live process, as a best-effort
+// view of a target that does not cooperate.
 // Check isValid() to see whether acquisition succeeded.
 //
 // Snapshots are linked into a DoublyLinkedList by their owner. The list is
@@ -65,7 +68,15 @@ namespace Corpse {
 class Snapshot : public DoublyLinkedListNode<Snapshot> {
     WTF_MAKE_TZONE_ALLOCATED(Snapshot);
 public:
+    // On Linux, a snapshot of this process copies it.
     explicit Snapshot(RefPtr<Process>);
+#if !OS(DARWIN)
+    // The copy `copy` that the target `process` made of itself with forkCopy,
+    // which `lifetime`, the write end of its lifetime pipe, keeps alive. The
+    // snapshot owns `lifetime`. The target's threads are read now, while it
+    // waits for the snapshot to exist.
+    Snapshot(RefPtr<Process>, pid_t copy, int lifetime);
+#endif
     ~Snapshot();
 
     Snapshot(const Snapshot&) = delete;
@@ -79,6 +90,7 @@ public:
     unsigned id() const { return m_id; }
 
     Process* process() const { return m_process.get(); }
+    // On Linux, the pid of the copy, or of the live process.
     TaskHandle corpsePort() const { return taskHandle(m_corpsePort); }
 
     Memory& memory() LIFETIME_BOUND
@@ -104,6 +116,9 @@ private:
     static unsigned s_nextId;
 
     RefPtr<Process> m_process;
+#if !OS(DARWIN)
+    int m_lifetime { -1 }; // The write end of the copy's lifetime pipe, if this snapshot owns a copy.
+#endif
     OwnedTaskHandle m_corpsePort;
     unsigned m_id;
 

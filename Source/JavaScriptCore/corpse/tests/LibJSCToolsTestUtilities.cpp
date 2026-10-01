@@ -34,13 +34,18 @@
 #include <JavaScriptCore/CorpseError.h>
 #include <JavaScriptCore/CorpseProcess.h>
 #include <JavaScriptCore/CorpseSnapshot.h>
+#include <JavaScriptCore/InitializeThreading.h>
+#include <JavaScriptCore/Options.h>
 #if OS(DARWIN)
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #endif
 #include <array>
 #include <dlfcn.h>
+#include <optional>
+#include <utility>
 #include <errno.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
 #include <spawn.h>
@@ -325,17 +330,39 @@ int runCorpseTarget(const char* offsetText)
     reportTargetObjectAndPark(create());
 }
 
-void reportTargetObjectAndPark(JSC::Corpse::Address object)
+// The target is spawned with the read end of its copy's lifetime pipe as its
+// standard input, and reports its object, then on Linux its copy, on its
+// standard output.
+void reportTargetObject(JSC::Corpse::Address object)
 {
     uint64_t address = object.toTargetVMAddress();
     RELEASE_ASSERT(write(STDOUT_FILENO, &address, sizeof(address)) == sizeof(address));
+#if !OS(DARWIN)
+    uint64_t copy = static_cast<uint64_t>(JSC::Corpse::forkCopy(STDIN_FILENO));
+    RELEASE_ASSERT(static_cast<pid_t>(copy) > 0);
+    RELEASE_ASSERT(write(STDOUT_FILENO, &copy, sizeof(copy)) == sizeof(copy));
+#endif
+}
+
+void reportTargetObjectAndPark(JSC::Corpse::Address object)
+{
+    reportTargetObject(object);
 
     // The analysis kills this process when it is done with the object.
     while (true)
         pause();
 }
 
-static std::unique_ptr<JSC::Corpse::Snapshot> takeSnapshot(pid_t pid)
+void initializeQuietJSC()
+{
+    JSC::initialize([] {
+        JSC::Options::useConcurrentGC() = false;
+        JSC::Options::useConcurrentJIT() = false;
+        JSC::Options::useWarmUpMarkedBlocks() = false;
+    });
+}
+
+std::unique_ptr<JSC::Corpse::Snapshot> takeSnapshot(pid_t pid)
 {
     RefPtr<JSC::Corpse::Process> process = JSC::Corpse::Process::create(pid);
     bool attached = process->attach();
@@ -349,25 +376,50 @@ static std::unique_ptr<JSC::Corpse::Snapshot> takeSnapshot(pid_t pid)
     return snapshot;
 }
 
-static void spawnAndAnalyze(const char* executable, char* const* arguments, TargetAfterSnapshot after, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
+static bool readAll(int fd, std::span<uint8_t> destination)
 {
+    while (!destination.empty()) {
+        ssize_t length = read(fd, destination.data(), destination.size());
+        if (length < 0 && errno == EINTR)
+            continue;
+        if (length <= 0)
+            return false;
+        destination = destination.subspan(static_cast<size_t>(length));
+    }
+    return true;
+}
+
+static void spawnAndAnalyze(const char* executable, char* const* arguments, TargetAfterSnapshot after, NOESCAPE const Function<void()>& afterReport, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
+{
+    // Every end is close-on-exec, so that no other spawned program keeps one.
     std::array<int, 2> addressPipe { -1, -1 };
-    bool opened = !pipe(addressPipe.data());
-    TEST_ASSERT(opened, "a pipe from the target opens");
-    auto closePipe = makeScopeExit([&] {
+    std::array<int, 2> lifetimePipe { -1, -1 };
+    auto closePipes = makeScopeExit([&] {
         for (int fd : addressPipe) {
             if (fd >= 0)
                 close(fd);
         }
+        for (int fd : lifetimePipe) {
+            if (fd >= 0)
+                close(fd);
+        }
     });
+    auto openPipe = [](std::array<int, 2>& ends) {
+        if (pipe(ends.data()))
+            return false;
+        for (int fd : ends)
+            fcntl(fd, F_SETFD, FD_CLOEXEC);
+        return true;
+    };
+    bool opened = openPipe(addressPipe) && openPipe(lifetimePipe);
+    TEST_ASSERT(opened, "the pipes to and from the target open");
     if (!opened)
         return;
 
     posix_spawn_file_actions_t actions;
     posix_spawn_file_actions_init(&actions);
     posix_spawn_file_actions_adddup2(&actions, addressPipe[1], STDOUT_FILENO);
-    posix_spawn_file_actions_addclose(&actions, addressPipe[0]);
-    posix_spawn_file_actions_addclose(&actions, addressPipe[1]);
+    posix_spawn_file_actions_adddup2(&actions, lifetimePipe[0], STDIN_FILENO);
     pid_t child = 0;
     int error = posix_spawn(&child, executable, &actions, nullptr, arguments, environ);
     posix_spawn_file_actions_destroy(&actions);
@@ -376,19 +428,34 @@ static void spawnAndAnalyze(const char* executable, char* const* arguments, Targ
         dataLogLn("    posix_spawn ", executable, ": ", safeStrerror(error));
         return;
     }
+    close(std::exchange(lifetimePipe[0], -1));
+    uint64_t copy = 0;
     auto killChild = makeScopeExit([&] {
         kill(child, SIGKILL);
         while (waitpid(child, nullptr, 0) < 0 && errno == EINTR) { }
+        // A copy that ended while its target lived is a zombie this process
+        // inherited as the subreaper when the target exited.
+        if (copy)
+            while (waitpid(static_cast<pid_t>(copy), nullptr, 0) < 0 && errno == EINTR) { }
     });
 
     uint64_t address = 0;
-    bool reported = read(addressPipe[0], &address, sizeof(address)) == sizeof(address);
+    bool reported = readAll(addressPipe[0], asMutableByteSpan(address));
+#if !OS(DARWIN)
+    reported = reported && readAll(addressPipe[0], asMutableByteSpan(copy)) && copy;
+#endif
     TEST_ASSERT(reported, "the target reports the address of its object");
     if (!reported)
         return;
+    afterReport();
 
+#if OS(DARWIN)
     auto snapshot = takeSnapshot(child);
-    if (!snapshot)
+#else
+    auto snapshot = WTF::makeUnique<JSC::Corpse::Snapshot>(JSC::Corpse::Process::create(child), static_cast<pid_t>(copy), std::exchange(lifetimePipe[1], -1));
+    TEST_ASSERT(snapshot->isValid(), "a snapshot of the target process is valid");
+#endif
+    if (!snapshot || !snapshot->isValid())
         return;
     if (after == TargetAfterSnapshot::Exits) {
         killChild.release();
@@ -398,28 +465,44 @@ static void spawnAndAnalyze(const char* executable, char* const* arguments, Targ
     analyze(*snapshot, JSC::Corpse::Address { address });
 }
 
-static void analyzeOutOfProcess(CreateTargetObject create, TargetAfterSnapshot after, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
+static std::optional<uint64_t> createOffset(CreateTargetObject create)
 {
     uintptr_t createAddress = reinterpret_cast<uintptr_t>(removeCodePtrTag(create));
     Dl_info info;
     bool inThisExecutable = dladdr(std::bit_cast<void*>(createAddress), &info) && reinterpret_cast<uintptr_t>(info.dli_fbase) == executableBase();
     TEST_ASSERT(inThisExecutable, "the target's create function is in this executable");
     if (!inThisExecutable)
-        return;
+        return std::nullopt;
+    return createAddress - executableBase();
+}
 
-    UTF8CString executablePath = JSC::Corpse::Process::create(getpid())->executablePath();
-    TEST_ASSERT(!executablePath.isNull(), "this process's executable path is readable");
-    if (executablePath.isNull())
+static void analyzeOutOfProcess(const char* executablePath, CreateTargetObject create, TargetAfterSnapshot after, NOESCAPE const Function<void()>& afterReport, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
+{
+    auto offset = createOffset(create);
+    if (!offset)
         return;
-
-    CString offsetText = makeString(hex(createAddress - executableBase())).utf8();
+    auto offsetText = makeString(hex(*offset)).utf8();
     char* const arguments[] = {
-        const_cast<char*>(executablePath.legacyCStringPointer()),
+        const_cast<char*>(executablePath),
         const_cast<char*>("--target"),
         const_cast<char*>(offsetText.legacyCStringPointer()),
         nullptr
     };
-    spawnAndAnalyze(executablePath.legacyCStringPointer(), arguments, after, analyze);
+    spawnAndAnalyze(executablePath, arguments, after, afterReport, analyze);
+}
+
+static UTF8CString thisExecutablePath()
+{
+    UTF8CString executablePath = JSC::Corpse::Process::create(getpid())->executablePath();
+    TEST_ASSERT(!executablePath.isNull(), "this process's executable path is readable");
+    return executablePath;
+}
+
+static void analyzeOutOfProcess(CreateTargetObject create, TargetAfterSnapshot after, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
+{
+    UTF8CString executablePath = thisExecutablePath();
+    if (!executablePath.isNull())
+        analyzeOutOfProcess(executablePath.legacyCStringPointer(), create, after, [] { }, analyze);
 }
 
 void analyzeInAndOutOfProcess(CreateTargetObject create, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
@@ -439,13 +522,53 @@ void analyzeInSeparateProcess(CreateTargetObject create, NOESCAPE const Function
 
 void analyzeAfterTargetExits(CreateTargetObject create, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
 {
-#if OS(DARWIN)
     analyzeOutOfProcess(create, TargetAfterSnapshot::Exits, analyze);
-#else
-    UNUSED_PARAM(create);
-    UNUSED_PARAM(analyze);
-    skipSuite("analysis after the target exits", "a Linux snapshot reads the live process, which is gone once it exits");
-#endif
+}
+
+static bool copyFile(const char* from, const char* to)
+{
+    int source = open(from, O_RDONLY | O_CLOEXEC);
+    int destination = open(to, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0755);
+    bool copied = source >= 0 && destination >= 0;
+    std::array<uint8_t, 64 * 1024> buffer;
+    while (copied) {
+        ssize_t length = read(source, buffer.data(), buffer.size());
+        if (length < 0 && errno == EINTR)
+            continue;
+        if (length <= 0) {
+            copied = !length;
+            break;
+        }
+        copied = write(destination, buffer.data(), static_cast<size_t>(length)) == length;
+    }
+    if (source >= 0)
+        close(source);
+    if (destination >= 0)
+        close(destination);
+    return copied;
+}
+
+void analyzeAfterExecutableReplaced(CreateTargetObject create, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
+{
+    UTF8CString executablePath = thisExecutablePath();
+    if (executablePath.isNull())
+        return;
+    // Next to this executable, so that it finds the same libraries.
+    auto copyPath = makeString(String::fromUTF8(executablePath.legacyCStringPointer()), ".replaced-"_s, getpid()).utf8();
+    auto replacementPath = makeString(String::fromUTF8(copyPath.legacyCStringPointer()), ".new"_s).utf8();
+    auto removeCopies = makeScopeExit([&] {
+        unlink(copyPath.legacyCStringPointer());
+        unlink(replacementPath.legacyCStringPointer());
+    });
+    bool copied = copyFile(executablePath.legacyCStringPointer(), copyPath.legacyCStringPointer());
+    TEST_ASSERT(copied, "a copy of this executable is made");
+    if (!copied)
+        return;
+    analyzeOutOfProcess(copyPath.legacyCStringPointer(), create, TargetAfterSnapshot::KeepsRunning, [&] {
+        // A new file at the path, as a linker writes one; the target keeps the old one mapped.
+        bool replaced = copyFile("/usr/bin/true", replacementPath.legacyCStringPointer()) && !rename(replacementPath.legacyCStringPointer(), copyPath.legacyCStringPointer());
+        TEST_ASSERT(replaced, "the target's executable is replaced by another");
+    }, analyze);
 }
 
 #endif // ENABLE(MYA)

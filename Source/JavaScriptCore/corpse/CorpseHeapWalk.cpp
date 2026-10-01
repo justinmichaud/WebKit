@@ -30,8 +30,6 @@
 
 #include "CorpseError.h"
 #include "CorpseLimits.h"
-#include "CorpseRegion.h"
-#include "CorpseThread.h"
 #include <JavaScriptCore/BlockDirectoryBits.h>
 #include <JavaScriptCore/CollectionScope.h>
 #include <JavaScriptCore/FreeList.h>
@@ -40,24 +38,16 @@
 #include <JavaScriptCore/MarkedSpace.h>
 #include <JavaScriptCore/PreciseAllocation.h>
 #include <JavaScriptCore/StructureID.h>
-#include <bit>
-#include <limits>
-#include <span>
-#include <tuple>
-#include <unistd.h>
-#if OS(DARWIN)
-#include <pthread.h>
-#endif
-#include <wtf/BitSet.h>
 #include <algorithm>
-#include <wtf/HashMap.h>
-#include <wtf/Deque.h>
-#include <wtf/HashSet.h>
-#include <wtf/Markable.h>
-#include <wtf/StdLibExtras.h>
+#include <bit>
+#include <span>
 #include <string_view>
+#include <wtf/BitSet.h>
 #include <wtf/CompactPtr.h>
+#include <wtf/HashMap.h>
+#include <wtf/HashSet.h>
 #include <wtf/HexNumber.h>
+#include <wtf/StdLibExtras.h>
 #include <wtf/Vector.h>
 #include <wtf/text/MakeString.h>
 #include <wtf/text/WTFString.h>
@@ -111,12 +101,14 @@ HeapWalk::HeapWalk(Snapshot& snapshot, Address rootsAddress)
 
     TargetValue blockHeaderPointer = roots->properField("markedBlockHeader");
     TargetValue localAllocatorPointer = roots->properField("localAllocator");
-    if (!blockHeaderPointer || !localAllocatorPointer) {
+    auto atSafePoint = roots->properField("atSafePoint").integer();
+    if (!blockHeaderPointer || !localAllocatorPointer || !atSafePoint) {
         m_vm = { };
         return;
     }
     m_blockHeaderPointer = WTF::move(blockHeaderPointer);
     m_localAllocatorPointer = WTF::move(localAllocatorPointer);
+    m_isAtSafePoint = *atSafePoint;
 }
 
 // What MarkedBlock::Handle::isLive reads from the MarkedSpace.
@@ -138,9 +130,9 @@ struct BlockState {
     AtomBits newlyAllocated;
 };
 
-// The locked path of MarkedBlock::Handle::isLive, at a safe point, where
-// isMarking is false. Nothing in a corpse runs concurrently, so the optimistic
-// path it tries first gives the same answer.
+// The locked path of MarkedBlock::Handle::isLive, with isMarking false.
+// Nothing in a corpse runs concurrently, so the optimistic path it tries first
+// gives the same answer.
 bool isLive(const MarkedSpaceState& space, const BlockState& block, size_t atom)
 {
     if (block.isAllocated)
@@ -268,7 +260,10 @@ std::optional<AtomBits> stopAllocatingBlock(const HandleState& handle, const Tar
 } // anonymous namespace
 
 // MarkedSpace::forEachLiveCell, inside a HeapIterationScope, whose
-// MarkedSpace::willStartIterating stops every allocator first.
+// MarkedSpace::willStartIterating stops every allocator first. It has no
+// liveness rules for a collection in progress, where isMarking would be true
+// and marksConveyLivenessDuringMarking would decide: at mya's safe point there
+// is none, and on any other snapshot the result is unverified.
 void HeapWalk::forEachLiveCell(const Function<IterationStatus(const Cell&)>& functor) const
 {
     if (!isValid())
@@ -277,7 +272,7 @@ void HeapWalk::forEachLiveCell(const Function<IterationStatus(const Cell&)>& fun
     Remote<MarkedSpace> space = heap.field<MarkedSpace>("m_objectSpace");
     auto markingVersion = space.field<HeapVersion>("m_markingVersion").as<HeapVersion>();
     auto newlyAllocatedVersion = space.field<HeapVersion>("m_newlyAllocatedVersion").as<HeapVersion>();
-    if (!markingVersion || !newlyAllocatedVersion || !isAtSafePoint(heap, space))
+    if (!markingVersion || !newlyAllocatedVersion)
         return;
     MarkedSpaceState state { *markingVersion, *newlyAllocatedVersion };
 
@@ -286,7 +281,7 @@ void HeapWalk::forEachLiveCell(const Function<IterationStatus(const Cell&)>& fun
         return;
 
     IterationStatus result = IterationStatus::Continue;
-    RemoteTraits<BlockSet>::forEach(space.field<void>("m_blocks").field<BlockSet>("m_set"), [&](const Remote<MarkedBlock*>& block) {
+    forEachBlock([&](Address block) {
         result = walkBlock(block, *newlyAllocatedAfterStop, state, functor);
         return result;
     });
@@ -295,32 +290,16 @@ void HeapWalk::forEachLiveCell(const Function<IterationStatus(const Cell&)>& fun
     walkPreciseAllocations(space, functor);
 }
 
-// Where the mutator could start a collection: no collection is in progress, and
-// no block is locked by an allocation, a sweep or stopAllocating. The walk relies
-// on every invariant JSC keeps between collections, so it walks nothing else.
-bool HeapWalk::isAtSafePoint(const Remote<Heap>& heap, const Remote<MarkedSpace>& space) const
+// The loop over m_blocks.set() in MarkedSpace::forEachLiveCell. False, and reported, if the set cannot be read.
+bool HeapWalk::forEachBlock(const Function<IterationStatus(Address block)>& functor) const
 {
-    auto isMarking = space.field<bool>("m_isMarking").as<bool>();
-    auto collectionScope = heap.field<Markable<CollectionScope>>("m_collectionScope").as<Markable<CollectionScope>>();
-    if (!isMarking || !collectionScope)
-        return false;
-    if (*isMarking || *collectionScope) {
-        CORPSE_REPORT("The snapshot is not at a safe point: the heap at 0x%llx is in a collection", forReport(heap.address()));
-        return false;
-    }
-
-    // CountingLock::isHeldBit, which is private.
-    constexpr unsigned isHeldBit = 1;
-    bool atSafePoint = true;
-    bool readable = RemoteTraits<BlockSet>::forEach(space.field<void>("m_blocks").field<BlockSet>("m_set"), [&](const Remote<MarkedBlock*>& block) {
-        auto blockAddress = block.pointerValue();
-        auto lock = blockAddress ? header(*blockAddress).field<void>("m_lock").field<unsigned>("m_word").as<unsigned>() : std::nullopt;
-        if (lock && *lock & isHeldBit)
-            CORPSE_REPORT("The snapshot is not at a safe point: the block at 0x%llx is locked", forReport(*blockAddress));
-        atSafePoint = lock && !(*lock & isHeldBit);
-        return atSafePoint ? IterationStatus::Continue : IterationStatus::Done;
+    Remote<MarkedSpace> space = m_vm.field<Heap>("heap").field<MarkedSpace>("m_objectSpace");
+    return RemoteTraits<BlockSet>::forEach(space.field<void>("m_blocks").field<BlockSet>("m_set"), [&](const Remote<MarkedBlock*>& block) {
+        auto address = block.pointerValue();
+        if (!address || !*address)
+            return IterationStatus::Continue;
+        return functor(*address);
     });
-    return readable && atSafePoint;
 }
 
 // MarkedBlock::header().
@@ -385,18 +364,15 @@ std::optional<HashMap<uint64_t, HeapWalk::AtomBits>> HeapWalk::stopAllocating(co
 
 // The body of the loop over m_blocks in MarkedSpace::forEachLiveCell:
 // MarkedBlock::handle(), then MarkedBlock::Handle::forEachLiveCell.
-IterationStatus HeapWalk::walkBlock(const Remote<MarkedBlock*>& blockPointer, const HashMap<uint64_t, AtomBits>& newlyAllocatedAfterStop, const MarkedSpaceState& space, const Function<IterationStatus(const Cell&)>& functor) const
+IterationStatus HeapWalk::walkBlock(Address blockAddress, const HashMap<uint64_t, AtomBits>& newlyAllocatedAfterStop, const MarkedSpaceState& space, const Function<IterationStatus(const Cell&)>& functor) const
 {
-    auto blockAddress = blockPointer.pointerValue();
-    if (!blockAddress)
-        return IterationStatus::Continue;
-    Remote<MarkedBlock::Header> header = this->header(*blockAddress);
+    Remote<MarkedBlock::Header> header = this->header(blockAddress);
     Remote<MarkedBlock::Handle> handleValue = header.field<MarkedBlock::Handle*>("m_handle").dereference();
     auto handle = readHandle(handleValue);
     if (!handle)
         return IterationStatus::Continue;
-    if (handle->block != *blockAddress) {
-        CORPSE_REPORT("The handle of the block at 0x%llx is the handle of 0x%llx", forReport(*blockAddress), forReport(handle->block));
+    if (handle->block != blockAddress) {
+        CORPSE_REPORT("The handle of the block at 0x%llx is the handle of 0x%llx", forReport(blockAddress), forReport(handle->block));
         return IterationStatus::Continue;
     }
 
@@ -469,24 +445,13 @@ public:
         , m_allocations(allocations)
     {
         m_reached.fill(false, allocations.size());
+        m_typeAtStart.fill(nullptr, allocations.size());
+        m_liveBytesInBlock.fill(0, allocations.size());
+        m_isBlock.fill(false, allocations.size());
     }
 
     void run();
-
-    const Vector<bool>& reached() const { return m_reached; }
-    void fill(HeapWalk::Reach&) const;
-
-    // A value the walk read that is not part of another one: the roots, a JS
-    // cell, or a value reached through a pointer or as a container's element.
-    struct Object {
-        uint64_t address;
-        uint64_t extent; // A JS cell's is the cell's, which may be bigger than its class.
-        const TargetType* type;
-        bool isCell;
-    };
-    // By address.
-    Vector<Object> takeObjects();
-    const Vector<String>& failedChecks() const { return m_failedChecks; }
+    void summarize(const Vector<HeapWalk::Allocation>& excluded, size_t listCount, HeapWalk::Reach&);
 
 private:
     using NotFollowed = HeapWalk::NotFollowed;
@@ -497,12 +462,17 @@ private:
 
     void notFollowed(NotFollowed reason) { ++m_notFollowed[static_cast<size_t>(reason)]; }
 
+    // An object is a value the walk read that is not part of another one: the
+    // roots, a JS cell, a block's header, or a value reached through a pointer
+    // or as a container's element. Its bytes are what the walk types.
     void enqueue(const TargetValue&, IsObject = IsObject::No);
+    void typed(Address, uint64_t size, const TargetType&);
     void walk(const TargetValue&);
     void walkClass(const TargetValue&);
     enum class IsComplete : bool { No, Yes };
     // Every member but `except`, which a reader reads its own way.
     void walkMembers(const TargetValue&, IsComplete, const char* except = nullptr);
+    void walkBlock(Address);
     void walkCell(const HeapWalk::Cell&);
 
     // The pointee of the pointer `pointer`, of static type `pointee`, if it is
@@ -519,9 +489,11 @@ private:
     void walkTaggedPointer(const TargetValue&, const char* field, unsigned templateArgument, uint64_t tagMask);
     void walkCompactPointer(const TargetValue&);
     void walkPackedPointer(const TargetValue&);
-    void walkUniqueArray(const TargetValue&);
     void walkJSString(const TargetValue&);
     void walkPropertyTable(const TargetValue&);
+
+    // The class and field being walked, which an overrun names.
+    String context() const;
 
     const HeapWalk& m_heap;
     Snapshot& m_snapshot;
@@ -530,18 +502,21 @@ private:
     // Each object is walked once as each type it is reached as.
     HashSet<std::pair<uint64_t, uint64_t>> m_visited;
     Vector<TargetValue> m_worklist;
-    // The classes the walk has reached that a reader needs the type of, by name.
-    HashMap<String, const TargetType*> m_reachedClasses;
+    struct Range {
+        uint64_t begin;
+        uint64_t end;
+    };
+    Vector<Range> m_typed; // Every object's bytes, clipped to its allocation.
+    Vector<const TargetType*> m_typeAtStart; // For each allocation, the first type read where it starts.
+    // A MarkedBlock is one allocation, whose free atoms are the JS heap's free memory.
+    Vector<bool> m_isBlock;
+    Vector<uint64_t> m_liveBytesInBlock; // Its live cells and its header.
+    Vector<String> m_overruns;
     std::array<uint64_t, HeapWalk::numberOfNotFollowedReasons> m_notFollowed { };
     uint64_t m_cellsWithClass { 0 };
     uint64_t m_cellBytesBeyondClass { 0 };
-    Vector<Object> m_objects;
-    // The class and field being walked, which a failed check names.
     const TargetType* m_contextClass { nullptr };
     const TargetType::Field* m_contextField { nullptr };
-    Vector<String> m_failedChecks;
-
-    String context() const;
 };
 
 String ReachWalk::context() const
@@ -553,12 +528,6 @@ String ReachWalk::context() const
     return makeString(m_contextClass->name(), "::"_s, m_contextField->name);
 }
 
-Vector<ReachWalk::Object> ReachWalk::takeObjects()
-{
-    std::ranges::sort(m_objects, { }, &Object::address);
-    return WTF::move(m_objects);
-}
-
 std::optional<size_t> ReachWalk::allocationOf(Address address, uint64_t size) const
 {
     auto allocations = m_allocations.span();
@@ -566,9 +535,26 @@ std::optional<size_t> ReachWalk::allocationOf(Address address, uint64_t size) co
     if (after == allocations.begin())
         return std::nullopt;
     const HeapWalk::Allocation& allocation = *(after - 1);
-    if (address - allocation.address > allocation.size || size > allocation.size - (address - allocation.address))
+    if (address - allocation.address >= allocation.size || size > allocation.size - (address - allocation.address))
         return std::nullopt;
     return (after - 1) - allocations.begin();
+}
+
+void ReachWalk::typed(Address address, uint64_t size, const TargetType& type)
+{
+    auto index = allocationOf(address, 1);
+    if (!index || !size)
+        return;
+    const HeapWalk::Allocation& allocation = m_allocations[*index];
+    if (allocation.address == address && !m_typeAtStart[*index])
+        m_typeAtStart[*index] = &type;
+    uint64_t end = (allocation.address + allocation.size).toTargetVMAddress();
+    if (size > end - address.toTargetVMAddress()) {
+        m_overruns.append(makeString("the "_s, type.byteSize(), "-byte '"_s, type.name(), "' at 0x"_s, hex(address.toTargetVMAddress()),
+            ", reached through "_s, context(), ", runs past the end of its "_s, allocation.size, "-byte allocation"_s));
+        size = end - address.toTargetVMAddress();
+    }
+    m_typed.append({ address.toTargetVMAddress(), address.toTargetVMAddress() + size });
 }
 
 void ReachWalk::enqueue(const TargetValue& value, IsObject isObject)
@@ -579,18 +565,24 @@ void ReachWalk::enqueue(const TargetValue& value, IsObject isObject)
         return;
     m_worklist.append(value);
     if (isObject == IsObject::Yes)
-        m_objects.append({ value.address().toTargetVMAddress(), value.type().byteSize(), &value.type(), false });
+        typed(value.address(), value.type().byteSize(), value.type());
 }
 
 void ReachWalk::run()
 {
-    // The C++ objects first, so that the readers of the cells find the types they need.
-    enqueue(*m_heap.m_roots, IsObject::Yes);
     auto drain = [&] {
         while (!m_worklist.isEmpty())
             walk(m_worklist.takeLast());
     };
+    // The roots' VM is the test's description of it. The cells reach the VM as
+    // JavaScriptCore describes it, with every type it owns complete.
+    walkMembers(*m_heap.m_roots, IsComplete::Yes, "vm");
     drain();
+    m_heap.forEachBlock([&](Address block) {
+        walkBlock(block);
+        drain();
+        return IterationStatus::Continue;
+    });
     m_heap.forEachLiveCell([&](const HeapWalk::Cell& cell) {
         walkCell(cell);
         drain();
@@ -598,10 +590,28 @@ void ReachWalk::run()
     });
 }
 
+void ReachWalk::walkBlock(Address block)
+{
+    Remote<MarkedBlock::Header> header = m_heap.header(block);
+    auto index = allocationOf(block, MarkedBlock::blockSize);
+    if (!index || !header.typed())
+        return;
+    m_isBlock[*index] = true;
+    m_reached[*index] = true;
+    m_liveBytesInBlock[*index] += header.type()->byteSize();
+    m_contextClass = nullptr;
+    m_contextField = nullptr;
+    enqueue(*header.typed(), IsObject::Yes);
+}
+
 void ReachWalk::walkCell(const HeapWalk::Cell& cell)
 {
-    if (auto index = allocationOf(cell.address, cell.size))
+    auto index = allocationOf(cell.address, cell.size);
+    if (index) {
         m_reached[*index] = true;
+        if (m_isBlock[*index])
+            m_liveBytesInBlock[*index] += cell.size;
+    }
     if (!isJSCellKind(cell.kind))
         return;
     const TargetType* klass = m_heap.cellClass(cell.address);
@@ -613,9 +623,9 @@ void ReachWalk::walkCell(const HeapWalk::Cell& cell)
     // A variable-sized cell, or a subclass that shares its base's ClassInfo, is bigger than the class.
     if (cell.size > klass->byteSize())
         m_cellBytesBeyondClass += cell.size - klass->byteSize();
-    const TargetType& home = klass->home();
-    m_objects.append({ cell.address.toTargetVMAddress(), std::max<uint64_t>(cell.size, home.byteSize()), &home, true });
-    enqueue(TargetValue::at(m_snapshot, cell.address, home));
+    m_contextClass = nullptr;
+    m_contextField = nullptr;
+    enqueue(TargetValue::at(m_snapshot, cell.address, *klass), IsObject::Yes);
 }
 
 void ReachWalk::walk(const TargetValue& value)
@@ -642,16 +652,12 @@ void ReachWalk::walk(const TargetValue& value)
     }
 }
 
-void ReachWalk::walkClass(const TargetValue& reachedValue)
+void ReachWalk::walkClass(const TargetValue& value)
 {
-    // Patch 9: the class as the image that defines its destructor describes it.
-    const TargetType& home = reachedValue.type().home();
-    TargetValue value = &home == &reachedValue.type() ? reachedValue : TargetValue::at(m_snapshot, reachedValue.address(), home);
-    auto name = home.name();
-    std::string_view qualifiedName { name.legacyCStringPointer() };
-    if (qualifiedName == "WTF::StringImpl")
-        m_reachedClasses.add("WTF::StringImpl"_s, &home);
-    if (walkByName(value, qualifiedName))
+    m_contextClass = &value.type();
+    m_contextField = nullptr;
+    auto name = value.type().name();
+    if (walkByName(value, std::string_view { name.legacyCStringPointer() }))
         return;
     walkMembers(value, IsComplete::Yes);
 }
@@ -664,7 +670,8 @@ void ReachWalk::walkMembers(const TargetValue& value, IsComplete isComplete, con
     if (!klass)
         return;
     for (const TargetType::Field& field : klass->properFields) {
-        if (field.bitSize || (except && std::string_view { field.name.legacyCStringPointer() } == except))
+        // A field whose type liblldb could not parse has no size.
+        if (field.bitSize || !field.type.byteSize() || (except && std::string_view { field.name.legacyCStringPointer() } == except))
             continue;
         m_contextClass = &value.type();
         m_contextField = &field;
@@ -695,20 +702,19 @@ void ReachWalk::walkMembers(const TargetValue& value, IsComplete isComplete, con
 
 void ReachWalk::followPointer(Address address, const TargetType& pointee)
 {
-    const TargetType::Layout& layout = pointee.layout();
-    auto* klass = std::get_if<TargetType::Class>(&layout);
-    // A declaration has no layout, so whether it is polymorphic is not known.
-    bool isDeclaration = klass && !pointee.byteSize();
-    if (isDeclaration || (klass && klass->isPolymorphic)) {
-        // Patch 2's rule, which never guesses: only a vtable that names a class does.
+    auto* klass = std::get_if<TargetType::Class>(&pointee.layout());
+    if (klass && !pointee.byteSize()) {
+        // A class no compile unit of the image defines.
+        notFollowed(NotFollowed::Declaration);
+        return;
+    }
+    if (klass && klass->isPolymorphic) {
         Address completeObject;
         if (auto* dynamicType = pointee.debugInfo().dynamicTypeIfAnyAt(m_snapshot, address, completeObject)) {
             follow(completeObject, *dynamicType);
             return;
         }
-        notFollowed(isDeclaration ? NotFollowed::Declaration : NotFollowed::NoDynamicType);
-        if (isDeclaration)
-            return;
+        notFollowed(NotFollowed::NoDynamicType);
     }
     if (!pointee.byteSize()) {
         notFollowed(NotFollowed::VoidPointer);
@@ -719,26 +725,10 @@ void ReachWalk::followPointer(Address address, const TargetType& pointee)
 
 void ReachWalk::follow(Address address, const TargetType& type)
 {
-    // Only into an allocation, so that neither a pointer into static data nor
-    // a union's other member read as a pointer leads anywhere.
+    // Only into an allocation, so that a pointer into static data leads nowhere.
     auto index = allocationOf(address, type.byteSize());
-    if (!index) {
-        // libpas's facts check the walk's: a pointer to where an allocation starts
-        // whose pointee does not fit in it is of the wrong type.
-        auto start = allocationOf(address, 1);
-        if (start && m_allocations[*start].address == address) {
-            m_failedChecks.append(makeString(context(), " points to the "_s, m_allocations[*start].size, "-byte allocation at 0x"_s, hex(address.toTargetVMAddress()),
-                ", too small for the "_s, type.byteSize(), "-byte '"_s, type.name(), '\''));
-        }
+    if (!index)
         return;
-    }
-    const HeapWalk::Allocation& allocation = m_allocations[*index];
-    // An object of a heap with a type, such as an IsoHeap or a TZone heap, is of a class the type fits.
-    const HeapWalk::AllocationFacts& facts = allocation.facts;
-    if (allocation.address == address && facts.typeSize > 1 && type.byteSize() > roundUpToMultipleOf(std::max<uint32_t>(facts.typeAlignment, 1), facts.typeSize)) {
-        m_failedChecks.append(makeString(context(), " points to an object of a heap of "_s, facts.typeSize, "-byte objects at 0x"_s, hex(address.toTargetVMAddress()),
-            ", too small for the "_s, type.byteSize(), "-byte '"_s, type.name(), '\''));
-    }
     m_reached[*index] = true;
     enqueue(TargetValue::at(m_snapshot, address, type), IsObject::Yes);
 }
@@ -766,13 +756,6 @@ bool ReachWalk::walkByName(const TargetValue& value, std::string_view name)
         walkPackedPointer(value);
         return true;
     }
-    if (name.starts_with("std::unique_ptr<") || name.starts_with("std::__1::unique_ptr<")) {
-        const TargetType* elements = value.type().templateArgument(0);
-        if (!elements || !std::holds_alternative<TargetType::Array>(elements->layout()))
-            return false;
-        walkUniqueArray(value);
-        return true;
-    }
     if (name == "JSC::JSString") {
         walkJSString(value);
         return true;
@@ -784,68 +767,54 @@ bool ReachWalk::walkByName(const TargetValue& value, std::string_view name)
     return false;
 }
 
-// VectorBufferBase's m_buffer and m_size: every element, not only the first.
+// Every element, not only the first.
 void ReachWalk::walkVector(const TargetValue& vector)
 {
-    // The buffer and count live in VectorBufferBase, the base of the Vector's base.
-    TargetValue storage = vector;
-    for (unsigned depth = 0; depth < 2; ++depth) {
-        auto* klass = std::get_if<TargetType::Class>(&storage.type().layout());
-        if (!klass || klass->bases.isEmpty())
-            return;
-        storage = storage.base(klass->bases[0]);
-    }
-    TargetValue buffer = storage.properField("m_buffer");
-    auto size = storage.properField("m_size").integer();
-    auto address = buffer.pointerValue();
-    if (!size || !address || !*address || *size < 0)
+    auto storage = vectorStorage(vector);
+    if (!storage)
         return;
-    if (*size > maxVectorSize) {
-        CORPSE_REPORT("The Vector at 0x%llx claims %lld elements", forReport(vector.address()), static_cast<long long>(*size));
+    auto address = storage->buffer.pointerValue();
+    if (!address || !*address)
         return;
-    }
     // An inline buffer is in the Vector itself; any other is an allocation of its
     // own, which the Vector holds even with no elements in it.
     if (auto index = allocationOf(*address, 1))
         m_reached[*index] = true;
-    const TargetType& element = std::get<TargetType::Pointer>(buffer.type().layout()).pointee;
+    const TargetType& element = std::get<TargetType::Pointer>(storage->buffer.type().layout()).pointee;
     if (!element.byteSize()) {
-        if (*size)
+        if (storage->size)
             notFollowed(NotFollowed::Declaration);
         return;
     }
-    for (int64_t index = 0; index < *size; ++index)
-        enqueue(TargetValue::at(m_snapshot, *address + static_cast<uint64_t>(index) * element.byteSize(), element), IsObject::Yes);
+    for (size_t index = 0; index < storage->size; ++index)
+        enqueue(TargetValue::at(m_snapshot, *address + index * element.byteSize(), element), IsObject::Yes);
 }
 
-// Every bucket of HashTable's m_table. An empty bucket holds an empty value, and a
-// deleted one a deleted value, and neither points into an allocation.
+// Every bucket that is neither empty nor deleted. A deleted bucket's value has
+// been destroyed but not cleared, so a raw pointer there still holds its old address.
 void ReachWalk::walkHashTable(const TargetValue& table)
 {
     walkMembers(table, IsComplete::Yes, "m_table");
-    TargetValue buckets = table.properField("m_table");
-    auto address = buckets.pointerValue();
-    if (!address || !*address)
+    auto buckets = hashTableBuckets(table);
+    if (!buckets || !buckets->size)
         return;
-    // HashTable::tableSizeOffset, which is private: an unsigned before the buckets.
-    auto tableSize = m_snapshot.memory().ptr<unsigned>(*address - sizeof(unsigned));
-    if (!tableSize) {
-        CORPSE_REPORT("Could not read the size of the HashTable at 0x%llx", forReport(table.address()));
-        return;
-    }
-    if (*tableSize > maxHashTableSize) {
-        CORPSE_REPORT("The HashTable at 0x%llx claims %u buckets", forReport(table.address()), *tableSize);
+    auto address = buckets->table.pointerValue();
+    const TargetType& bucket = std::get<TargetType::Pointer>(buckets->table.type().layout()).pointee;
+    auto traits = defaultHashTraits(table.type());
+    if (!address || !bucket.byteSize() || !traits) {
+        notFollowed(NotFollowed::HashTableNotRead);
         return;
     }
-    const TargetType& bucket = std::get<TargetType::Pointer>(buckets.type().layout()).pointee;
-    if (!bucket.byteSize()) {
-        notFollowed(NotFollowed::Declaration);
-        return;
-    }
-    if (auto index = allocationOf(*address, bucket.byteSize() * static_cast<uint64_t>(*tableSize)))
+    if (auto index = allocationOf(*address, 1))
         m_reached[*index] = true;
-    for (unsigned index = 0; index < *tableSize; ++index)
-        enqueue(TargetValue::at(m_snapshot, *address + static_cast<uint64_t>(index) * bucket.byteSize(), bucket), IsObject::Yes);
+    for (unsigned index = 0; index < buckets->size; ++index) {
+        Address bucketAddress = *address + static_cast<uint64_t>(index) * bucket.byteSize();
+        auto isEmptyOrDeleted = isEmptyOrDeletedBucket(m_snapshot, bucketAddress, *traits);
+        if (!isEmptyOrDeleted)
+            return;
+        if (!*isEmptyOrDeleted)
+            enqueue(TargetValue::at(m_snapshot, bucketAddress, bucket), IsObject::Yes);
+    }
 }
 
 // A pointer to the type of a template argument, held in an integer field with tag bits.
@@ -918,55 +887,6 @@ void ReachWalk::walkPackedPointer(const TargetValue& value)
         followPointer(Address { address << shift }, *pointee);
 }
 
-// std::unique_ptr<T[]>, which records no count. new T[n] puts n in a cookie
-// just before the elements when T has a destructor (Itanium C++ ABI 2.7), and
-// the cookie starts the allocation. With no cookie, as WTF's UniqueArray
-// allocates, the elements are read to the end of their allocation, past the
-// last one by at most libpas's rounding up to its size class.
-void ReachWalk::walkUniqueArray(const TargetValue& array)
-{
-    constexpr unsigned maxDepth = 8;
-    std::optional<TargetValue> pointer;
-    Function<void(const TargetValue&, unsigned)> findPointer = [&](const TargetValue& value, unsigned depth) {
-        auto* klass = std::get_if<TargetType::Class>(&value.type().layout());
-        if (pointer || !klass || depth > maxDepth)
-            return;
-        for (const TargetType::Field& field : klass->properFields) {
-            if (std::holds_alternative<TargetType::Pointer>(field.type.layout())) {
-                pointer = value.field(field);
-                return;
-            }
-            findPointer(value.field(field), depth + 1);
-        }
-        for (const TargetType::Base& base : klass->bases)
-            findPointer(value.base(base), depth + 1);
-    };
-    findPointer(array, 0);
-    if (!pointer)
-        return;
-    auto address = pointer->pointerValue();
-    if (!address || !*address)
-        return;
-    const TargetType& element = std::get<TargetType::Pointer>(pointer->type().layout()).pointee;
-    if (!element.byteSize()) {
-        notFollowed(std::holds_alternative<TargetType::Class>(element.layout()) ? NotFollowed::Declaration : NotFollowed::VoidPointer);
-        return;
-    }
-    auto holder = allocationOf(*address, element.byteSize());
-    if (!holder)
-        return;
-    const HeapWalk::Allocation& allocation = m_allocations[*holder];
-    uint64_t count = (allocation.address + allocation.size - *address) / element.byteSize();
-    if (*address - allocation.address >= sizeof(uint64_t)) {
-        auto cookie = m_snapshot.memory().ptr<uint64_t>(*address - sizeof(uint64_t));
-        if (cookie && *cookie <= count)
-            count = *cookie;
-    }
-    m_reached[*holder] = true;
-    for (uint64_t index = 0; index < std::min<uint64_t>(count, maxVectorSize); ++index)
-        enqueue(TargetValue::at(m_snapshot, *address + index * element.byteSize(), element), IsObject::Yes);
-}
-
 // PropertyTable::m_indexVector: the table's index buffer, with
 // PropertyTable::isCompactFlag. The buffer is one allocation, which holds the
 // indices and then the entries, of a type that depends on the flag.
@@ -990,7 +910,7 @@ void ReachWalk::walkJSString(const TargetValue& string)
     auto fiber = string.properField("m_fiber").integer();
     if (!fiber || !*fiber || (static_cast<uint64_t>(*fiber) & JSString::isRopeInPointer))
         return;
-    const TargetType* stringImpl = m_reachedClasses.get("WTF::StringImpl"_s);
+    const TargetType* stringImpl = m_heap.stringImplClass(string.address());
     if (!stringImpl) {
         notFollowed(NotFollowed::TypeNotReached);
         return;
@@ -998,607 +918,104 @@ void ReachWalk::walkJSString(const TargetValue& string)
     follow(Address { static_cast<uint64_t>(*fiber) }, *stringImpl);
 }
 
-void ReachWalk::fill(HeapWalk::Reach& result) const
+void ReachWalk::summarize(const Vector<HeapWalk::Allocation>& excluded, size_t listCount, HeapWalk::Reach& result)
 {
     result.notFollowed = m_notFollowed;
     result.cellsWithClass = m_cellsWithClass;
     result.cellBytesBeyondClass = m_cellBytesBeyondClass;
-}
+    result.overruns = WTF::move(m_overruns);
+    result.isReached = m_reached;
 
-// The totals of a walk, and its `missedCount` largest misses.
-static void summarize(const ReachWalk& walk, const Vector<HeapWalk::Allocation>& allocations, size_t missedCount, HeapWalk::Reach& result)
-{
-    walk.fill(result);
+    // The typed bytes, each once: an object read as two types, or a field read inside its object, counts once.
+    std::ranges::sort(m_typed, { }, &Range::begin);
+    result.bytesTypedIn.fill(0, m_allocations.size());
+    size_t allocationIndex = 0;
+    uint64_t coveredTo = 0;
+    for (const Range& range : m_typed) {
+        uint64_t begin = std::max(range.begin, coveredTo);
+        if (begin >= range.end)
+            continue;
+        coveredTo = range.end;
+        while (allocationIndex < m_allocations.size() && (m_allocations[allocationIndex].address + m_allocations[allocationIndex].size).toTargetVMAddress() <= begin)
+            ++allocationIndex;
+        // typed() clipped every range to the one allocation it starts in.
+        if (allocationIndex < m_allocations.size())
+            result.bytesTypedIn[allocationIndex] += range.end - begin;
+    }
+
+    auto excludedRanges = excluded.span();
+    auto isExcluded = [&](const HeapWalk::Allocation& allocation) {
+        auto next = std::ranges::upper_bound(excludedRanges, allocation.address, { }, [](const HeapWalk::Allocation& range) { return range.address + range.size; });
+        return next != excludedRanges.end() && next->address < allocation.address + allocation.size;
+    };
     Vector<HeapWalk::Allocation> missed;
-    for (size_t index = 0; index < allocations.size(); ++index) {
-        result.bytesAllocated += allocations[index].size;
-        if (walk.reached()[index])
-            result.bytesReached += allocations[index].size;
-        else
-            missed.append(allocations[index]);
+    Vector<HeapWalk::Untyped> untyped;
+    for (size_t index = 0; index < m_allocations.size(); ++index) {
+        const HeapWalk::Allocation& allocation = m_allocations[index];
+        result.bytesAllocated += allocation.size;
+        if (isExcluded(allocation)) {
+            result.bytesExcluded += allocation.size;
+            continue;
+        }
+        uint64_t accounted = allocation.size;
+        if (m_isBlock[index]) {
+            accounted = std::min(m_liveBytesInBlock[index], allocation.size);
+            result.bytesFreeInBlocks += allocation.size - accounted;
+        }
+        result.bytesTyped += result.bytesTypedIn[index];
+        if (!m_reached[index]) {
+            missed.append(allocation);
+            continue;
+        }
+        result.bytesReached += allocation.size;
+        if (accounted > result.bytesTypedIn[index])
+            untyped.append({ allocation, accounted - result.bytesTypedIn[index], m_typeAtStart[index] ? makeString(m_typeAtStart[index]->name()) : String() });
     }
     std::ranges::sort(missed, std::ranges::greater { }, &HeapWalk::Allocation::size);
-    missed.shrink(std::min(missed.size(), missedCount));
+    missed.shrink(std::min(missed.size(), listCount));
     result.largestMissed = WTF::move(missed);
+    std::ranges::sort(untyped, std::ranges::greater { }, &HeapWalk::Untyped::bytesUntyped);
+    untyped.shrink(std::min(untyped.size(), listCount));
+    result.mostUntyped = WTF::move(untyped);
 }
 
-HeapWalk::Reach HeapWalk::reach(const Vector<Allocation>& allocations, size_t missedCount) const
+HeapWalk::Reach HeapWalk::reach(const Vector<Allocation>& allocations, const Vector<Allocation>& excluded, size_t listCount) const
 {
     Reach result;
     if (!isValid())
         return result;
+    CORPSE_DIAGNOSTICS(diagnostics, "measuring the reach of the walk of the heap at 0x%llx", forReport(m_vm.address()));
     ReachWalk walk(*this, allocations);
     walk.run();
-    summarize(walk, allocations, missedCount, result);
+    walk.summarize(excluded, listCount, result);
     return result;
 }
 
-ASCIILiteral HeapWalk::description(EdgeReason reason)
+// A JS cell has no vtable, so its class comes from its Structure's ClassInfo,
+// which is the s_info of the class it describes.
+Remote<ClassInfo> HeapWalk::classInfoOf(Address address) const
 {
-    switch (reason) {
-    case EdgeReason::Integer:
-        return "an integer"_s;
-    case EdgeReason::VoidPointer:
-        return "a pointer to a type without a size"_s;
-    case EdgeReason::Declaration:
-        return "a pointer to a class that is only declared"_s;
-    case EdgeReason::PointeeDoesNotFit:
-        return "a pointer whose pointee does not fit in its allocation"_s;
-    case EdgeReason::OtherField:
-        return "a field of another type"_s;
-    case EdgeReason::BeyondCellClass:
-        return "a JS cell, past the end of its class"_s;
-    case EdgeReason::UntypedBytes:
-        return "a reached allocation, outside every value the walk read"_s;
-    case EdgeReason::ImageData:
-        return "an image's data"_s;
-    case EdgeReason::Stack:
-        return "a thread's stack"_s;
-    case EdgeReason::OtherMemory:
-        return "other memory"_s;
-    case EdgeReason::MissedAllocation:
-        return "another missed allocation"_s;
-    }
-    RELEASE_ASSERT_NOT_REACHED();
+    auto bits = jsCell(address).field<void>("m_structureID").field<uint32_t>("m_bits").integer();
+    if (!bits)
+        return { };
+    return Remote<ClassInfo>(structure(static_cast<uint32_t>(*bits)).field<const ClassInfo*>("m_classInfo").dereference());
 }
 
-namespace {
-
-using EdgeReason = HeapWalk::EdgeReason;
-
-// A missed allocation keeps this many of its edges, and counts the rest.
-constexpr size_t maxEdgesKept = 16;
-
-// libpas's pas_object_kind, which mya does not include.
-ASCIILiteral objectKindName(uint8_t kind)
-{
-    constexpr std::array<ASCIILiteral, 7> names {
-        "not in a bmalloc heap"_s, "small segregated"_s, "medium segregated"_s, "small bitfit"_s, "medium bitfit"_s, "marge bitfit"_s, "large"_s,
-    };
-    return kind < names.size() ? names[kind] : "of an unknown kind"_s;
-}
-
-struct Range {
-    uint64_t begin;
-    uint64_t end;
-};
-
-// Sorted, and merged where they overlap or touch.
-Vector<Range> merged(Vector<Range>&& ranges)
-{
-    std::ranges::sort(ranges, { }, &Range::begin);
-    Vector<Range> result;
-    for (const Range& range : ranges) {
-        if (!result.isEmpty() && range.begin <= result.last().end)
-            result.last().end = std::max(result.last().end, range.end);
-        else
-            result.append(range);
-    }
-    return result;
-}
-
-class Attributor {
-public:
-    Attributor(Snapshot& snapshot, SnapshotDebugInfo& debugInfo, const Vector<HeapWalk::Allocation>& allocations, const Vector<bool>& reached, Vector<ReachWalk::Object>&& objects, HeapWalk::Attribution& result)
-        : m_snapshot(snapshot)
-        , m_debugInfo(debugInfo)
-        , m_allocations(allocations)
-        , m_objects(WTF::move(objects))
-        , m_result(result)
-    {
-        m_missedIndex.fill(notMissed, allocations.size());
-        Vector<size_t> missed;
-        for (size_t index = 0; index < allocations.size(); ++index) {
-            if (!reached[index])
-                missed.append(index);
-        }
-        std::ranges::sort(missed, [&](size_t a, size_t b) { return allocations[a].size > allocations[b].size; });
-        for (size_t index : missed) {
-            m_missedIndex[index] = m_result.missed.size();
-            m_result.missed.append({ allocations[index], { }, 0, std::nullopt, false });
-        }
-        // Only a word that points into a missed allocation is an edge, so that is all a word is looked up in.
-        for (size_t index = 0; index < m_result.missed.size(); ++index) {
-            uint64_t begin = m_result.missed[index].allocation.address.toTargetVMAddress();
-            m_missedRanges.append({ begin, begin + m_result.missed[index].allocation.size, index });
-        }
-        std::ranges::sort(m_missedRanges, { }, &MissedRange::begin);
-        for (const ReachWalk::Object& object : m_objects)
-            m_maxObjectExtent = std::max(m_maxObjectExtent, object.extent);
-    }
-
-    void scan(const Vector<HeapWalk::Allocation>& excluded, const Vector<HeapWalk::Allocation>& heapPages);
-    void attribute();
-    void group();
-
-private:
-    static constexpr size_t notMissed = std::numeric_limits<size_t>::max();
-
-    enum class SourceKind : uint8_t { Allocation, Stack, Region };
-    struct Source {
-        SourceKind kind;
-        size_t allocation { 0 };
-        String label; // A thread, for a stack; a region's name.
-    };
-
-    void scanRange(uint64_t begin, uint64_t end, const Source&);
-    void scanRangeSkipping(uint64_t begin, uint64_t end, const Vector<Range>& skip, const Source&);
-    void found(uint64_t at, uint64_t value, bool isPacked, const Source&);
-    const ReachWalk::Object* objectContaining(uint64_t address) const;
-    std::pair<EdgeReason, String> describeField(const ReachWalk::Object&, uint64_t offset) const;
-    String heapTypeName(const HeapWalk::AllocationFacts&);
-
-    Snapshot& m_snapshot;
-    SnapshotDebugInfo& m_debugInfo;
-    const Vector<HeapWalk::Allocation>& m_allocations;
-    Vector<ReachWalk::Object> m_objects;
-    uint64_t m_maxObjectExtent { 0 };
-    HeapWalk::Attribution& m_result;
-    Vector<size_t> m_missedIndex; // For each allocation, its index in m_result.missed, or notMissed.
-    struct MissedRange {
-        uint64_t begin;
-        uint64_t end;
-        size_t missed;
-    };
-    Vector<MissedRange> m_missedRanges; // By address.
-
-    // The index in m_result.missed of the missed allocation `value` points into.
-    std::optional<size_t> missedAt(uint64_t value) const
-    {
-        if (m_missedRanges.isEmpty() || value < m_missedRanges.first().begin || value >= m_missedRanges.last().end)
-            return std::nullopt;
-        auto ranges = m_missedRanges.span();
-        auto after = std::ranges::upper_bound(ranges, value, { }, &MissedRange::begin);
-        if (after == ranges.begin() || value >= (after - 1)->end)
-            return std::nullopt;
-        return (after - 1)->missed;
-    }
-    HashMap<uint64_t, String> m_typeNames;
-};
-
-const ReachWalk::Object* Attributor::objectContaining(uint64_t address) const
-{
-    // Objects nest, as a Vector's element in the Vector's owner, so the innermost one is the one the word is in.
-    auto objects = m_objects.span();
-    auto after = std::ranges::upper_bound(objects, address, { }, &ReachWalk::Object::address);
-    const ReachWalk::Object* innermost = nullptr;
-    for (auto candidate = after; candidate != objects.begin();) {
-        --candidate;
-        if (address - candidate->address >= m_maxObjectExtent)
-            break;
-        if (address - candidate->address < candidate->extent && (!innermost || candidate->extent < innermost->extent))
-            innermost = &*candidate;
-    }
-    return innermost;
-}
-
-// The field of `type` that holds the byte at `offset`, through nested classes, bases and arrays.
-struct FieldAt {
-    const TargetType* owner;
-    const TargetType::Field* field;
-    const TargetType* type; // The field's type, or its element type for an array.
-};
-
-// A class with no data, such as a stateless deleter, which may share its
-// address with a member that has data.
-static bool isEmptyClass(const TargetType& type, unsigned depth = 0)
-{
-    auto* klass = std::get_if<TargetType::Class>(&type.layout());
-    if (!klass || !klass->properFields.isEmpty() || klass->isPolymorphic || depth > 32)
-        return false;
-    return std::ranges::all_of(klass->bases, [&](const TargetType::Base& base) { return isEmptyClass(base.type, depth + 1); });
-}
-
-static std::optional<FieldAt> fieldAt(const TargetType& type, uint64_t offset, unsigned depth)
-{
-    if (depth > 32)
-        return std::nullopt;
-    auto* klass = std::get_if<TargetType::Class>(&type.layout());
-    if (!klass)
-        return std::nullopt;
-    for (const TargetType::Field& field : klass->properFields) {
-        uint64_t size = field.bitSize ? (field.bitOffset + field.bitSize + 7) / 8 : field.type.byteSize();
-        if (offset < field.offset || offset - field.offset >= size || isEmptyClass(field.type))
-            continue;
-        const TargetType* fieldType = &field.type;
-        uint64_t inner = offset - field.offset;
-        while (auto* array = std::get_if<TargetType::Array>(&fieldType->layout())) {
-            if (!array->element.byteSize())
-                break;
-            inner %= array->element.byteSize();
-            fieldType = &array->element;
-        }
-        if (std::holds_alternative<TargetType::Class>(fieldType->layout())) {
-            if (auto nested = fieldAt(fieldType->home(), inner, depth + 1))
-                return nested;
-        }
-        return FieldAt { &type, &field, fieldType };
-    }
-    for (const TargetType::Base& base : klass->bases) {
-        if (offset >= base.offset && offset - base.offset < base.type.byteSize() && !isEmptyClass(base.type)) {
-            if (auto nested = fieldAt(base.type, offset - base.offset, depth + 1))
-                return nested;
-        }
-    }
-    for (const TargetType::Base& base : klass->virtualBases) {
-        if (offset >= base.offset && offset - base.offset < base.type.byteSize()) {
-            if (auto nested = fieldAt(base.type, offset - base.offset, depth + 1))
-                return nested;
-        }
-    }
-    return std::nullopt;
-}
-
-std::pair<EdgeReason, String> Attributor::describeField(const ReachWalk::Object& object, uint64_t offset) const
-{
-    const TargetType& type = *object.type;
-    if (object.isCell && offset >= type.byteSize())
-        return { EdgeReason::BeyondCellClass, type.name() };
-    auto field = fieldAt(type, offset, 0);
-    if (!field)
-        return { EdgeReason::OtherField, makeString(type.name(), " (padding)"_s) };
-    String owner = makeString(field->owner->name(), "::"_s, field->field->name);
-    const TargetType::Layout& layout = field->type->layout();
-    if (field->field->bitSize || std::holds_alternative<TargetType::Integer>(layout))
-        return { EdgeReason::Integer, owner };
-    if (auto* pointer = std::get_if<TargetType::Pointer>(&layout)) {
-        if (pointer->pointee.byteSize())
-            return { EdgeReason::PointeeDoesNotFit, owner };
-        if (std::holds_alternative<TargetType::Class>(pointer->pointee.layout()))
-            return { EdgeReason::Declaration, owner };
-        return { EdgeReason::VoidPointer, owner };
-    }
-    return { EdgeReason::OtherField, owner };
-}
-
-String Attributor::heapTypeName(const HeapWalk::AllocationFacts& facts)
-{
-    if (!facts.heap)
-        return makeString("objects "_s, objectKindName(facts.objectKind));
-    return m_typeNames.ensure(facts.typeName, [&] {
-        // A C string in the target, read up to the end of its page.
-        if (facts.typeName) {
-            uint64_t pageEnd = (facts.typeName | 4095) + 1;
-            auto bytes = m_snapshot.memory().span<char>(Address { facts.typeName }, std::min<uint64_t>(pageEnd - facts.typeName, 256));
-            if (bytes) {
-                std::string_view characters { bytes.data(), bytes.size() };
-                characters = characters.substr(0, characters.find('\0'));
-                // A TZone bucket's name is generated, so its size class and alignment are what say what it holds.
-                if (!characters.empty() && facts.typeSize > 1)
-                    return makeString(String::fromUTF8(std::span { characters.data(), characters.size() }), " ("_s, facts.typeSize, "-byte objects aligned to "_s, facts.typeAlignment, ')');
-                if (!characters.empty())
-                    return String::fromUTF8(std::span { characters.data(), characters.size() });
-            }
-        }
-        return makeString("a heap of "_s, facts.typeSize, "-byte objects"_s);
-    }).iterator->value;
-}
-
-void Attributor::found(uint64_t at, uint64_t value, bool isPacked, const Source& source)
-{
-    auto target = missedAt(value);
-    if (!target)
-        return;
-    // A missed allocation that holds a pointer to itself says nothing about why it is missed.
-    if (source.kind == SourceKind::Allocation && m_missedIndex[source.allocation] == *target)
-        return;
-    HeapWalk::MissedAllocation& missed = m_result.missed[*target];
-    ++missed.edgeCount;
-    if (missed.edges.size() >= maxEdgesKept)
-        return;
-
-    HeapWalk::Edge edge { Address { at }, EdgeReason::OtherMemory, isPacked, { }, std::nullopt };
-    if (auto* object = objectContaining(at)) {
-        std::tie(edge.reason, edge.owner) = describeField(*object, at - object->address);
-    } else if (source.kind == SourceKind::Allocation) {
-        if (m_missedIndex[source.allocation] != notMissed) {
-            edge.reason = EdgeReason::MissedAllocation;
-            edge.fromMissed = m_missedIndex[source.allocation];
-            edge.owner = makeString("a missed allocation of "_s, heapTypeName(m_allocations[source.allocation].facts));
-        } else {
-            edge.reason = EdgeReason::UntypedBytes;
-            edge.owner = makeString("reached allocations of "_s, heapTypeName(m_allocations[source.allocation].facts));
-        }
-    } else if (source.kind == SourceKind::Stack) {
-        edge.reason = EdgeReason::Stack;
-        edge.owner = source.label;
-    } else if (String symbol = m_debugInfo.symbolAt(Address { at }); !symbol.isNull()) {
-        edge.reason = EdgeReason::ImageData;
-        edge.owner = WTF::move(symbol);
-    } else {
-        edge.reason = EdgeReason::OtherMemory;
-        edge.owner = source.label.isEmpty() ? "anonymous memory"_s : source.label;
-    }
-    missed.edges.append(WTF::move(edge));
-}
-
-// Every 8-byte word at 8-byte alignment, then every 6-byte packed pointer at
-// 2-byte alignment that is not the low bytes of a word already seen.
-void Attributor::scanRange(uint64_t begin, uint64_t end, const Source& source)
-{
-    constexpr uint64_t chunkSize = 64 * KB;
-    constexpr uint64_t pageSize = 4 * KB;
-    begin = roundUpToMultipleOf<sizeof(uint64_t)>(begin);
-    end &= ~static_cast<uint64_t>(sizeof(uint64_t) - 1);
-    for (uint64_t chunk = begin; chunk < end;) {
-        uint64_t chunkEnd = std::min(end, roundUpToMultipleOf(chunkSize, chunk + 1));
-        auto bytes = m_snapshot.memory().span<uint8_t>(Address { chunk }, static_cast<size_t>(chunkEnd - chunk));
-        if (!bytes) {
-            // Some of it is unreadable: try it a page at a time.
-            if (chunkEnd - chunk > pageSize) {
-                for (uint64_t page = chunk; page < chunkEnd;) {
-                    uint64_t pageEnd = std::min(chunkEnd, roundUpToMultipleOf(pageSize, page + 1));
-                    scanRange(page, pageEnd, source);
-                    page = pageEnd;
-                }
-            }
-            chunk = chunkEnd;
-            continue;
-        }
-        std::span<const uint8_t> data { bytes };
-        for (size_t offset = 0; offset + sizeof(uint64_t) <= data.size(); offset += sizeof(uint64_t)) {
-            uint64_t word = 0;
-            memcpySpan(asMutableByteSpan(word), data.subspan(offset, sizeof(word)));
-            if (word)
-                found(chunk + offset, word, false, source);
-        }
-        for (size_t offset = 0; offset + 6 <= data.size(); offset += 2) {
-            uint64_t packed = 0;
-            memcpySpan(asMutableByteSpan(packed).first(6), data.subspan(offset, 6));
-            if (!packed)
-                continue;
-            if (!(offset % sizeof(uint64_t)) && offset + sizeof(uint64_t) <= data.size()) {
-                uint64_t word = 0;
-                memcpySpan(asMutableByteSpan(word), data.subspan(offset, sizeof(word)));
-                if (word == packed)
-                    continue;
-            }
-            found(chunk + offset, packed, true, source);
-        }
-        chunk = chunkEnd;
-    }
-}
-
-void Attributor::scanRangeSkipping(uint64_t begin, uint64_t end, const Vector<Range>& skip, const Source& source)
-{
-    auto ranges = skip.span();
-    auto next = std::ranges::upper_bound(ranges, begin, { }, &Range::end);
-    uint64_t position = begin;
-    for (; next != ranges.end() && next->begin < end; ++next) {
-        if (next->begin > position)
-            scanRange(position, next->begin, source);
-        position = std::max(position, next->end);
-    }
-    if (position < end)
-        scanRange(position, end, source);
-}
-
-void Attributor::scan(const Vector<HeapWalk::Allocation>& excluded, const Vector<HeapWalk::Allocation>& heapPages)
-{
-    auto rangesOf = [](const Vector<HeapWalk::Allocation>& allocations) {
-        Vector<Range> ranges;
-        for (const HeapWalk::Allocation& allocation : allocations)
-            ranges.append({ allocation.address.toTargetVMAddress(), allocation.address.toTargetVMAddress() + allocation.size });
-        return ranges;
-    };
-    Vector<Range> excludedRanges = merged(rangesOf(excluded));
-    auto isExcluded = [&](const HeapWalk::Allocation& allocation) {
-        uint64_t begin = allocation.address.toTargetVMAddress();
-        auto next = std::ranges::upper_bound(excludedRanges, begin, { }, &Range::end);
-        return next != excludedRanges.end() && next->begin < begin + allocation.size;
-    };
-
-    // Every allocation, reached or not.
-    for (size_t index = 0; index < m_allocations.size(); ++index) {
-        const HeapWalk::Allocation& allocation = m_allocations[index];
-        if (isExcluded(allocation))
-            continue;
-        scanRange(allocation.address.toTargetVMAddress(), allocation.address.toTargetVMAddress() + allocation.size, { SourceKind::Allocation, index, { } });
-    }
-
-    // The live part of each thread's stack. In process, this thread's is the analysis's own.
-    bool isInProcess = m_snapshot.process()->pid() == getpid();
-    Vector<Range> stacks;
-    for (const Thread& thread : m_snapshot.threads()) {
-        if (!thread.hasStack())
-            continue;
-        stacks.append({ thread.stackRegion().base().toTargetVMAddress(), thread.stackRegion().end().toTargetVMAddress() });
-#if OS(LINUX)
-        bool isAnalysisThread = isInProcess && thread.id() == static_cast<uint64_t>(gettid());
-#else
-        uint64_t ownID = 0;
-        pthread_threadid_np(nullptr, &ownID);
-        bool isAnalysisThread = isInProcess && thread.id() == ownID;
-#endif
-        if (isAnalysisThread || !thread.stackPointer())
-            continue;
-        // Below the stack pointer, a leaf function may use the 128-byte red zone.
-        uint64_t begin = std::max(thread.stackPointer().toTargetVMAddress() - 128, thread.stackRegion().base().toTargetVMAddress());
-        String label = thread.name().empty() ? makeString("thread "_s, thread.id()) : makeString("thread "_s, thread.id(), " ("_s, String::fromUTF8(thread.name().c_str()), ')');
-        scanRange(begin, thread.stackRegion().end().toTargetVMAddress(), { SourceKind::Stack, 0, WTF::move(label) });
-    }
-
-    // The other writable regions, leaving out what the allocations and stacks
-    // covered, what is excluded, and libpas's free memory. In process, only the
-    // images' writable sections: the other regions hold the analysis's own memory too.
-    Vector<Range> skip = rangesOf(m_allocations);
-    skip.appendVector(rangesOf(heapPages));
-    skip.appendVector(excludedRanges);
-    skip.appendVector(stacks);
-    skip = merged(WTF::move(skip));
-    if (isInProcess) {
-        for (auto [base, size] : m_debugInfo.writableSections())
-            scanRangeSkipping(base.toTargetVMAddress(), base.toTargetVMAddress() + size, skip, { SourceKind::Region, 0, { } });
-        return;
-    }
-    for (const Region& region : m_snapshot.regions()) {
-        if (!region.isReadable() || !region.isWritable() || region.isExecutable())
-            continue;
-        Source source { SourceKind::Region, 0, region.name() };
-        for (auto [base, size] : region.residentParts(m_snapshot.corpsePort()))
-            scanRangeSkipping(base.toTargetVMAddress(), base.toTargetVMAddress() + size, skip, source);
-    }
-}
-
-// The order an edge is preferred in, to attribute a missed allocation: an edge
-// in a value the walk read says most, and one in another missed allocation least.
-unsigned preference(const HeapWalk::Edge& edge)
-{
-    unsigned rank = 0;
-    switch (edge.reason) {
-    case EdgeReason::Integer:
-    case EdgeReason::VoidPointer:
-    case EdgeReason::Declaration:
-    case EdgeReason::PointeeDoesNotFit:
-    case EdgeReason::OtherField:
-        rank = 0;
-        break;
-    case EdgeReason::BeyondCellClass:
-        rank = 1;
-        break;
-    case EdgeReason::ImageData:
-        rank = 2;
-        break;
-    case EdgeReason::Stack:
-        rank = 3;
-        break;
-    case EdgeReason::UntypedBytes:
-        rank = 4;
-        break;
-    case EdgeReason::OtherMemory:
-        rank = 5;
-        break;
-    case EdgeReason::MissedAllocation:
-        rank = 7;
-        break;
-    }
-    return rank * 2 + edge.isPacked;
-}
-
-void Attributor::attribute()
-{
-    // A missed allocation that only other missed allocations point to is
-    // attributed through them, to the first edge on the way back that is not in one.
-    Vector<Vector<size_t>> pointedToFrom(m_result.missed.size());
-    Deque<size_t> attributed;
-    for (size_t index = 0; index < m_result.missed.size(); ++index) {
-        HeapWalk::MissedAllocation& missed = m_result.missed[index];
-        std::ranges::sort(missed.edges, { }, [](const HeapWalk::Edge& edge) { return std::pair { preference(edge), edge.at.toTargetVMAddress() }; });
-        for (const HeapWalk::Edge& edge : missed.edges) {
-            if (edge.fromMissed)
-                pointedToFrom[*edge.fromMissed].append(index);
-        }
-        if (!missed.edges.isEmpty() && missed.edges[0].reason != EdgeReason::MissedAllocation) {
-            missed.attribution = missed.edges[0];
-            attributed.append(index);
-        }
-    }
-    while (!attributed.isEmpty()) {
-        size_t source = attributed.takeFirst();
-        for (size_t target : pointedToFrom[source]) {
-            HeapWalk::MissedAllocation& missed = m_result.missed[target];
-            if (missed.attribution)
-                continue;
-            missed.attribution = m_result.missed[source].attribution;
-            missed.isAttributedThroughMissed = true;
-            attributed.append(target);
-        }
-    }
-}
-
-void Attributor::group()
-{
-    HashMap<std::pair<unsigned, String>, size_t> groups;
-    HashMap<String, size_t> byHeapType;
-    HashMap<uint64_t, uint64_t> withoutEdge;
-    for (const HeapWalk::MissedAllocation& missed : m_result.missed) {
-        uint64_t size = missed.allocation.size;
-        String typeName = heapTypeName(missed.allocation.facts);
-        auto heapEntry = byHeapType.ensure(typeName, [&] {
-            m_result.byHeapType.append({ EdgeReason::OtherMemory, typeName, 0, 0 });
-            return m_result.byHeapType.size() - 1;
-        });
-        m_result.byHeapType[heapEntry.iterator->value].bytes += size;
-        ++m_result.byHeapType[heapEntry.iterator->value].count;
-
-        if (!missed.attribution) {
-            if (!missed.edgeCount) {
-                m_result.bytesWithoutEdge += size;
-                withoutEdge.add(size, 0).iterator->value++;
-            }
-            continue;
-        }
-        const HeapWalk::Edge& edge = *missed.attribution;
-        // A symbol, without how far into it the word is: the elements of one array are one group.
-        String owner = edge.owner;
-        if (edge.reason == EdgeReason::ImageData) {
-            if (size_t offset = owner.reverseFind("+0x"_s); offset != notFound)
-                owner = owner.left(offset);
-        }
-        auto entry = groups.ensure({ static_cast<unsigned>(edge.reason), owner }, [&] {
-            m_result.groups.append({ edge.reason, owner, 0, 0 });
-            return m_result.groups.size() - 1;
-        });
-        m_result.groups[entry.iterator->value].bytes += size;
-        ++m_result.groups[entry.iterator->value].count;
-    }
-    std::ranges::sort(m_result.groups, std::ranges::greater { }, &HeapWalk::Group::bytes);
-    std::ranges::sort(m_result.byHeapType, std::ranges::greater { }, &HeapWalk::Group::bytes);
-    for (auto& [size, count] : withoutEdge)
-        m_result.withoutEdgeBySize.append({ size, count });
-    std::ranges::sort(m_result.withoutEdgeBySize, std::ranges::greater { }, [](const auto& entry) { return entry.first * entry.second; });
-}
-
-} // anonymous namespace
-
-HeapWalk::Attribution HeapWalk::attribute(const Vector<Allocation>& allocations, const Vector<Allocation>& excluded, const Vector<Allocation>& heapPages) const
-{
-    Attribution result;
-    if (!isValid())
-        return result;
-    CORPSE_DIAGNOSTICS(diagnostics, "attributing what the walk of the heap at 0x%llx misses", forReport(m_vm.address()));
-    ReachWalk walk(*this, allocations);
-    walk.run();
-    summarize(walk, allocations, 0, result.reach);
-    result.failedChecks = walk.failedChecks();
-    Attributor attributor(m_roots->snapshot(), *m_debugInfo, allocations, walk.reached(), walk.takeObjects(), result);
-    attributor.scan(excluded, heapPages);
-    attributor.attribute();
-    attributor.group();
-    return result;
-}
-
-// Patch 10: a JS cell has no vtable, so its class comes from its Structure's
-// ClassInfo, which is the s_info of the class it describes.
 const TargetType* HeapWalk::cellClass(Address address) const
 {
     if (!isValid())
         return nullptr;
-    auto bits = jsCell(address).field<void>("m_structureID").field<uint32_t>("m_bits").integer();
-    if (!bits)
-        return nullptr;
-    Remote<const ClassInfo*> classInfo = structure(static_cast<uint32_t>(*bits)).field<const ClassInfo*>("m_classInfo");
-    return classOfClassInfo(Remote<ClassInfo>(classInfo.dereference()), 0);
+    return classOfClassInfo(classInfoOf(address), 0);
+}
+
+const TargetType* HeapWalk::stringImplClass(Address string) const
+{
+    if (!m_stringImplClass) {
+        // The compile unit that defines JSString::s_info reads a string's characters, so it uses StringImpl whole.
+        Remote<ClassInfo> classInfo = classInfoOf(string);
+        m_stringImplClass = classInfo ? m_debugInfo->classInCompileUnitOf(classInfo.address(), "s_emptyAtomString", "_ZN3WTF10StringImpl17s_emptyAtomStringE") : nullptr;
+    }
+    return *m_stringImplClass;
 }
 
 const TargetType* HeapWalk::classOfClassInfo(const Remote<ClassInfo>& classInfo, unsigned depth) const
@@ -1609,7 +1026,7 @@ const TargetType* HeapWalk::classOfClassInfo(const Remote<ClassInfo>& classInfo,
     if (auto entry = m_classesOfClassInfos.find(key); entry != m_classesOfClassInfos.end())
         return entry->value;
 
-    const TargetType* klass = m_debugInfo->classOfStaticMember(classInfo.address(), "s_info");
+    const TargetType* klass = m_debugInfo->classInCompileUnitOf(classInfo.address(), "s_info");
     // ClassInfo::staticClassSize is sizeof the class it was made for.
     auto size = klass ? classInfo.field<unsigned>("staticClassSize").integer() : std::nullopt;
     if (klass && (!size || static_cast<uint64_t>(*size) != klass->byteSize())) {

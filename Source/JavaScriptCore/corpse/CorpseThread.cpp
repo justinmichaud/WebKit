@@ -251,10 +251,17 @@ static std::optional<Address> readStackPointer(pid_t pid, const std::string& tas
     return Address { value };
 }
 
+// The threads are the target's: a copy of it has only the thread that forked
+// it, which runs on that thread's stack.
 Vector<Thread> Thread::platformCollect(const Snapshot& snapshot)
 {
     Vector<Thread> result;
     pid_t pid = snapshot.process()->pid();
+    pid_t copy = snapshot.corpsePort();
+    // In a copy of this process, the forking thread is this one, which is running.
+    std::optional<uint64_t> forkingThread;
+    if (copy != pid && pid == getpid())
+        forkingThread = static_cast<uint64_t>(gettid());
     ASCIICString taskPath = makeString("/proc/"_s, pid, "/task"_s).ascii();
     DIR* directory = opendir(taskPath.data());
     if (!directory) {
@@ -263,7 +270,7 @@ Vector<Thread> Thread::platformCollect(const Snapshot& snapshot)
     }
     long ticksPerSecond = sysconf(_SC_CLK_TCK);
     // Read once: a JS process has a GC thread for each core.
-    Vector<Region> regions = Region::allWithPageCounts(pid);
+    Vector<Region> regions = Region::allWithPageCounts(copy);
     while (struct dirent* entry = readdir(directory)) {
         uint64_t tid = 0;
         std::string_view name { entry->d_name };
@@ -295,7 +302,10 @@ Vector<Thread> Thread::platformCollect(const Snapshot& snapshot)
 
         // The stack is the region the stack pointer points into. A running thread has
         // no stack pointer to read without stopping it.
-        if (auto stackPointer = readStackPointer(pid, task)) {
+        auto stackPointer = readStackPointer(pid, task);
+        if (!stackPointer && forkingThread == tid)
+            stackPointer = readStackPointer(copy, "task/" + std::to_string(copy));
+        if (stackPointer) {
             Diagnostics::count(DiagnosticCounter::ThreadStatesRead);
             thread.m_stackPointer = *stackPointer;
             if (auto region = Region::findContaining(regions, thread.m_stackPointer))

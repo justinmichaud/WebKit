@@ -35,6 +35,9 @@
 #include <stdlib.h>
 #include <string.h>
 #include <string_view>
+#if OS(LINUX)
+#include <sys/prctl.h>
+#endif
 #include <wtf/StdLibExtras.h>
 #include <wtf/text/StringToIntegerConversion.h>
 #include <wtf/text/StringView.h>
@@ -87,6 +90,9 @@ void runCorpseSuite()
 
 int main(int argc, char** argv)
 {
+    // A target spawned with --target is initialized as the analysis is.
+    JSCToolsTest::initializeQuietJSC();
+
     uint64_t fuzzSeed = defaultFuzzSeed;
     uint64_t fuzzIterations = defaultFuzzIterations;
     bool fuzzOnly = false;
@@ -127,6 +133,12 @@ int main(int argc, char** argv)
         }
         JSCToolsTest::suiteFilter = arguments[index];
     }
+
+#if OS(LINUX)
+    // A target's copy outlives the target, and is then reparented here rather
+    // than to init, so that it stays readable and is reaped here.
+    RELEASE_ASSERT(!prctl(PR_SET_CHILD_SUBREAPER, 1));
+#endif
 
     dataLogLn("Starting libJavaScriptCoreTools tests");
 

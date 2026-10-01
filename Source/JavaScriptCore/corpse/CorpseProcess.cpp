@@ -48,6 +48,7 @@
 #include <limits.h>
 #include <signal.h>
 #include <unistd.h>
+#include <wtf/SafeStrerror.h>
 #include <wtf/text/MakeString.h>
 #endif
 
@@ -163,14 +164,49 @@ std::optional<std::string> readProcFile(pid_t pid, const char* path)
     }
 }
 
-UTF8CString Process::executablePath() const
+UTF8CString executablePathOf(pid_t pid)
 {
     std::array<char, PATH_MAX> path;
-    ASCIICString link = makeString("/proc/"_s, m_pid, "/exe"_s).ascii();
+    ASCIICString link = makeString("/proc/"_s, pid, "/exe"_s).ascii();
     ssize_t length = readlink(link.data(), path.data(), path.size());
     if (length <= 0 || static_cast<size_t>(length) >= path.size())
         return { };
     return UTF8CString(byteCast<char8_t>(std::span { path }.first(length)));
+}
+
+UTF8CString Process::executablePath() const
+{
+    return executablePathOf(m_pid);
+}
+
+pid_t forkCopy(int lifetime)
+{
+    // Unlike fork(), _Fork runs no pthread_atfork handlers and resets none of
+    // glibc's internal locks, such as malloc's: nothing runs in this process
+    // that could take a lock in the middle of the copy, and nothing in the copy
+    // changes it beyond what glibc needs for async-signal-safe calls.
+    pid_t copy = _Fork();
+    if (copy < 0) {
+        CORPSE_REPORT("Could not copy pid %d: %s", static_cast<int>(getpid()), safeStrerror(errno).data());
+        return -1;
+    }
+    if (copy)
+        return copy;
+
+    // In the copy, only async-signal-safe calls: this process's other threads
+    // do not exist here, and may have held any lock. Every other descriptor is
+    // closed, so that a later copy does not keep an earlier one alive through
+    // the write end of its lifetime pipe.
+    if (lifetime != STDIN_FILENO)
+        dup2(lifetime, STDIN_FILENO);
+    close_range(STDIN_FILENO + 1, ~0U, 0);
+    for (;;) {
+        char byte;
+        ssize_t result = read(STDIN_FILENO, &byte, 1);
+        if (!result || (result < 0 && errno != EINTR))
+            break;
+    }
+    _exit(0);
 }
 
 #endif // OS(DARWIN)

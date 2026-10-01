@@ -179,15 +179,8 @@ if (ENABLE_DEVELOPER_MODE AND (CMAKE_BUILD_TYPE STREQUAL "Debug" OR CMAKE_BUILD_
     endif ()
 endif ()
 
+# Applied in WebKitCommon.cmake, once the port's options say whether ENABLE_MYA_HEAP turns it off.
 option(DEBUG_FISSION "Use Debug Fission support" ${ENABLE_DEBUG_FISSION_DEFAULT})
-
-if (DEBUG_FISSION)
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -gsplit-dwarf")
-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -gsplit-dwarf")
-    if (LD_SUPPORTS_GDB_INDEX)
-        add_link_options("LINKER:--gdb-index")
-    endif ()
-endif ()
 
 option(CLANG_TIME_TRACE "Generate Clang time trace profiling output" OFF)
 if (CLANG_TIME_TRACE AND COMPILER_IS_CLANG)

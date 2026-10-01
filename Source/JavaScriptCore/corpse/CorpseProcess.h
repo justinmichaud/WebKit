@@ -81,6 +81,16 @@ private:
 // nullopt if it cannot be read. Reading most of them needs the permission
 // ptrace needs.
 std::optional<std::string> readProcFile(pid_t, const char* path);
+
+// The file /proc/<pid>/exe names, or null.
+UTF8CString executablePathOf(pid_t);
+
+// Copies the calling process, as a Darwin corpse copies a task: the copy is a
+// child that does nothing but wait, and whose memory is this process's at the
+// moment of the fork, copy-on-write. It lives until every write end of the
+// pipe whose read end is `lifetime` is closed. Returns the copy's pid, or -1,
+// having reported why.
+pid_t forkCopy(int lifetime);
 #endif
 
 } // namespace Corpse

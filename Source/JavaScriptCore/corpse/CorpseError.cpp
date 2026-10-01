@@ -120,12 +120,14 @@ static ASCIILiteral label(DiagnosticCounter counter)
         return "threads with unreadable state"_s;
     case DiagnosticCounter::ImagesWithoutPath:
         return "images without a readable path"_s;
+    case DiagnosticCounter::ImagesWithoutFile:
+        return "images no file holds"_s;
     case DiagnosticCounter::ImagesWithoutDebugInfo:
         return "images liblldb could not open"_s;
     case DiagnosticCounter::VTableSlotsNotDestructors:
         return "vtable slots that are not a destructor"_s;
-    case DiagnosticCounter::ClassesWithoutHome:
-        return "classes without an out-of-line destructor to describe them"_s;
+    case DiagnosticCounter::VTablesWithoutSymbol:
+        return "vtables without a symbol to check their class against"_s;
     }
     RELEASE_ASSERT_NOT_REACHED();
 }

@@ -37,6 +37,9 @@
 #include <JavaScriptCore/CorpseTargetType.h>
 #include <JavaScriptCore/CorpseTargetValue.h>
 #include <JavaScriptCore/Watchpoint.h>
+#include <lldb/API/LLDB.h>
+#include <algorithm>
+#include <bit>
 #include <stdexcept>
 #include <string_view>
 #include <unistd.h>
@@ -241,6 +244,41 @@ void analyzeSystemLibraryObject(Snapshot& snapshot, Address object)
 #endif
 }
 
+// An object of a class this executable defines, and one of a class JavaScriptCore does.
+struct ObjectsInBothImages {
+    uint64_t crossImage;
+    uint64_t sameImage;
+};
+
+Address createObjectsInBothImages()
+{
+    static ObjectsInBothImages objects { createCrossImageObject().toTargetVMAddress(), createSameImageObject().toTargetVMAddress() };
+    return Address { &objects };
+}
+
+// The target's executable was replaced after it was loaded, so its file is not
+// the image the target runs: its identity differs, and liblldb refuses it.
+void analyzeObjectsInReplacedExecutable(Snapshot& snapshot, Address address)
+{
+    auto objects = snapshot.memory().ptr<ObjectsInBothImages>(address);
+    TEST_ASSERT(objects, "the target's objects read");
+    // liblldb keeps every module it opened, by identity, for the life of the
+    // process, and would find the original executable among them. A rebuilt
+    // image is one liblldb has not seen.
+    lldb::SBDebugger::MemoryPressureDetected();
+    RefPtr debugInfo = SnapshotDebugInfo::create(snapshot);
+    TEST_ASSERT(debugInfo, "a snapshot whose executable was replaced still has the debug info of its other images");
+    if (!objects || !debugInfo)
+        return;
+    Address completeObject;
+    {
+        ExpectedErrors expectedErrors;
+        TEST_ASSERT(!debugInfo->dynamicTypeAt(snapshot, Address { objects->crossImage }, completeObject), "a class of the replaced executable has no type");
+    }
+    const TargetType* type = debugInfo->dynamicTypeAt(snapshot, Address { objects->sameImage }, completeObject);
+    TEST_ASSERT(type && std::string_view { type->name().legacyCStringPointer() } == "JSC::StringFireDetail", "a class of JavaScriptCore still has its type");
+}
+
 // What the container wrappers read. The class is polymorphic so that its vtable gives its type.
 struct ContainerNode : public BasicRawSentinelNode<ContainerNode> {
     uint64_t value { 0 };
@@ -253,6 +291,7 @@ public:
 
     Vector<uint64_t> vector;
     HashSet<uint64_t> set;
+    HashMap<uint64_t, ContainerNode*> map;
     ContainerList list;
     std::array<ContainerNode, 3> nodes;
     ContainerNode* const node { nullptr }; // Only for its type.
@@ -272,6 +311,11 @@ Address createContainers()
         containers.nodes[index].value = 7 + index;
         containers.list.append(&containers.nodes[index]);
     }
+    // A deleted entry's value is destroyed but not cleared, so it still points at its node.
+    for (uint64_t key = 1; key <= 20; ++key)
+        containers.map.add(key, &containers.nodes[key % containers.nodes.size()]);
+    for (uint64_t key = 2; key <= 20; key += 2)
+        containers.map.remove(key);
     return Address { &containers };
 }
 
@@ -302,6 +346,21 @@ void analyzeContainers(Snapshot& snapshot, Address object)
         odd.append(element);
     TEST_ASSERT(readable && values == odd, "a HashSet reads its values, and skips its empty and deleted buckets");
 
+    using Map = HashMap<uint64_t, ContainerNode*>;
+    using Entry = Map::KeyValuePairType;
+    Vector<std::pair<uint64_t, uint64_t>> entries;
+    readable = RemoteTraits<Map>::forEach(Remote<Map> { value->properField("map") }, [&](const Remote<Entry>& bucket) {
+        if (auto entry = bucket.as<Entry>())
+            entries.append({ entry->key, std::bit_cast<uint64_t>(entry->value) });
+        return IterationStatus::Continue;
+    });
+    std::ranges::sort(entries);
+    Address nodeArray = value->properField("nodes").address();
+    Vector<std::pair<uint64_t, uint64_t>> expectedEntries;
+    for (uint64_t key = 1; key <= 20; key += 2)
+        expectedEntries.append({ key, (nodeArray + (key % 3) * sizeof(ContainerNode)).toTargetVMAddress() });
+    TEST_ASSERT(readable && entries == expectedEntries, "a HashMap reads its entries, and skips its empty and deleted buckets");
+
     Remote<ContainerNode*> nodePointer { value->properField("node") };
     Vector<uint64_t> nodes;
     readable = RemoteTraits<ContainerList>::forEach(Remote<ContainerList> { value->properField("list") }, [&](const Remote<BasicRawSentinelNode<ContainerNode>>& node) {
@@ -330,6 +389,12 @@ void testDebugInfo()
     // Everything is read from the snapshot, so the process may be gone.
     analyzeAfterTargetExits(createSameImageObject, analyzeSameImageObject);
     analyzeAfterTargetExits(createCrossImageObject, analyzeCrossImageObject);
+    analyzeAfterTargetExits(createLaterDestructorObject, analyzeLaterDestructorObject);
+    analyzeAfterTargetExits(createDiamondObject, analyzeDiamondObject);
+    analyzeAfterTargetExits(createSystemLibraryObject, analyzeSystemLibraryObject);
+    analyzeAfterTargetExits(createContainers, analyzeContainers);
+
+    analyzeAfterExecutableReplaced(createObjectsInBothImages, analyzeObjectsInReplacedExecutable);
 
     {
         RefPtr<JSC::Corpse::Process> process = JSC::Corpse::Process::create(getpid());

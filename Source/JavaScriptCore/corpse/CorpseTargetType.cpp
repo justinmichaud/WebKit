@@ -125,13 +125,6 @@ const TargetType::Layout& TargetType::layout() const
     return *m_layout;
 }
 
-const TargetType& TargetType::home() const
-{
-    if (!m_home)
-        m_home = &m_debugInfo.homeOf(*this);
-    return *m_home;
-}
-
 const TargetType* TargetType::templateArgument(unsigned index) const
 {
     if (index >= m_type->GetNumberOfTemplateArguments() || m_type->GetTemplateArgumentKind(index) != lldb::eTemplateArgumentKindType)
@@ -215,9 +208,9 @@ TargetType::Layout TargetType::readLayout() const
         return Pointer { m_debugInfo.type(m_type->GetDereferencedType()) };
 
     if (typeClass & lldb::eTypeClassEnumeration)
-        return Integer { isSignedInteger(m_type->GetEnumerationIntegerType()) };
+        return Integer { isSignedInteger(m_type->GetEnumerationIntegerType()), true };
     if ((typeClass & lldb::eTypeClassBuiltin) && isIntegerBasicType(m_type->GetBasicType()))
-        return Integer { isSignedInteger(*m_type) };
+        return Integer { isSignedInteger(*m_type), false };
 
     return Other { };
 }
@@ -246,11 +239,6 @@ UTF8CString TargetType::name() const
 }
 
 const TargetType::Layout& TargetType::layout() const
-{
-    RELEASE_ASSERT_NOT_REACHED();
-}
-
-const TargetType& TargetType::home() const
 {
     RELEASE_ASSERT_NOT_REACHED();
 }

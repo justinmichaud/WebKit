@@ -35,6 +35,10 @@
 #include <JavaScriptCore/JSContextRef.h>
 #include <algorithm>
 #include <dlfcn.h>
+#include <errno.h>
+#include <mutex>
+#include <pthread.h>
+#include <signal.h>
 #include <stdlib.h>
 #if OS(DARWIN)
 #include <mach/mach.h>
@@ -112,6 +116,84 @@ static void testImages(RefPtr<Process> process)
 #endif
 }
 
+// A global the target changes after the snapshot is taken.
+static volatile uint64_t changingGlobal;
+
+static Address createChangingGlobal()
+{
+    changingGlobal = 1;
+    reportTargetObject(Address { const_cast<uint64_t*>(&changingGlobal) });
+    for (;;) {
+        changingGlobal = changingGlobal + 1;
+        usleep(1000);
+    }
+}
+
+// Out of process, the target changes the global from when it reports it, so
+// what it was at the snapshot is not known, only that it stays so.
+static void analyzeChangingGlobal(Snapshot& snapshot, Address global)
+{
+    auto before = snapshot.memory().ptr<uint64_t>(global);
+    usleep(20 * 1000);
+    auto after = snapshot.memory().ptr<uint64_t>(global);
+    TEST_ASSERT(before && after && *before && *before == *after, "a global the target changes after the snapshot reads as it was");
+}
+
+// Set by a pthread_atfork child handler, which a snapshot must not run.
+static uint64_t atforkChildHandlerRan;
+
+static Address createAtforkHandler()
+{
+    static std::once_flag once;
+    std::call_once(once, [] {
+        pthread_atfork(nullptr, nullptr, [] {
+            atforkChildHandlerRan = 1;
+        });
+    });
+    return Address { &atforkChildHandlerRan };
+}
+
+static void analyzeAtforkHandler(Snapshot& snapshot, Address flag)
+{
+    auto ran = snapshot.memory().ptr<uint64_t>(flag);
+    TEST_ASSERT(ran && !*ran, "taking a snapshot runs no atfork handler in it");
+}
+
+static void testCopies()
+{
+    {
+        changingGlobal = 1;
+        auto snapshot = takeSnapshot(getpid());
+        changingGlobal = 2;
+        if (snapshot) {
+            auto value = snapshot->memory().ptr<uint64_t>(Address { const_cast<uint64_t*>(&changingGlobal) });
+            TEST_ASSERT(value && *value == 1, "a global this process changes after the snapshot reads as it was");
+        }
+    }
+    analyzeInSeparateProcess(createChangingGlobal, analyzeChangingGlobal);
+    analyzeInAndOutOfProcess(createAtforkHandler, analyzeAtforkHandler);
+
+#if OS(LINUX)
+    // A copy lives as long as its snapshot, and is reaped with it.
+    pid_t firstCopy = 0;
+    pid_t secondCopy = 0;
+    {
+        auto second = takeSnapshot(getpid());
+        {
+            auto first = takeSnapshot(getpid());
+            if (!first || !second)
+                return;
+            firstCopy = first->corpsePort();
+            secondCopy = second->corpsePort();
+            TEST_ASSERT(firstCopy != secondCopy && firstCopy != getpid() && !kill(firstCopy, 0), "a snapshot of this process is a live copy of it");
+        }
+        TEST_ASSERT(kill(firstCopy, 0) && errno == ESRCH, "releasing a snapshot ends its copy, and reaps it");
+        TEST_ASSERT(!kill(secondCopy, 0), "and leaves the copy of another snapshot");
+    }
+    TEST_ASSERT(kill(secondCopy, 0) && errno == ESRCH, "which ends with its own snapshot");
+#endif
+}
+
 void testSnapshot()
 {
     SuiteTracer tracer("Snapshot");
@@ -139,10 +221,8 @@ void testSnapshot()
         Snapshot second(process);
         TEST_ASSERT(second.isValid(), "a second snapshot of the same process is valid");
         TEST_ASSERT(second.id() > firstId, "identifiers increase");
-#if OS(DARWIN) // FIXME: linux
         TEST_ASSERT(second.corpsePort() != snapshot.corpsePort(),
             "two snapshots hold two different corpses");
-#endif
         secondCorpsePort = second.corpsePort();
     }
 #if OS(DARWIN)
@@ -184,6 +264,7 @@ void testSnapshot()
         TEST_ASSERT(!snapshot.symbol(""), "an empty symbol name resolves to nothing");
     }
     testImages(process);
+    testCopies();
 
 #if OS(DARWIN)
     {

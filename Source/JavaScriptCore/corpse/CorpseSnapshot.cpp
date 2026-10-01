@@ -36,6 +36,13 @@
 #include <mach/mach.h>
 #include <mach/mach_error.h>
 #include <mach/task_info.h>
+#else
+#include <array>
+#include <errno.h>
+#include <fcntl.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <wtf/SafeStrerror.h>
 #endif
 #include <wtf/TZoneMallocInlines.h>
 
@@ -159,20 +166,6 @@ static OwnedTaskHandle takeSnapshot(Process* process)
     return { };
 }
 
-#else
-
-// There is no corpse on Linux yet: the snapshot reads the live process.
-static OwnedTaskHandle takeSnapshot(Process* process)
-{
-    if (!process || !process->isAttached()) {
-        CORPSE_REPORT("Could not snapshot: No process attached");
-        return { };
-    }
-    return OwnedTaskHandle::adopt(process->taskPort());
-}
-
-#endif // OS(DARWIN)
-
 Snapshot::Snapshot(RefPtr<Process> process)
     : m_process(WTF::move(process))
     , m_corpsePort(takeSnapshot(m_process.get()))
@@ -182,6 +175,70 @@ Snapshot::Snapshot(RefPtr<Process> process)
 }
 
 Snapshot::~Snapshot() = default;
+
+#else
+
+// This process is copied; any other is read live, as a best-effort view of a
+// target that made no copy of itself.
+static OwnedTaskHandle takeSnapshot(Process* process, int& lifetime)
+{
+    if (!process || !process->isAttached()) {
+        CORPSE_REPORT("Could not snapshot: No process attached");
+        return { };
+    }
+    if (process->pid() != getpid())
+        return OwnedTaskHandle::adopt(process->taskPort());
+
+    std::array<int, 2> lifetimePipe { -1, -1 };
+    if (pipe2(lifetimePipe.data(), O_CLOEXEC)) {
+        CORPSE_REPORT("Could not make the lifetime pipe of a copy of pid %d: %s", static_cast<int>(process->pid()), safeStrerror(errno).data());
+        return { };
+    }
+    pid_t copy = forkCopy(lifetimePipe[0]);
+    close(lifetimePipe[0]);
+    if (copy < 0) {
+        close(lifetimePipe[1]);
+        return { };
+    }
+    lifetime = lifetimePipe[1];
+    return OwnedTaskHandle::adopt(copy);
+}
+
+Snapshot::Snapshot(RefPtr<Process> process)
+    : m_process(WTF::move(process))
+    , m_corpsePort(takeSnapshot(m_process.get(), m_lifetime))
+    , m_id(s_nextId++)
+    , m_memory(corpsePort())
+{
+    // The copy has only the forking thread, so the threads are this process's, read now.
+    if (m_lifetime >= 0)
+        m_threads = Thread::collect(*this);
+}
+
+Snapshot::Snapshot(RefPtr<Process> process, pid_t copy, int lifetime)
+    : m_process(WTF::move(process))
+    , m_lifetime(lifetime)
+    , m_corpsePort(OwnedTaskHandle::adopt(copy))
+    , m_id(s_nextId++)
+    , m_memory(corpsePort())
+{
+    RELEASE_ASSERT(copy > 0 && lifetime >= 0);
+    m_threads = Thread::collect(*this);
+}
+
+Snapshot::~Snapshot()
+{
+    if (m_lifetime < 0)
+        return;
+    // Closing the last write end ends the copy. A copy of another process is
+    // that process's child until it exits, and is reaped there; a copy of this
+    // process, or one this process became the subreaper of, is reaped here.
+    close(m_lifetime);
+    pid_t copy = corpsePort();
+    while (waitpid(copy, nullptr, 0) < 0 && errno == EINTR) { }
+}
+
+#endif // OS(DARWIN)
 
 } // namespace Corpse
 } // namespace JSC

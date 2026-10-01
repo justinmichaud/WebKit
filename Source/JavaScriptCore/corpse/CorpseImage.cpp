@@ -38,12 +38,19 @@
 #include <mach-o/dyld_images.h>
 #include <wtf/HashMap.h>
 #else
+#include <charconv>
 #include <elf.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <link.h>
+#include <memory>
+#include <stdlib.h>
+#include <string.h>
+#include <string>
+#include <string_view>
 #include <unistd.h>
 #include <wtf/SafeStrerror.h>
+#include <wtf/StdLibExtras.h>
 #include <wtf/text/MakeString.h>
 #endif
 
@@ -191,11 +198,93 @@ static std::optional<Address> loaderDebugState(Memory& memory, int pid)
     return std::nullopt;
 }
 
+// Where each file is mapped at offset 0, which is where its ELF header is,
+// from /proc/<pid>/maps.
+struct FileStart {
+    uint64_t address;
+    std::string path;
+};
+
+static Vector<FileStart> fileStarts(int pid)
+{
+    Vector<FileStart> result;
+    auto maps = readProcFile(pid, "maps");
+    if (!maps) {
+        CORPSE_REPORT("Could not read the memory map of pid %d", pid);
+        return result;
+    }
+    // "start-end perms offset dev inode path", with the path, if any, last.
+    std::string_view rest { *maps };
+    while (!rest.empty()) {
+        size_t lineEnd = std::min(rest.find('\n'), rest.size());
+        std::string_view line = rest.substr(0, lineEnd);
+        rest.remove_prefix(std::min(lineEnd + 1, rest.size()));
+        Vector<std::string_view, 6> fields;
+        while (fields.size() < 5 && !line.empty()) {
+            size_t start = line.find_first_not_of(' ');
+            if (start == std::string_view::npos)
+                break;
+            line.remove_prefix(start);
+            size_t end = std::min(line.find(' '), line.size());
+            fields.append(line.substr(0, end));
+            line.remove_prefix(end);
+        }
+        size_t pathStart = line.find_first_not_of(' ');
+        if (fields.size() < 5 || pathStart == std::string_view::npos || line[pathStart] != '/')
+            continue;
+        uint64_t start = 0;
+        uint64_t offset = 0;
+        std::string_view range = fields[0];
+        if (std::from_chars(range.data(), range.data() + range.size(), start, 16).ec != std::errc { }
+            || std::from_chars(fields[2].data(), fields[2].data() + fields[2].size(), offset, 16).ec != std::errc { } || offset)
+            continue;
+        result.append({ start, std::string { line.substr(pathStart) } });
+    }
+    return result;
+}
+
+// The NT_GNU_BUILD_ID note in the PT_NOTE segments of the image whose ELF
+// header is at `header` and which the loader slid by `slide`.
+static std::optional<Vector<uint8_t>> buildIDOf(Memory& memory, Address header, uint64_t slide)
+{
+    auto elfHeader = memory.ptr<Elf64_Ehdr>(header);
+    if (!elfHeader || memcmp(elfHeader->e_ident, ELFMAG, SELFMAG) || !elfHeader->e_phnum || elfHeader->e_phnum > maxProgramHeaders)
+        return std::nullopt;
+    auto programHeaders = memory.span<Elf64_Phdr>(header + elfHeader->e_phoff, elfHeader->e_phnum);
+    if (!programHeaders)
+        return std::nullopt;
+    for (const Elf64_Phdr& programHeader : programHeaders) {
+        if (programHeader.p_type != PT_NOTE || !programHeader.p_filesz || programHeader.p_filesz > maxNoteSegmentSize)
+            continue;
+        auto notes = memory.span<uint8_t>(Address { slide + programHeader.p_vaddr }, programHeader.p_filesz);
+        if (!notes)
+            continue;
+        std::span<const uint8_t> rest { notes };
+        size_t alignment = programHeader.p_align == 8 ? 8 : 4;
+        while (rest.size() >= sizeof(Elf64_Nhdr)) {
+            Elf64_Nhdr note;
+            memcpySpan(asMutableByteSpan(note), rest.first(sizeof(note)));
+            size_t nameSize = roundUpToMultipleOf(alignment, note.n_namesz);
+            size_t descriptorSize = roundUpToMultipleOf(alignment, note.n_descsz);
+            if (nameSize + descriptorSize > rest.size() - sizeof(note))
+                break;
+            std::span<const uint8_t> name = rest.subspan(sizeof(note), note.n_namesz);
+            std::span<const uint8_t> descriptor = rest.subspan(sizeof(note) + nameSize, note.n_descsz);
+            constexpr std::array<uint8_t, 4> gnu { 'G', 'N', 'U', '\0' };
+            if (note.n_type == NT_GNU_BUILD_ID && std::ranges::equal(name, std::span { gnu }) && !descriptor.empty())
+                return Vector<uint8_t> { descriptor };
+            rest = rest.subspan(sizeof(note) + nameSize + descriptorSize);
+        }
+    }
+    return std::nullopt;
+}
+
 // ld.so lists every image it loaded in r_debug's link_map chain, as dyld does
-// in dyld_all_image_infos.
+// in dyld_all_image_infos. The pid is the copy's, whose memory, mappings and
+// auxiliary vector are the target's.
 Vector<Image> Image::collect(Snapshot& snapshot)
 {
-    int pid = static_cast<int>(snapshot.process()->pid());
+    int pid = static_cast<int>(snapshot.corpsePort());
     Memory& memory = snapshot.memory();
     auto debugStateAddress = loaderDebugState(memory, pid);
     if (!debugStateAddress)
@@ -206,6 +295,7 @@ Vector<Image> Image::collect(Snapshot& snapshot)
         return { };
     }
 
+    Vector<FileStart> starts = fileStarts(pid);
     Vector<Image> result;
     unsigned listed = 0;
     for (Address next { debugState->r_map }; next; ++listed) {
@@ -222,12 +312,31 @@ Vector<Image> Image::collect(Snapshot& snapshot)
         auto path = readPath(memory, Address { entry->l_name });
         // Only the executable's entry has no name.
         if (path && !path->length())
-            path = snapshot.process()->executablePath();
+            path = executablePathOf(pid);
         if (!path || !path->length()) {
             Diagnostics::count(DiagnosticCounter::ImagesWithoutPath);
             continue;
         }
-        result.append(Image { Address { entry->l_addr }, WTF::move(*path) });
+
+        // The file's lowest mapping at offset 0 at or above its slide is the
+        // loader's; another, such as one liblldb maps in this process, is lower.
+        std::unique_ptr<char, decltype(&free)> canonicalPath { realpath(path->legacyCStringPointer(), nullptr), &free };
+        std::optional<uint64_t> header;
+        for (const FileStart& start : starts) {
+            if (canonicalPath && start.path == canonicalPath.get() && start.address >= entry->l_addr && (!header || start.address < *header))
+                header = start.address;
+        }
+        if (!header) {
+            // The vDSO, which no file holds.
+            Diagnostics::count(DiagnosticCounter::ImagesWithoutFile);
+            continue;
+        }
+        auto buildID = buildIDOf(memory, Address { *header }, entry->l_addr);
+        if (!buildID) {
+            CORPSE_REPORT("The image '%s' of pid %d has no build-id, so a rebuilt file could not be told from it", path->legacyCStringPointer(), pid);
+            continue;
+        }
+        result.append(Image { Address { entry->l_addr }, WTF::move(*path), WTF::move(*buildID) });
     }
     Diagnostics::count(DiagnosticCounter::ImagesListed, listed);
     return result;
