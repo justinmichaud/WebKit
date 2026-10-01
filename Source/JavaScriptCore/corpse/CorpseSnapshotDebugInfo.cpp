@@ -324,28 +324,42 @@ const TargetType& SnapshotDebugInfo::homeOf(const TargetType& type)
         if (function.GetKind() == lldb::eMemberFunctionKindDestructor)
             linkageName = function.GetMangledName();
     }
-    if (!linkageName) {
+    if (!linkageName || !*linkageName) {
         Diagnostics::count(DiagnosticCounter::ClassesWithoutHome);
         return type;
     }
+    // Apple's clang gives a destructor's declaration the unified name D4, which
+    // no symbol has: the symbols are its complete-object (D1) and base-object (D2) destructors.
+    Vector<std::string, 2> linkageNames;
+    std::string declared { linkageName };
+    constexpr std::string_view unified = "D4Ev";
+    if (declared.ends_with(unified)) {
+        std::string stem = declared.substr(0, declared.size() - unified.size());
+        linkageNames.append(stem + "D1Ev");
+        linkageNames.append(stem + "D2Ev");
+    } else
+        linkageNames.append(WTF::move(declared));
 
     // The first image that defines the symbol, in the order the loader searches them.
     uint32_t moduleCount = m_target->GetNumModules();
-    for (uint32_t moduleIndex = 0; moduleIndex < moduleCount; ++moduleIndex) {
-        lldb::SBSymbolContextList symbols = m_target->GetModuleAtIndex(moduleIndex).FindSymbols(linkageName, lldb::eSymbolTypeCode);
-        for (uint32_t index = 0; index < symbols.GetSize(); ++index) {
-            lldb::SBSymbol symbol = symbols.GetContextAtIndex(index).GetSymbol();
-            if (!symbol.IsValid() || symbol.GetType() != lldb::eSymbolTypeCode)
-                continue;
-            lldb::SBFunction destructor = symbol.GetStartAddress().GetFunction();
-            if (!destructor.IsValid() || !isDestructor(destructor))
-                continue;
-            lldb::SBType home = thisPointee(*m_target, destructor);
-            if (!home.IsValid() || !home.IsTypeComplete() || home.GetByteSize() != type.byteSize()) {
-                CORPSE_REPORT("The destructor '%s' of the %zu-byte '%s' destroys %llu bytes", linkageName, type.byteSize(), type.name().legacyCStringPointer(), static_cast<unsigned long long>(home.IsValid() ? home.GetByteSize() : 0));
-                return type;
+    for (const std::string& name : linkageNames) {
+        linkageName = name.c_str();
+        for (uint32_t moduleIndex = 0; moduleIndex < moduleCount; ++moduleIndex) {
+            lldb::SBSymbolContextList symbols = m_target->GetModuleAtIndex(moduleIndex).FindSymbols(linkageName, lldb::eSymbolTypeCode);
+            for (uint32_t index = 0; index < symbols.GetSize(); ++index) {
+                lldb::SBSymbol symbol = symbols.GetContextAtIndex(index).GetSymbol();
+                if (!symbol.IsValid() || symbol.GetType() != lldb::eSymbolTypeCode)
+                    continue;
+                lldb::SBFunction destructor = symbol.GetStartAddress().GetFunction();
+                if (!destructor.IsValid() || !isDestructor(destructor))
+                    continue;
+                lldb::SBType home = thisPointee(*m_target, destructor);
+                if (!home.IsValid() || !home.IsTypeComplete() || home.GetByteSize() != type.byteSize()) {
+                    CORPSE_REPORT("The destructor '%s' of the %zu-byte '%s' destroys %llu bytes", linkageName, type.byteSize(), type.name().legacyCStringPointer(), static_cast<unsigned long long>(home.IsValid() ? home.GetByteSize() : 0));
+                    return type;
+                }
+                return this->type(home);
             }
-            return this->type(home);
         }
     }
     Diagnostics::count(DiagnosticCounter::ClassesWithoutHome);

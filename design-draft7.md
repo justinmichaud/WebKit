@@ -477,7 +477,7 @@ libpas heap that points into it:
 
 | Missed | First pointed to from | Cause |
 |---|---|---|
-| 406 KB | no word in the libpas heap | Mostly 19 all-zero 16 KB blocks that are not MarkedBlocks. Also the test's own list of live cells (57 KB), and the two objects it leaks on purpose (12 KB). |
+| 406 KB | no word in the libpas heap | Mostly 19 all-zero 16 KiB blocks (311 KB) that are not MarkedBlocks. Also the test's own list of live cells (57 KB), and the two objects it leaks on purpose (12 KB). |
 | 277 KB | a C++ object the walk reached | The field is one the walk cannot follow: see below. |
 | 190 KB | only other missed allocations | Follows from the rest. |
 | 110 KB | a JS cell | The walk treats every cell as a bare `JSCell`. Mostly `JSString`'s `StringImpl` (74 KB in 2,300 strings), then `NativeExecutable`, `CodeBlock`, `UnlinkedCodeBlock`, `Structure` and `JSGlobalObject`. |
@@ -524,7 +524,9 @@ type, and the walk reads every class it reaches as its home description:
   (`SBTypeMemberFunction` of kind `eMemberFunctionKindDestructor`), which
   carries the destructor's linkage name. The CMake build's
   `-dwarf-linkage-names=Abstract` keeps them on declarations: `VM`'s is
-  `_ZN3JSC2VMD1Ev`.
+  `_ZN3JSC2VMD1Ev`. Apple's clang gives a declaration the unified name
+  `_ZN3JSC2VMD4Ev`, which no symbol has, so the walk tries the complete-object
+  (`D1`) and then the base-object (`D2`) destructor in its place.
 - The walk resolves that symbol in the images' symbol tables, in the order the
   loader searches them, and skips undefined symbols: the test executable has
   `_ZN3JSC2VMD1Ev` as an import. It takes the function at the first definition,
@@ -605,9 +607,10 @@ otherwise. Each reader names the C++ source it mirrors:
 | `WTF::HashTable` (so `HashMap` and `HashSet`) | Every bucket of `m_table`, with the size before the buckets (`tableSizeOffset`, which is private). An empty or deleted bucket points into no allocation. The other members are walked as usual: a Debug `HashTable` has a `unique_ptr<Lock>`. |
 | `WTF::LazyUniqueRef`, `WTF::LazyRef` | `m_pointer`, unless `lazyTag` or `initializingTag` is set, as the template argument's type. |
 | `WTF::CompactPtr` (so `CompactRefPtr`) | `m_ptr`, decoded as `CompactPtr::decode` does. An outsized pointer, on a 36-bit build, is counted. |
-| `WTF::PackedAlignedPtr` (so `Packed<T*>`) | The bytes of `m_storage`. One stored shifted by its alignment, a template argument the walk does not read, is counted. |
+| `WTF::PackedAlignedPtr` (so `Packed<T*>`) | The bytes of `m_storage`, shifted left by the alignment when `PackedAlignedPtr` stores it shifted to save a byte. The alignment is the second template argument (`TargetType::templateIntegerArgument`, through `SBType::GetTemplateArgumentValue`, which needs liblldb 19). |
 | `JSC::JSString` | `m_fiber`: a resolved string's `StringImpl`, unless `isRopeInPointer` is set; a rope's fibers are cells. |
 | `JSC::PropertyTable` | `m_indexVector`, less `isCompactFlag`, reaches the index buffer's allocation. |
+| `std::unique_ptr<T[]>` | Its pointer member's elements. It records no count: `new T[n]` puts `n` in a cookie before the elements when `T` has a destructor (Itanium C++ ABI 2.7), and without one, as WTF's `UniqueArray` allocates, the elements are read to the end of their allocation, past the last by at most libpas's rounding up to its size class. |
 
 A class's bases are walked as values of their own, so a reader recognises a
 base: a `Packed<T*>` is a `PackedAlignedPtr`.
@@ -621,14 +624,13 @@ object's dynamic type, quietly; failing to find one is counted
 
 **`void*`** and other pointers to types without a size are counted.
 
-**Not done:** `std::unique_ptr<T[]>`, whose element count is not in the
-target's data, and a `PackedAlignedPtr` stored shifted.
-
-**Test.** Five objects are planted behind the last element of a `Vector`, a
-`HashSet`'s value, the last element of a C array, a `CompactPtr` and an
-initialized `LazyUniqueRef`, each reached only through it. Each is reached;
-removing the readers makes the first four fail. (The C array's needs only the
-array layout.)
+**Test.** Eight objects are planted behind the last element of a `Vector`, a
+`HashSet`'s value, the last element of a C array, a `CompactPtr`, an
+initialized `LazyUniqueRef`, a `Packed<T*>`, a `PackedAlignedPtr<T, 256>`
+stored shifted, and the last element of a `UniqueArray`, each reached only
+through it. Each is reached; removing the readers makes the Vector, HashSet,
+CompactPtr, LazyUniqueRef, shifted and UniqueArray cases fail. (The C array's
+needs only the array layout.)
 
 ### 12. Attributing what the walk misses
 
@@ -735,8 +737,14 @@ missed allocations are exactly what the walk does not reach, and no missed byte
 is counted twice. In process and out of process, the only failed check is the
 planted one.
 
-Not done: the TZone case. TZone heaps exist only on Darwin
-(`USE_TZONE_MALLOC`), so it needs a Darwin run.
+**The TZone case**, on Darwin only, since TZone heaps exist only there
+(`USE(TZONE_MALLOC)`). The roots hold one object of a `WTF_MAKE_TZONE_ALLOCATED`
+class, and the fixture another, complemented. Both are in one TZone bucket,
+whose type is the class's size class (`TZone::sizeClassFor`: 208 bytes for the
+200-byte class), and the missed one is counted under that bucket. A bucket's
+name is generated (`n1`, `L`), so the report names a heap with a type by its
+name, size class and alignment: `L (112-byte objects aligned to 16)`. Making
+the expected size class wrong fails the test.
 
 ### What the walk still misses
 
@@ -790,7 +798,17 @@ report is meant to run out of process.
   `JavaScriptCore.framework/Versions/A/JavaScriptCore.cstemp`. Delete that file.
 - **Warnings.** Xcode builds the tests with `-Werror=exit-time-destructors`, so a
   static fixture with a destructor needs `NeverDestroyed`. Both builds use
-  `-Wnon-virtual-dtor -Werror`.
+  `-Wnon-virtual-dtor -Werror`. Only Xcode builds `corpse/` with
+  `-Werror -Wunsafe-buffer-usage` and `-Wunnecessary-virtual-specifier`: search a
+  `Vector`'s `span()` rather than the `Vector`, whose iterators are raw pointers,
+  bracket libpas's headers with `WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN`/`END` as
+  `JSDollarVM.cpp` does, and give a polymorphic class a virtual destructor only
+  when it is not `final`.
+- **libpas's headers in Xcode.** Xcode installs only the libpas headers marked
+  private, and `pas_get_heap.h`, `pas_get_object_kind.h` and
+  `pas_object_kind.h` are not. The test takes the heap from `bmalloc_get_heap`
+  and mirrors `pas_get_object_kind` with the headers both builds install, so
+  that what the framework installs does not change.
 - **Linux workspaces.** The wk SDK ships liblldb-22 but not `liblldb-22-dev`, so
   configure finds no liblldb there and warns, and the DebugInfo and HeapWalk
   suites fail until the SDK has the headers. `wk test <ws> -- --testlibjsctools` needs the
@@ -824,7 +842,23 @@ report is meant to run out of process.
 ## Where the branch stands
 
 The branch is `dev/mya-heap-walk-with-uuid`. Patches 1 to 12 are implemented,
-and tested on Linux.
+and tested on Linux and on macOS.
+
+On macOS (arm64, Xcode Debug build, liblldb 22 from Homebrew), testLibJSCTools
+runs 1,485 assertions, and `run-javascriptcore-tests --testlibjsctools` reports no
+failures; only Process translation is skipped. The walk reaches 1,499,456 of
+2,066,896 bytes (72.5%). The first Mac run found:
+- home descriptions failed, since Apple's clang names a destructor's
+  declaration `D4` (patch 9);
+- the test's bound on pointers to declarations: on Darwin, WTF's `RunLoop`
+  adds CoreFoundation's opaque `__CFRunLoop`, `__CFRunLoopSource` and
+  `__CFRunLoopTimer`, which no image defines, so Darwin allows 7, against 84
+  without home descriptions;
+- the Xcode build's warnings and headers, under Build gotchas.
+
+The `std::unique_ptr<T[]>` and shifted `PackedAlignedPtr` readers, the TZone
+case and the Mac fixes came after the Linux run below, and have not been run on
+Linux.
 
 On Linux (Debian 12, aarch64, clang 18, liblldb 22), testLibJSCTools runs 545
 assertions, and `run-javascriptcore-tests --testlibjsctools` reports no
@@ -841,15 +875,7 @@ descriptions, leaving out the readers, leaving out `JSString::m_fiber`, and
 reading no cell as its class each fail it.
 
 Open:
-- The TZone case of patch 12, which needs Darwin.
-- A mya command that prints the report.
+- A mya command that prints the report. The walk needs roots, and the list of
+  allocations, which only a target that records them has: a production process
+  defines neither, and the Rules keep it that way.
 - The walk's speed on a large heap, since patches 9 to 11.
-
-The Mac builds have not been run since these changes. The Darwin code that
-changed is: `TargetType` and `TargetValue`, the per-vtable cache,
-`FindLLDB.cmake`'s version (from Homebrew's `liblldb.<version>.dylib`),
-`CorpseImage.h`, the tests, `PlatformCocoa.cmake` and `CommonBase.xcconfig`;
-and, since, `SnapshotDebugInfo` (home descriptions, static members, symbols,
-writable sections), `Region::all` and `residentParts` on Darwin, which are
-written but not compiled, and the analysis thread's id through
-`pthread_threadid_np`.

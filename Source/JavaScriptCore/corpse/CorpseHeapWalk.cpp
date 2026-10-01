@@ -519,6 +519,7 @@ private:
     void walkTaggedPointer(const TargetValue&, const char* field, unsigned templateArgument, uint64_t tagMask);
     void walkCompactPointer(const TargetValue&);
     void walkPackedPointer(const TargetValue&);
+    void walkUniqueArray(const TargetValue&);
     void walkJSString(const TargetValue&);
     void walkPropertyTable(const TargetValue&);
 
@@ -560,13 +561,14 @@ Vector<ReachWalk::Object> ReachWalk::takeObjects()
 
 std::optional<size_t> ReachWalk::allocationOf(Address address, uint64_t size) const
 {
-    auto after = std::ranges::upper_bound(m_allocations, address, { }, &HeapWalk::Allocation::address);
-    if (after == m_allocations.begin())
+    auto allocations = m_allocations.span();
+    auto after = std::ranges::upper_bound(allocations, address, { }, &HeapWalk::Allocation::address);
+    if (after == allocations.begin())
         return std::nullopt;
     const HeapWalk::Allocation& allocation = *(after - 1);
     if (address - allocation.address > allocation.size || size > allocation.size - (address - allocation.address))
         return std::nullopt;
-    return (after - 1) - m_allocations.begin();
+    return (after - 1) - allocations.begin();
 }
 
 void ReachWalk::enqueue(const TargetValue& value, IsObject isObject)
@@ -764,6 +766,13 @@ bool ReachWalk::walkByName(const TargetValue& value, std::string_view name)
         walkPackedPointer(value);
         return true;
     }
+    if (name.starts_with("std::unique_ptr<") || name.starts_with("std::__1::unique_ptr<")) {
+        const TargetType* elements = value.type().templateArgument(0);
+        if (!elements || !std::holds_alternative<TargetType::Array>(elements->layout()))
+            return false;
+        walkUniqueArray(value);
+        return true;
+    }
     if (name == "JSC::JSString") {
         walkJSString(value);
         return true;
@@ -876,19 +885,28 @@ void ReachWalk::walkCompactPointer(const TargetValue& value)
     followPointer(Address { address }, *pointee);
 }
 
-// PackedAlignedPtr::get: the low bytes of the pointer, in m_storage.
+// PackedAlignedPtr::get: the low bytes of the pointer, in m_storage, stored
+// shifted right by the alignment when that saves a byte.
 void ReachWalk::walkPackedPointer(const TargetValue& value)
 {
     TargetValue storage = value.properField("m_storage");
     if (!storage)
         return;
-    // PackedAlignedPtr::storageSizeWithoutAlignmentShift. A smaller storage holds
-    // the pointer shifted by its alignment, a template argument the walk does not read.
-    constexpr size_t unshiftedSize = roundUpToMultipleOf<8>(OS_CONSTANT(EFFECTIVE_ADDRESS_WIDTH)) / 8;
-    size_t size = storage.type().byteSize();
     const TargetType* pointee = value.type().templateArgument(0);
-    if (size != unshiftedSize || !pointee) {
+    auto alignment = value.type().templateIntegerArgument(1);
+    constexpr unsigned addressWidth = OS_CONSTANT(EFFECTIVE_ADDRESS_WIDTH);
+    if (!pointee || !alignment || !hasOneBitSet(*alignment) || getLSBSet(*alignment) >= addressWidth) {
         notFollowed(NotFollowed::TypeNotReached);
+        return;
+    }
+    // PackedAlignedPtr's storageSizeWithoutAlignmentShift, storageSize and alignmentShiftSize.
+    unsigned shiftIfProfitable = getLSBSet(*alignment);
+    size_t sizeWithoutShift = roundUpToMultipleOf<8>(addressWidth) / 8;
+    size_t sizeWithShift = roundUpToMultipleOf<8>(addressWidth - shiftIfProfitable) / 8;
+    unsigned shift = sizeWithoutShift > sizeWithShift ? shiftIfProfitable : 0;
+    size_t size = storage.type().byteSize();
+    if (size != sizeWithShift) {
+        CORPSE_REPORT("The %zu-byte PackedAlignedPtr at 0x%llx, aligned to %llu, is not the %zu bytes this build stores", size, forReport(value.address()), static_cast<unsigned long long>(*alignment), sizeWithShift);
         return;
     }
     auto bytes = m_snapshot.memory().span<uint8_t>(storage.address(), size);
@@ -897,7 +915,56 @@ void ReachWalk::walkPackedPointer(const TargetValue& value)
     uint64_t address = 0;
     memcpySpan(asMutableByteSpan(address).first(size), std::span<const uint8_t> { bytes });
     if (address)
-        followPointer(Address { address }, *pointee);
+        followPointer(Address { address << shift }, *pointee);
+}
+
+// std::unique_ptr<T[]>, which records no count. new T[n] puts n in a cookie
+// just before the elements when T has a destructor (Itanium C++ ABI 2.7), and
+// the cookie starts the allocation. With no cookie, as WTF's UniqueArray
+// allocates, the elements are read to the end of their allocation, past the
+// last one by at most libpas's rounding up to its size class.
+void ReachWalk::walkUniqueArray(const TargetValue& array)
+{
+    constexpr unsigned maxDepth = 8;
+    std::optional<TargetValue> pointer;
+    Function<void(const TargetValue&, unsigned)> findPointer = [&](const TargetValue& value, unsigned depth) {
+        auto* klass = std::get_if<TargetType::Class>(&value.type().layout());
+        if (pointer || !klass || depth > maxDepth)
+            return;
+        for (const TargetType::Field& field : klass->properFields) {
+            if (std::holds_alternative<TargetType::Pointer>(field.type.layout())) {
+                pointer = value.field(field);
+                return;
+            }
+            findPointer(value.field(field), depth + 1);
+        }
+        for (const TargetType::Base& base : klass->bases)
+            findPointer(value.base(base), depth + 1);
+    };
+    findPointer(array, 0);
+    if (!pointer)
+        return;
+    auto address = pointer->pointerValue();
+    if (!address || !*address)
+        return;
+    const TargetType& element = std::get<TargetType::Pointer>(pointer->type().layout()).pointee;
+    if (!element.byteSize()) {
+        notFollowed(std::holds_alternative<TargetType::Class>(element.layout()) ? NotFollowed::Declaration : NotFollowed::VoidPointer);
+        return;
+    }
+    auto holder = allocationOf(*address, element.byteSize());
+    if (!holder)
+        return;
+    const HeapWalk::Allocation& allocation = m_allocations[*holder];
+    uint64_t count = (allocation.address + allocation.size - *address) / element.byteSize();
+    if (*address - allocation.address >= sizeof(uint64_t)) {
+        auto cookie = m_snapshot.memory().ptr<uint64_t>(*address - sizeof(uint64_t));
+        if (cookie && *cookie <= count)
+            count = *cookie;
+    }
+    m_reached[*holder] = true;
+    for (uint64_t index = 0; index < std::min<uint64_t>(count, maxVectorSize); ++index)
+        enqueue(TargetValue::at(m_snapshot, *address + index * element.byteSize(), element), IsObject::Yes);
 }
 
 // PropertyTable::m_indexVector: the table's index buffer, with
@@ -1100,8 +1167,9 @@ private:
     {
         if (m_missedRanges.isEmpty() || value < m_missedRanges.first().begin || value >= m_missedRanges.last().end)
             return std::nullopt;
-        auto after = std::ranges::upper_bound(m_missedRanges, value, { }, &MissedRange::begin);
-        if (after == m_missedRanges.begin() || value >= (after - 1)->end)
+        auto ranges = m_missedRanges.span();
+        auto after = std::ranges::upper_bound(ranges, value, { }, &MissedRange::begin);
+        if (after == ranges.begin() || value >= (after - 1)->end)
             return std::nullopt;
         return (after - 1)->missed;
     }
@@ -1111,9 +1179,10 @@ private:
 const ReachWalk::Object* Attributor::objectContaining(uint64_t address) const
 {
     // Objects nest, as a Vector's element in the Vector's owner, so the innermost one is the one the word is in.
-    auto after = std::ranges::upper_bound(m_objects, address, { }, &ReachWalk::Object::address);
+    auto objects = m_objects.span();
+    auto after = std::ranges::upper_bound(objects, address, { }, &ReachWalk::Object::address);
     const ReachWalk::Object* innermost = nullptr;
-    for (auto candidate = after; candidate != m_objects.begin();) {
+    for (auto candidate = after; candidate != objects.begin();) {
         --candidate;
         if (address - candidate->address >= m_maxObjectExtent)
             break;
@@ -1214,6 +1283,9 @@ String Attributor::heapTypeName(const HeapWalk::AllocationFacts& facts)
             if (bytes) {
                 std::string_view characters { bytes.data(), bytes.size() };
                 characters = characters.substr(0, characters.find('\0'));
+                // A TZone bucket's name is generated, so its size class and alignment are what say what it holds.
+                if (!characters.empty() && facts.typeSize > 1)
+                    return makeString(String::fromUTF8(std::span { characters.data(), characters.size() }), " ("_s, facts.typeSize, "-byte objects aligned to "_s, facts.typeAlignment, ')');
                 if (!characters.empty())
                     return String::fromUTF8(std::span { characters.data(), characters.size() });
             }
@@ -1309,9 +1381,10 @@ void Attributor::scanRange(uint64_t begin, uint64_t end, const Source& source)
 
 void Attributor::scanRangeSkipping(uint64_t begin, uint64_t end, const Vector<Range>& skip, const Source& source)
 {
-    auto next = std::ranges::upper_bound(skip, begin, { }, &Range::end);
+    auto ranges = skip.span();
+    auto next = std::ranges::upper_bound(ranges, begin, { }, &Range::end);
     uint64_t position = begin;
-    for (; next != skip.end() && next->begin < end; ++next) {
+    for (; next != ranges.end() && next->begin < end; ++next) {
         if (next->begin > position)
             scanRange(position, next->begin, source);
         position = std::max(position, next->end);

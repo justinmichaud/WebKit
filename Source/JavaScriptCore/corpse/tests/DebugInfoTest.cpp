@@ -247,7 +247,7 @@ struct ContainerNode : public BasicRawSentinelNode<ContainerNode> {
 };
 using ContainerList = SentinelLinkedList<ContainerNode, BasicRawSentinelNode<ContainerNode>>;
 
-class Containers final {
+class Containers {
 public:
     virtual ~Containers() = default;
 

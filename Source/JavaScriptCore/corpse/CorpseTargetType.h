@@ -105,6 +105,8 @@ public:
     // The type of the `index`th template argument of a class template
     // specialization, or null if it has no such type argument.
     const TargetType* templateArgument(unsigned index) const;
+    // The `index`th template argument, if it is an integer, such as PackedAlignedPtr's alignment.
+    std::optional<uint64_t> templateIntegerArgument(unsigned index) const;
 
 private:
     TargetType(SnapshotDebugInfo&, const lldb::SBType&);

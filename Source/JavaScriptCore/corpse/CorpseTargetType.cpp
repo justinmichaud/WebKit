@@ -142,6 +142,20 @@ const TargetType* TargetType::templateArgument(unsigned index) const
     return &m_debugInfo.type(argument);
 }
 
+std::optional<uint64_t> TargetType::templateIntegerArgument(unsigned index) const
+{
+    if (index >= m_type->GetNumberOfTemplateArguments() || m_type->GetTemplateArgumentKind(index) != lldb::eTemplateArgumentKindIntegral)
+        return std::nullopt;
+    lldb::SBValue argument = m_type->GetTemplateArgumentValue(*m_debugInfo.m_target, index);
+    if (!argument.IsValid())
+        return std::nullopt;
+    lldb::SBError error;
+    uint64_t value = argument.GetValueAsUnsigned(error, 0);
+    if (error.Fail())
+        return std::nullopt;
+    return value;
+}
+
 TargetType::Layout TargetType::readLayout() const
 {
     uint32_t typeClass = m_type->GetTypeClass();
@@ -242,6 +256,11 @@ const TargetType& TargetType::home() const
 }
 
 const TargetType* TargetType::templateArgument(unsigned) const
+{
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+std::optional<uint64_t> TargetType::templateIntegerArgument(unsigned) const
 {
     RELEASE_ASSERT_NOT_REACHED();
 }

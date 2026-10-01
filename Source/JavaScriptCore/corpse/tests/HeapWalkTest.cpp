@@ -53,14 +53,19 @@
 #include <JavaScriptCore/StrongInlines.h>
 #include <JavaScriptCore/StructureID.h>
 #include <JavaScriptCore/VM.h>
+#include <bmalloc/TZoneHeap.h>
+WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 #include <bmalloc/bmalloc_heap_config.h>
+#include <bmalloc/bmalloc_heap_utils.h>
 #include <bmalloc/bmalloc_type.h>
 #include <bmalloc/pas_enumerator.h>
-#include <bmalloc/pas_get_heap.h>
-#include <bmalloc/pas_get_object_kind.h>
+#include <bmalloc/pas_get_page_base_and_kind_for_small_other_in_fast_megapage.h>
 #include <bmalloc/pas_heap.h>
 #include <bmalloc/pas_heap_lock.h>
+#include <bmalloc/pas_large_map.h>
+#include <bmalloc/pas_page_base.h>
 #include <bmalloc/pas_root.h>
+WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 #include <algorithm>
 #include <bit>
 #include <optional>
@@ -77,8 +82,12 @@
 #include <wtf/HexNumber.h>
 #include <wtf/LazyUniqueRef.h>
 #include <wtf/IterationStatus.h>
+#include <wtf/MallocSpan.h>
 #include <wtf/NeverDestroyed.h>
+#include <wtf/Packed.h>
 #include <wtf/StdLibExtras.h>
+#include <wtf/TZoneMallocInlines.h>
+#include <wtf/UniqueArray.h>
 #include <wtf/Vector.h>
 #include <wtf/text/ASCIILiteral.h>
 #include <wtf/text/MakeString.h>
@@ -143,15 +152,33 @@ enum class Planted : uint8_t {
     ArrayElement, // The last element of a C array.
     CompactPointer, // A CompactPtr, which holds an integer.
     LazyPointer, // An initialized LazyUniqueRef, which holds an integer with tag bits.
+    PackedPointer, // A Packed<T*>, which holds the pointer's low bytes.
+    ShiftedPackedPointer, // A PackedAlignedPtr whose alignment lets it store the pointer shifted.
+    UniqueArrayElement, // The last element of a UniqueArray, which records no count.
 };
-constexpr size_t numberOfPlanted = static_cast<size_t>(Planted::LazyPointer) + 1;
+constexpr size_t numberOfPlanted = static_cast<size_t>(Planted::UniqueArrayElement) + 1;
 constexpr std::array<ASCIILiteral, numberOfPlanted> plantedNames {
     "the last element of a Vector"_s,
     "a HashSet's value"_s,
     "the last element of a C array"_s,
     "a CompactPtr"_s,
     "a LazyUniqueRef"_s,
+    "a Packed<T*>"_s,
+    "a PackedAlignedPtr stored shifted"_s,
+    "the last element of a UniqueArray"_s,
 };
+
+// Enough alignment for PackedAlignedPtr to store the pointer shifted, in a byte less.
+constexpr size_t shiftedPackedAlignment = 256;
+
+// An object of a class with a TZone heap of its own, whose type is the class's size class and alignment.
+class TZoneObject {
+    WTF_MAKE_TZONE_ALLOCATED(TZoneObject);
+public:
+    std::array<uint8_t, 200> bytes { };
+};
+
+WTF_MAKE_TZONE_ALLOCATED_IMPL(TZoneObject);
 
 // Objects the walk misses, each for a reason the attribution has to give
 // (patch 12). The fixture records their addresses complemented, so that it does
@@ -199,6 +226,10 @@ public:
     std::array<ReachableObject*, 3> array { };
     CompactPtr<ReachableObject> compact;
     LazyUniqueRef<MyaRoots, ReachableObject> lazy;
+    PackedPtr<ReachableObject> packed;
+    PackedAlignedPtr<ReachableObject, shiftedPackedAlignment> shiftedPacked;
+    UniqueArray<ReachableObject*> uniqueArray;
+    TZoneObject* tzone { nullptr };
 
     // Only declared in this executable, and polymorphic in JavaScriptCore.
     JSC::RegExpCache* regExpCache { nullptr };
@@ -238,6 +269,8 @@ struct HeapWalkFixture {
     uint64_t builtinExecutables { 0 };
     uint64_t regExpCache { 0 };
     std::array<uint64_t, numberOfMissed> missed { }; // Complemented.
+    uint64_t tzoneReached { 0 }; // An object of a TZone heap the roots hold, and one of the same heap nothing holds, complemented.
+    uint64_t tzoneMissed { 0 };
     // The target's own buffers, which hold the address of every allocation.
     uint64_t allocationsCapacity { 0 };
     uint64_t heapPages { 0 }; // The pages libpas holds objects in, sorted.
@@ -250,9 +283,9 @@ struct HeapWalkFixture {
 // memory. The records go into buffers from system malloc, allocated up front,
 // so that the enumeration allocates nothing from the heap it enumerates.
 struct EnumeratedAllocations {
-    HeapWalk::Allocation* objects;
+    std::span<HeapWalk::Allocation> objects;
     size_t objectCount;
-    HeapWalk::Allocation* pages; // The pages libpas holds objects in.
+    std::span<HeapWalk::Allocation> pages; // The pages libpas holds objects in.
     size_t pageCount;
     size_t capacity;
 };
@@ -274,15 +307,56 @@ void recordObject(pas_enumerator*, void* address, size_t size, pas_enumerator_re
     }
 }
 
+// pas_get_object_kind, from the headers every build of libpas exports: its own
+// header, and pas_object_kind's, are not among them. The result is a pas_object_kind.
+uint8_t objectKindOf(void* object)
+{
+    enum : uint8_t { NotAnObject, SmallSegregated, MediumSegregated, SmallBitfit, MediumBitfit, MargeBitfit, Large };
+    const pas_heap_config& config = bmalloc_heap_config;
+    uintptr_t begin = std::bit_cast<uintptr_t>(object);
+    pas_page_kind pageKind;
+    switch (config.fast_megapage_kind_func(begin)) {
+    case pas_small_exclusive_segregated_fast_megapage_kind:
+        return SmallSegregated;
+    case pas_small_other_fast_megapage_kind:
+        pageKind = pas_get_page_base_and_kind_for_small_other_in_fast_megapage(begin, config).page_kind;
+        break;
+    case pas_not_a_fast_megapage_kind: {
+        if (pas_page_base* page = config.page_header_func(begin)) {
+            pageKind = pas_page_base_get_kind(page);
+            break;
+        }
+        pas_heap_lock_lock();
+        pas_large_map_entry entry = pas_large_map_find(begin);
+        pas_heap_lock_unlock();
+        return pas_large_map_entry_is_empty(entry) ? NotAnObject : Large;
+    }
+    default:
+        return NotAnObject;
+    }
+    switch (pageKind) {
+    case pas_small_exclusive_segregated_page_kind:
+        return SmallSegregated;
+    case pas_medium_exclusive_segregated_page_kind:
+        return MediumSegregated;
+    case pas_small_bitfit_page_kind:
+        return SmallBitfit;
+    case pas_medium_bitfit_page_kind:
+        return MediumBitfit;
+    case pas_marge_bitfit_page_kind:
+        return MargeBitfit;
+    }
+    return NotAnObject;
+}
+
 // What libpas knows of the object, as the heap's own lookups find it.
 HeapWalk::AllocationFacts factsOf(void* object)
 {
     HeapWalk::AllocationFacts facts;
-    pas_object_kind kind = pas_get_object_kind(object, bmalloc_heap_config);
-    facts.objectKind = kind;
-    if (kind == pas_not_an_object_kind)
+    facts.objectKind = objectKindOf(object);
+    if (!facts.objectKind)
         return facts;
-    pas_heap* heap = pas_get_heap(object, bmalloc_heap_config);
+    pas_heap* heap = bmalloc_get_heap(object);
     if (!heap)
         return facts;
     facts.heap = std::bit_cast<uint64_t>(heap);
@@ -296,12 +370,10 @@ HeapWalk::AllocationFacts factsOf(void* object)
 EnumeratedAllocations& enumerateAllocations()
 {
     constexpr size_t capacity = 4 * 1024 * 1024;
-    static EnumeratedAllocations records {
-        static_cast<HeapWalk::Allocation*>(malloc(capacity * sizeof(HeapWalk::Allocation))), 0,
-        static_cast<HeapWalk::Allocation*>(malloc(capacity * sizeof(HeapWalk::Allocation))), 0,
-        capacity,
-    };
-    RELEASE_ASSERT(records.objects && records.pages);
+    using Buffer = decltype(MallocSpan<HeapWalk::Allocation, SystemMalloc>::malloc(0));
+    static NeverDestroyed<Buffer> objects { MallocSpan<HeapWalk::Allocation, SystemMalloc>::malloc(capacity * sizeof(HeapWalk::Allocation)) };
+    static NeverDestroyed<Buffer> pages { MallocSpan<HeapWalk::Allocation, SystemMalloc>::malloc(capacity * sizeof(HeapWalk::Allocation)) };
+    static EnumeratedAllocations records { objects->mutableSpan(), 0, pages->mutableSpan(), 0, capacity };
     records.objectCount = 0;
     records.pageCount = 0;
     // The heap lock keeps libpas's other threads from changing the heap during the enumeration.
@@ -312,11 +384,11 @@ EnumeratedAllocations& enumerateAllocations()
     RELEASE_ASSERT(enumerator && pas_enumerator_enumerate_all(enumerator));
     pas_enumerator_destroy(enumerator);
     pas_heap_lock_unlock();
-    std::span<HeapWalk::Allocation> objects { records.objects, records.objectCount };
-    std::ranges::sort(objects, { }, &HeapWalk::Allocation::address);
-    std::ranges::sort(std::span { records.pages, records.pageCount }, { }, &HeapWalk::Allocation::address);
+    std::span<HeapWalk::Allocation> enumerated = records.objects.first(records.objectCount);
+    std::ranges::sort(enumerated, { }, &HeapWalk::Allocation::address);
+    std::ranges::sort(records.pages.first(records.pageCount), { }, &HeapWalk::Allocation::address);
     // libpas's lookups take the heap lock themselves.
-    for (HeapWalk::Allocation& object : objects)
+    for (HeapWalk::Allocation& object : enumerated)
         object.facts = factsOf(std::bit_cast<void*>(static_cast<uintptr_t>(object.address.toTargetVMAddress())));
     return records;
 }
@@ -385,6 +457,19 @@ Address createFixture()
     });
     fixture.planted[static_cast<size_t>(Planted::LazyPointer)] = std::bit_cast<uint64_t>(&myaRoots.lazy.get(myaRoots));
     myaRoots.regExpCache = vm.regExpCache();
+    myaRoots.packed = plant(Planted::PackedPointer);
+    auto* shifted = new (NotNull, fastAlignedMalloc(shiftedPackedAlignment, sizeof(ReachableObject))) ReachableObject;
+    fixture.planted[static_cast<size_t>(Planted::ShiftedPackedPointer)] = std::bit_cast<uint64_t>(shifted);
+    myaRoots.shiftedPacked = shifted;
+    static_assert(decltype(myaRoots.shiftedPacked)::isAlignmentShiftProfitable);
+    constexpr size_t uniqueArraySize = 3;
+    myaRoots.uniqueArray = makeUniqueArray<ReachableObject*>(uniqueArraySize);
+    std::span<ReachableObject*> uniqueArray = unsafeMakeSpan(myaRoots.uniqueArray.get(), uniqueArraySize);
+    uniqueArray[0] = new ReachableObject;
+    uniqueArray[uniqueArraySize - 1] = plant(Planted::UniqueArrayElement);
+    myaRoots.tzone = new TZoneObject;
+    fixture.tzoneReached = std::bit_cast<uint64_t>(myaRoots.tzone);
+    fixture.tzoneMissed = ~std::bit_cast<uint64_t>(new TZoneObject);
 
     auto miss = [&](Missed missed, void* object) {
         fixture.missed[static_cast<size_t>(missed)] = ~std::bit_cast<uint64_t>(object);
@@ -438,10 +523,10 @@ Address createFixture()
         fastFree(object);
     }
     EnumeratedAllocations& records = enumerateAllocations();
-    fixture.allocations = std::bit_cast<uint64_t>(records.objects);
+    fixture.allocations = std::bit_cast<uint64_t>(records.objects.data());
     fixture.allocationCount = records.objectCount;
     fixture.allocationsCapacity = records.capacity;
-    fixture.heapPages = std::bit_cast<uint64_t>(records.pages);
+    fixture.heapPages = std::bit_cast<uint64_t>(records.pages.data());
     fixture.heapPageCount = records.pageCount;
     fixture.heapPagesCapacity = records.capacity;
     return Address { &fixture };
@@ -654,8 +739,9 @@ void checkReach(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFixture&
         return;
     Vector<HeapWalk::Allocation> allocations { std::span<const HeapWalk::Allocation> { enumerated } };
     auto allocationOf = [&](uint64_t address) -> const HeapWalk::Allocation* {
-        auto after = std::ranges::upper_bound(allocations, Address { address }, { }, &HeapWalk::Allocation::address);
-        if (after == allocations.begin() || address - (after - 1)->address.toTargetVMAddress() >= (after - 1)->size)
+        auto span = allocations.span();
+        auto after = std::ranges::upper_bound(span, Address { address }, { }, &HeapWalk::Allocation::address);
+        if (after == span.begin() || address - (after - 1)->address.toTargetVMAddress() >= (after - 1)->size)
             return nullptr;
         return &*(after - 1);
     };
@@ -701,7 +787,14 @@ void checkReach(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFixture&
     TEST_ASSERT(isReached(fixture.jsonCache) && isReached(fixture.builtinExecutables) && isReached(fixture.regExpCache),
         "the walk reaches what the VM owns through pointers to classes this executable only declares");
     // Without home descriptions, 84 pointers lead to declarations; with them, the planted one and one other.
-    TEST_ASSERT(reach.notFollowed[static_cast<size_t>(HeapWalk::NotFollowed::Declaration)] <= 4, "almost no pointer the walk reaches leads to a class that is only declared");
+    // On Darwin, WTF's RunLoop adds CoreFoundation's opaque __CFRunLoop, __CFRunLoopSource and
+    // __CFRunLoopTimer, which no image defines.
+#if OS(DARWIN)
+    constexpr uint64_t maxDeclarations = 7;
+#else
+    constexpr uint64_t maxDeclarations = 4;
+#endif
+    TEST_ASSERT(reach.notFollowed[static_cast<size_t>(HeapWalk::NotFollowed::Declaration)] <= maxDeclarations, "almost no pointer the walk reaches leads to a class that is only declared");
     // Patch 10: a JS cell, read as its class, leads to what it holds. The name is
     // not an atom, so only its JSString holds its StringImpl.
     TEST_ASSERT(isReached(fixture.stringImpl), "the walk reaches the StringImpl of a JSString");
@@ -790,6 +883,31 @@ void checkAttribution(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFi
     TEST_ASSERT(std::ranges::all_of(fixture.leaked, [&](uint64_t leaked) {
         return attribution.missed.containsIf([&](const HeapWalk::MissedAllocation& missed) { return missed.allocation.address == Address { leaked } && missed.attribution && missed.attribution->reason == Reason::ImageData; });
     }), "the objects the target holds only in its fixture are attributed to it");
+
+#if USE(TZONE_MALLOC)
+    // A TZone heap's type is its class's size class and alignment, which narrows an object to the classes that share them.
+    const HeapWalk::Allocation* reachedTZone = nullptr;
+    for (const HeapWalk::Allocation& allocation : allocations) {
+        if (allocation.address == Address { fixture.tzoneReached })
+            reachedTZone = &allocation;
+    }
+    const HeapWalk::MissedAllocation* missedTZone = nullptr;
+    for (const HeapWalk::MissedAllocation& missed : attribution.missed) {
+        if (missed.allocation.address == Address { ~fixture.tzoneMissed })
+            missedTZone = &missed;
+    }
+    TEST_ASSERT(reachedTZone && missedTZone, "the walk reaches the TZone object the roots hold, and misses the other");
+    if (reachedTZone && missedTZone) {
+        const HeapWalk::AllocationFacts& facts = reachedTZone->facts;
+        TEST_ASSERT(facts.typeName && facts.typeName == missedTZone->allocation.facts.typeName, "both TZone objects are in their class's TZone bucket");
+        TEST_ASSERT_EQ(facts.typeSize, static_cast<uint32_t>(bmalloc::TZone::sizeClassFor(sizeof(TZoneObject))), "the TZone bucket's type is the class's size class");
+        auto name = snapshot.memory().span<char>(Address { facts.typeName }, 1);
+        String size = makeString('(', facts.typeSize, "-byte objects"_s);
+        TEST_ASSERT(name && attribution.byHeapType.containsIf([&](const HeapWalk::Group& group) {
+            return group.bytes >= missedTZone->allocation.size && group.owner.startsWith(name[0]) && group.owner.contains(size);
+        }), "the missed TZone object is counted under its bucket, by its size class");
+    }
+#endif
 
     uint64_t groupedBytes = attribution.bytesWithoutEdge;
     for (const HeapWalk::Group& group : attribution.groups)

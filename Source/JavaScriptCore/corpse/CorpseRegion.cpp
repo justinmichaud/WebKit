@@ -283,8 +283,9 @@ std::optional<Region> Region::findContaining(int pid, Address address)
 
 std::optional<Region> Region::findContaining(const Vector<Region>& regions, Address address)
 {
-    auto after = std::ranges::upper_bound(regions, address, { }, &Region::base);
-    if (after == regions.begin() || !(after - 1)->contains(address))
+    auto span = regions.span();
+    auto after = std::ranges::upper_bound(span, address, { }, &Region::base);
+    if (after == span.begin() || !(after - 1)->contains(address))
         return std::nullopt;
     return *(after - 1);
 }
