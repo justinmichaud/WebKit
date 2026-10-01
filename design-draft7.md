@@ -9,9 +9,7 @@ This design adds three things:
 - every type taken from the process's own debug info, read through liblldb;
 - a measurement of how much of the heap the walk reaches.
 
-It lands as small patches, each with exactly the code its test needs. All 12
-are implemented. Patches 9 to 12 were designed from a measurement of what the
-walk missed after patch 8, and "What the walk still misses" measures it again.
+It lands as small patches, each with exactly the code its test needs.
 
 This branch represents the final state. Iterate on this, we will split it up later.
 
@@ -19,17 +17,21 @@ This branch represents the final state. Iterate on this, we will split it up lat
 
 - **Target.** The process mya inspects.
 - **Snapshot.** A read-only view of the target: a Darwin corpse, or, on Linux, the
-  live process.
+  live process for now until this is implemented properly.
 - **Image.** The executable or a shared library loaded in the target.
 - **Fixture.** What a test's target builds before it is snapshotted, such as a
   VM with known objects, and records in a struct whose address it reports.
 - **Roots.** `MyaRoots`, a test class whose fields give the walk its starting
-  points and types (patch 5).
+  points and types (patch 5). This stays only in testing code
 - **In process and out of process.** Each analysis test runs twice: on a
   snapshot of the test process itself, and on a snapshot of a copy of it that it
   spawns as the target and that reports its fixture over a pipe.
 - **Reached and missed.** A live libpas allocation is reached if the walk reaches
-  any address in it, and missed otherwise (patch 8).
+  any address in it, and missed otherwise.
+
+Mya itself is out of scope, just make a working JSC VM test case.
+
+This should be as simple and reliable as possible, avoid expanding scope. We want to maintain the smallest amount of code possible.
 
 ## Rules
 
@@ -37,8 +39,11 @@ This branch represents the final state. Iterate on this, we will split it up lat
   reads only fixed structs from memory, such as dyld's image list.
 - **No type is looked up by name.** A type comes from code or data in the
   target: from a vtable (a class's dynamic type), from a function's `this`, or
-  from a field's declared type. Fields are reached by name, as the C++ source
-  reaches them. Two narrow exceptions are checked against the target's own data:
+  from a field's declared type.
+
+Human notes: the original had:
+
+Two narrow exceptions are checked against the target's own data:
   - a member function is found by its linkage name, the ABI's unique name for one
     symbol, in the symbol table, as the loader finds it (patch 9);
   - a JS cell's class is found from its `ClassInfo`'s symbol, and checked against
@@ -48,18 +53,33 @@ This branch represents the final state. Iterate on this, we will split it up lat
   pick how to read it (patch 11), but never finds one. The one type a reader
   needs that its value does not give, `JSString::m_fiber`'s `StringImpl`, is
   taken from the classes the walk has reached.
+
+
+This seems like gibberish, something is wrong with this analysis. Fix this.
+
+We should walk the type higherachy to list classes, not look up members by name. Classinfo needs special attention, but can probably be fixed by hand too.
+
+
 - **liblldb is never given a process.** mya reads all memory itself
   (`RELEASE_ASSERT(!target.GetProcess().IsValid())`), so a walk never depends on
   the process still running.
 - **Snapshots are taken at a safe point** (patch 7). The walk may assume the
   invariants JSC keeps between collections.
+
+Human notes: this is going to be hard to guarantee, but we must not modify the jsc runtime at all. The current version uses some ad-hoc heuristics, I would prefer for this to work by checking the stacks. Nothing ad-hoc. We can assume the operator will pick a good time if needed for simplicity.
+
 - **The production build does not change.** Nothing changes in JavaScriptCore,
   `jsc` or WebKit's web process. Objects that exist only for tests, such as the
   heap walk's roots, live in the tests. `ENABLE_MYA_HEAP`, which is on only in
-  Debug developer builds, changes build flags only: RTTI, default visibility,
-  full debug info, `-gpubnames` and an exported libpas.
+  Debug developer builds, changes build flags only.
+
+We can easily make changes if needed for reliabliity, but we should avoid these changes as much as possible.
+
 - **Rebuilt files are out of scope.** An image is found by the path its loader
   recorded, and is assumed to be the file that was loaded.
+
+We should do everything we can to avoid improper use, but that should not require us to write our own binary parsers. If there is an easier sanity check that this isn't happening, great, but don't write an elf parser.
+
 - **Code that reads JS cells mirrors JSC's heap code.** Each routine has a comment
   naming its original.
   - Trivially copyable WTF values (`WTF::BitSet`, `Markable`,
@@ -71,6 +91,7 @@ This branch represents the final state. Iterate on this, we will split it up lat
     private with a comment naming it.
 - **A failure is reported where the data was needed.** One unreadable image does
   not fail the snapshot.
+- We must measure the percentage of the heap hit, and drive that number up as much as possible.
 
 ## Build and test
 
