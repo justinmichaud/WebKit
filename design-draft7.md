@@ -51,6 +51,7 @@ safe point, and measures its reach under all of them.
 | A8 | **libpas's sources do not change, and the target is made quiet with options.** Counting allocations uses libpas's own enumerator API. A measured target runs with `useConcurrentGC=false`, `useConcurrentJIT=false` and `useWarmUpMarkedBlocks=false`, so no thread but the mutator touches the JS heap or the objects hanging off it, and no spare blocks sit in libpas. | Hooks or accessors inside libpas; races between the snapshot and the collector or compiler threads. |
 | A9 | **Linux has glibc 2.34 and Linux 5.9 or newer**, for `_Fork` and `close_range` (patch 7). Debian 12 has both. | Fallbacks for older systems. |
 | A10 | **Dynamic types need the image's symbol table**, to confirm them (patch 2). Debug builds keep it; in a stripped image the walk gives polymorphic objects their static types and counts them. | Any way to confirm a dynamic type without a second, unfoldable source. |
+| A11 | **On Linux, an image's file is not overwritten in place while the target runs.** A new file renamed over it, as linkers, `install` and package managers write one, is detected (patch 6). Writing into the mapped file, as `cp` does, changes the target's own clean pages, including the build-id note, so the target no longer runs the image it loaded, and nothing read from its memory can tell. | Any check for a file rewritten in place. |
 
 **Why A2 holds.** Within one image, liblldb completes a declaration from the
 image's own definition: a class declared in one compile unit and defined in
@@ -89,7 +90,8 @@ name for Apple's clang, which names a destructor's declaration with the unified
   (`RELEASE_ASSERT(!target.GetProcess().IsValid())`), so a walk never depends
   on the target still running.
 - **The production build changes as little as possible.** `ENABLE_MYA_HEAP`, on
-  only in Debug developer builds, changes build flags only (listed under Build
+  only in Debug builds (on macOS, and in Linux developer builds), changes build
+  flags only (listed under Build
   and test). Objects that exist only for tests, such as the roots, live in the
   tests. A source change to JavaScriptCore, `jsc` or the web process is made
   only when the walk cannot be made reliable without it.
@@ -97,7 +99,8 @@ name for Apple's clang, which names a destructor's declaration with the unified
   from the target's memory, its Mach-O UUID or its ELF GNU build-id, and passes
   it with the path to `SBTarget::AddModule`. liblldb then refuses a file whose
   identity differs (`ModuleList::GetSharedModule` drops a module whose UUID is
-  not the one asked for); it never loads the file anyway.
+  not the one asked for); it never loads the file anyway. On Linux a file
+  replaced by rename is caught before that, by its mapping (patch 6, A11).
 - **Code that reads JS cells mirrors JSC's heap code.** Each routine has a
   comment naming its original.
   - Trivially copyable WTF values (`WTF::BitSet`, `Markable`,
@@ -144,13 +147,23 @@ from the `debian-debug` archive. Without it, the system-library test fails.
 process.
 
 **What `ENABLE_MYA_HEAP` changes.** Build flags only, each for a stated reason:
-- `-fstandalone-debug`, so that each image describes the types it uses;
+- `-fstandalone-debug`, so that each image describes the types it uses (in
+  CMake; Darwin's clang defaults to it);
+- in CMake, no `-dwarf-linkage-names=Abstract`, under which an implicit
+  destructor has no linkage name (patch 2);
+- dSYMs on Darwin (`dwarf-with-dsym` in Xcode, `dsymutil` after each link in
+  CMake): liblldb finds the compile unit that defines a global variable
+  (patch 10) only in a dSYM, not through the debug map;
 - `-Wl,--build-id` on Linux, so that every image has an identity (patch 6):
   lld writes none unless asked, and only some distributions' clang asks;
 - `PAS_BMALLOC_HIDDEN=0`, in CMake and in Xcode (`WK_MYA_HEAP`), so that the
   tests can call libpas's enumerator (patch 9);
 - `DEBUG_FISSION` off (A4);
-- default symbol visibility (see Open).
+- on Darwin, default symbol visibility, and so, in Xcode, no TAPI
+  (`SUPPORTS_TEXT_BASED_API=NO`), whose export lists it no longer matches. On
+  Linux every test passes with symbols hidden, because the walk reads the
+  symbol table, which keeps them, so CMake hides them there as usual (see
+  Open).
 
 ## The patches
 
@@ -175,9 +188,8 @@ patch needs no liblldb.
 ### 2. Debug info and dynamic types on Darwin
 
 `SnapshotDebugInfo::create` gives liblldb an empty target, then, for each image,
-calls `AddModule(path, nullptr, uuid)` and `SetModuleLoadAddress`. liblldb cannot
-load an image from its UUID alone, because no dSYM exists for Spotlight to find;
-the UUID is what refuses a rebuilt file.
+calls `AddModule(path, nullptr, uuid)` and `SetModuleLoadAddress`. liblldb finds
+each image's dSYM next to it, by path; the UUID is what refuses a rebuilt file.
 
 `dynamicTypeAt(address)` returns the class of the complete object that contains a
 polymorphic object. `TargetType` describes a type's layout, which is one of:
@@ -208,10 +220,25 @@ class ends. It is storage after the class, so it is not one of its fields.
 2. **The vtable's symbol** checks it. This rule never supplies a type: it only
    accepts or refuses the one rule 1 found. The vtable pointer lies inside a symbol
    `_ZTV…`, `vtable for X`. The class rule 1 found declares its destructor with
-   a linkage name, `_ZN…D1Ev` (or `D4Ev` from Apple's clang), `X::~X()`. Both
-   names are demangled by `abi::__cxa_demangle`, and the class each names must
-   be the same string. Anything else, including a construction vtable
-   (`_ZTC…`), is reported, and the object has no dynamic type.
+   a linkage name, `_ZN…D1Ev` (or `D4Ev` from Apple's clang), `X::~X()`; a
+   class whose destructor is implicit, which liblldb does not list, is checked
+   with another member it declares. Both names are demangled by liblldb, with
+   LLVM's demangler, and the class each names must be the same string.
+   Anything else, including a construction vtable (`_ZTC…`), is reported, and
+   the object has no dynamic type.
+
+   - *Not `abi::__cxa_demangle`.* Debian 12's cannot demangle a C++20
+     constraint, which `RunLoop::Timer`'s constructors put in their lambdas'
+     vtable names.
+   - *Unnamed local types are compared as wildcards.* liblldb computes a
+     member's linkage name with clang's mangler from the class it rebuilt, in
+     which a function's lambdas are numbered again (`$_15` becomes `$_0`) and
+     the enclosing function is spelled as instantiated, not as declared. So a
+     template or function argument that is an unnamed local type (`$_N`,
+     `'lambda'…`, `{lambda…#N}`, `'unnamed…'`), with the function that
+     qualifies it, matches only another one in the same position. In a build
+     that folds no functions, rule 1 has no sibling lambda's class to confuse
+     it with.
 
 Rule 1 alone can be wrong without saying so, because one function can be the
 destructor of two classes:
@@ -232,9 +259,9 @@ their static types (A10).
 - **Identifying a destructor.** DWARF has no destructor tag. A destructor is the
   member function named `~Class`, which is also how liblldb classifies it. The
   check is that the last `::` component of `SBFunction::GetName()` starts with
-  `~`. `GetName()` is the only spelling that is the same in both builds: the
-  CMake build passes `-dwarf-linkage-names=Abstract`, where `GetBaseName()` is
-  null and `GetMangledName()` is the bare `~Class`.
+  `~`. `GetName()` is the only spelling that is the same in every build: a CMake
+  build without `ENABLE_MYA_HEAP` passes `-dwarf-linkage-names=Abstract`, where
+  `GetBaseName()` is null and `GetMangledName()` is the bare `~Class`.
 - **Rejected: the vtable's symbol as the source.** It names the class, but
   getting the type from a name is a lookup by name across every image. Rule 1
   finds the type from code, and the name only checks it.
@@ -242,7 +269,8 @@ their static types (A10).
   slot names the class too, but needs `-frtti`, and the vtable's own symbol
   says the same without it.
 - **Precondition.** Every polymorphic class needs a virtual destructor.
-  - `-Wnon-virtual-dtor -Werror` enforces this, except for classes that declare
+  - In Xcode builds, `-Wnon-virtual-dtor -Werror`
+    (`GCC_WARN_NON_VIRTUAL_DESTRUCTOR`) enforces this, except for classes that declare
     a protected or private non-virtual destructor, `final` classes, and
     third-party code.
   - The rule also needs full `-g`.
@@ -263,7 +291,10 @@ their static types (A10).
   the `~` check, the base class comes back.
 - **Mutation**, checked by hand: making rule 1 return the base class makes rule
   2 refuse it.
-- In the HeapWalk suite, the two rules disagree on no object the walk reaches.
+- In the HeapWalk suite, the two rules disagree on no object the walk reaches
+  (the suite fails on any report it did not ask for),
+  including the 18 lambda wrappers of `Heap::addCoreConstraints` and
+  `RunLoop::Timer`'s, whose vtable name has a C++20 constraint.
 - A system-library object, which has no type on Darwin.
 - Null and unreadable addresses.
 - An image whose UUID does not match is refused.
@@ -358,7 +389,8 @@ never crashes, but it marks its result unverified.
 `g_jscConfig.startOfStructureHeap`. The walk derives that start from
 `structureStructure`, whose StructureID names itself.
 
-**Speed.** On a heap of 590,000 live cells, the walk takes under a second.
+**Speed.** On a heap of 861,716 live cells, the walk takes 0.8 s (Debug, Linux
+aarch64).
 
 **Test.** The target collects, allocates more objects, then is snapshotted at
 mya's safe point.
@@ -387,7 +419,9 @@ by its path.
    plus their `p_vaddr`, hold the `NT_GNU_BUILD_ID` note. These are three fixed
    structs (`Elf64_Ehdr`, `Elf64_Phdr`, `Elf64_Nhdr`), as the executable's
    `PT_PHDR` and `PT_DYNAMIC` already are. An image without a build-id is
-   reported and skipped.
+   reported and skipped. So is one whose mapping `maps` marks `(deleted)`, as
+   is `/proc/<pid>/exe`'s link: its file was replaced after it was loaded, and
+   the path names the new one.
 3. liblldb gets `AddModule(path, nullptr, buildID)` and
    `SetModuleLoadAddress(module, l_addr)`.
 
@@ -399,10 +433,13 @@ position-independent image.
   file readable. It needs `CAP_CHECKPOINT_RESTORE`, which makes the process
   non-dumpable; it needs a rule for which mapping holds the header; and liblldb
   caches modules by path, so every descriptor stays open for the process's life.
-- *Refusing mappings that `maps` marks `(deleted)`.* The mark appears only when
-  the old file was unlinked. lld, GNU ld, gold and `install` replace the file,
-  but `cp` rewrites it in place, and so does mold for an executable that is not
-  running, so a rebuilt image can keep its inode and no mark.
+- *Detecting a file rewritten in place*, which leaves no `(deleted)` mark.
+  `cp` does this, and so does mold for an executable that is not running.
+  The target's clean pages are the file's page cache, so the rewrite changes
+  them too: measured on Linux 6.1, a library's in-memory build-id reads as the
+  new file's after `cp`, and the process then crashes in the library's exit
+  handlers. Its build-id matches the new file, so liblldb accepts it. A11 leaves
+  this out.
 - *Comparing the mapping's device and inode with `stat` of the path.* On
   overlayfs, which containers use, `maps` reports the underlying file system's
   device and inode before Linux 6.8, and `stat` can report a per-layer pseudo
@@ -430,8 +467,9 @@ used.
 - The tests of patches 1 to 5, run on Linux.
 - Each image's path names the file `dladdr` gives for it.
 - `malloc`'s image is listed.
-- A copy of a loaded library, rebuilt with a different build-id and copied over
-  the original with `cp` after loading, is refused.
+- The target's executable, replaced after loading by a new file renamed over
+  it, is reported and left out of the images, while the target runs and after
+  it exits, and the objects of its other images still have their types.
 - The system-library object is a `std::runtime_error`, in libstdc++; libc has no
   polymorphic classes. It resolves through libstdc++'s separate debug info.
 
@@ -551,7 +589,7 @@ afterwards. A 64 GB reservation with little resident costs little.
 A safe point is a state the target enters on purpose and checks, not one mya
 infers from a snapshot.
 
-**Entering it.** `withMyaSafePoint(vm, function)` runs in the target. It lives
+**Entering it.** `withMyaSafePoint(roots, function)` runs in the target, on the roots' VM. It lives
 with the tests and changes nothing in JavaScriptCore:
 1. Take the VM's `JSLock`, so no other thread can allocate cells or sweep.
 2. Take a `DeferGC`, so this thread starts no collection.
@@ -587,7 +625,7 @@ tell an idle collector thread from a working one.
 **Goal.** One number, the reach, and a list of the largest misses that says what
 to teach the walk next.
 
-**`HeapWalk::reach(allocations, excluded, missedCount)`.** An allocation is
+**`HeapWalk::reach(allocations, excluded, listCount)`.** An allocation is
 reached if the walk reaches any address in it.
 - Every live cell reaches its allocation.
 - From the roots and every live cell, the walk uses `forEachField` on each
@@ -648,7 +686,9 @@ allocator.
   that it leaks, holding them only as integers. Each of the four is enumerated
   at its address, at least as large as it was allocated: libpas rounds up to
   its size class. A small and a large object freed just before the
-  enumeration are not enumerated.
+  enumeration are not enumerated. One object from each way WTF allocates from
+  libpas (small, large, aligned and compact `fastMalloc`, a TZone class and the
+  primitive Gigacage), leaked and excluded, is enumerated at its address.
 - **The reach.** The walk reaches the first two objects, and the leaked two are
   missed. A C array's last element is reached through the array.
 - **The percentage.** Excluding the leaked objects raises `percent()` by exactly
@@ -667,7 +707,7 @@ compile unit that defines `X::s_info` uses `X` whole (`CREATE_METHOD_TABLE(X)`
 takes `sizeof(X)` and `X`'s members), so it describes `X` completely:
 1. Read the cell's StructureID, decode it (patch 5), and read the Structure's
    `m_classInfo`.
-2. `SBTarget::ResolveSymbolContextForAddress(address, eSymbolContextVariable)`.
+2. `SBTarget::ResolveSymbolContextForAddress(address, eSymbolContextCompUnit | eSymbolContextVariable)`.
    A data address is in no compile unit's code ranges, so liblldb finds the
    global variable that contains it (`SymbolFileDWARF::GetGlobalAranges`) and
    fills in the compile unit that defines it. The address must be where the
@@ -685,8 +725,8 @@ takes `sizeof(X)` and `X`'s members), so it describes `X` completely:
 A `ClassInfo` that fails a step is reported, never guessed. A cell whose class is
 not found is counted, and the tests require none.
 
-**Cost.** On Darwin, liblldb resolves the address through the debug map to the
-one object file that defines it. On Linux, the first data address resolved in an
+**Cost.** On Darwin, liblldb resolves the address in the image's dSYM (Build
+and test). On Linux, the first data address resolved in an
 image makes liblldb list every compile unit's global variables once
 (`GetGlobalAranges`), which reads their DIEs but not the classes. Each compile
 unit's classes are listed once.
@@ -731,9 +771,10 @@ values of their own, so a reader recognises a base: a `Packed<T*>` is a
 | `WTF::HashTable` | Every bucket. The other members are walked as usual: a Debug `HashTable` has a `unique_ptr<Lock>`. |
 | `WTF::LazyUniqueRef`, `WTF::LazyRef` | `m_pointer`, unless `lazyTag` or `initializingTag` is set, as the template argument's type. |
 | `WTF::CompactPtr` (so `CompactRefPtr`) | `m_ptr`, decoded as `CompactPtr::decode` does. An outsized pointer, on a 36-bit build, is counted. |
-| `WTF::PackedAlignedPtr` (so `Packed<T*>`) | The bytes of `m_storage`, shifted left by the alignment when `PackedAlignedPtr` stores it shifted. The alignment is the second template argument (`SBType::GetTemplateArgumentValue`). |
+| `WTF::PackedAlignedPtr` (so `Packed<T*>`) | The bytes of `m_storage`, shifted left by the alignment's log2 when `PackedAlignedPtr` stores it shifted. The alignment is the second template argument (`SBType::GetTemplateArgumentValue`). |
 | `JSC::JSString` | `m_fiber`: a resolved string's `StringImpl`, unless `isRopeInPointer` is set; a rope's fibers are cells. |
 | `JSC::PropertyTable` | `m_indexVector`, less `isCompactFlag`, reaches the index buffer's allocation. |
+| `std::optional` | Its members, only when `_M_engaged` (libstdc++) or `__engaged_` (libc++) is set. An empty optional's storage holds whatever was there before, such as a `MarkedSpace::m_preciseAllocationSet` outside a conservative scan. |
 
 **Rejected: a reader for `std::unique_ptr<T[]>`.** It records no count: `new
 T[n]` puts `n` in a cookie only when `T` has a destructor (Itanium C++ ABI 2.7),
@@ -752,8 +793,11 @@ order in which the walk meets types.
 `HashSet`'s value, a `CompactPtr`, an initialized `LazyUniqueRef`, a
 `Packed<T*>`, a `PackedAlignedPtr<T, 256>` stored shifted, and a `JSString` built with `join` (so not an atom, and only the
 `JSString` holds its `StringImpl`). Each is reached only through its holder, and
-each is reached; removing a reader fails its case. An eighth, held only as the
-stale value of a deleted `HashMap` entry, is missed.
+each is reached; removing a reader fails its case. The `std::optional` reader has no planted
+case: without it, the in-process walk reads the VM's empty
+`m_preciseAllocationSet` and reports a HashTable it cannot read. The `StringImpl`'s reference count is
+one, so only the `JSString` holds it. An eighth, held only as the stale value
+of a deleted `HashMap` entry, is missed.
 
 ### 12. How much of the heap the walk types
 
@@ -792,7 +836,8 @@ the walk read at its start. A class that recurs there has trailing storage or
 a missing reader.
 
 **Test.** In process and out of process:
-- Each planted object of patch 11 is typed whole.
+- Each planted object of patch 11 is typed whole: the `StringImpl` as its
+  class, without the characters after it.
 - **Mutations**, checked by hand: reading cells as bare `JSCell`s (no patch 10),
   or removing a reader of patch 11, lowers the typed percentage.
 
@@ -804,7 +849,6 @@ On the test's VM, the misses fall into these groups, largest first:
   `Interpreter::opcodeIDTable()::opcodeIDTable`.
 - **JIT code's memory**, behind `CodePtr::m_value`, a `void*`.
 - **System malloc** (A3), which shows up as anonymous memory.
-- **Untyped bytes of reached allocations**, such as dead cells in a MarkedBlock.
 - **WTF's `ParkingLot` table**, held by a static.
 - **Classes no compile unit of their image defines**, such as
   `CodeBlock::m_jitData`'s.
@@ -822,8 +866,8 @@ static data, not better readers.
   unless that file gets `-fobjc-arc`.
 - **Darwin but not Cocoa.** JSCOnly on macOS is `OS(DARWIN)` but not
   `PLATFORM(COCOA)`: `MachSendRight` is empty there, so `corpse/` must not use it.
-  It also emits no dSYMs; liblldb reaches the debug info through the debug map to
-  the `.o` files.
+  It emits no dSYMs of its own; under `ENABLE_MYA_HEAP` CMake runs `dsymutil`
+  after each link.
 - **The build-system marker.** `build-jsc --jsc-only` or `--cmake` switches
   `WebKitBuild/BuildSystem` to CMake. The Xcode harness run then looks in
   `cmake-mac`, prints "not built", and still reports 0 failures. Run
@@ -833,8 +877,9 @@ static data, not better readers.
 - **CodeSign.** A rebuild after a failed build can fail in CodeSign on a stale
   `JavaScriptCore.framework/Versions/A/JavaScriptCore.cstemp`. Delete that file.
 - **Warnings.** Xcode builds the tests with `-Werror=exit-time-destructors`, so a
-  static fixture with a destructor needs `NeverDestroyed`. Both builds use
-  `-Wnon-virtual-dtor -Werror`. Only Xcode builds `corpse/` with
+  static fixture with a destructor needs `NeverDestroyed`. Only Xcode uses
+  `-Wnon-virtual-dtor`, so a CMake build does not catch a missing virtual
+  destructor. Only Xcode builds `corpse/` with
   `-Werror -Wunsafe-buffer-usage` and `-Wunnecessary-virtual-specifier`: search a
   `Vector`'s `span()` rather than the `Vector`, whose iterators are raw pointers,
   bracket libpas's headers with `WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN`/`END` as
@@ -870,9 +915,35 @@ static data, not better readers.
 
 ## Open
 
-- Whether default symbol visibility under `ENABLE_MYA_HEAP` is needed, and by
-  which test.
-- The walk's speed, with cells read as their classes, on a 590,000-cell heap.
-- How long the target's libpas enumeration takes on a large heap.
-- Whether every heap the process uses, other than the JS heap's blocks, is
-  enumerated on both platforms.
+Measured on Linux aarch64 (Debian 12, Debug), on the HeapWalk fixture with
+`lateScript` raised to 290,000 objects: 861,716 live cells and 297,370 libpas
+allocations, 36.6 MB. Darwin is not measured.
+
+| Step | Time |
+|---|---|
+| The target's libpas enumeration | 0.68 s |
+| The heap walk alone (`forEachLiveCell`) | 0.81 s |
+| Every live cell's class (patch 10) | 256 s cold, 46 s once liblldb's caches are warm |
+| The reach and the typed coverage (patches 9 to 12) | 206 s, for 99.6% reached and 60.6% typed |
+
+A profile of the last two shows where the time goes:
+- liblldb's `SBType::GetStaticFieldWithName`, run on every class of a compile
+  unit for each `ClassInfo` (patch 10), is 27% of the samples. It is cold-cache
+  cost, which the cached second run mostly avoids.
+- `Memory` maps and releases a region for every read, which is about 45%:
+  `classInfoOf` reading each cell's Structure, and `TargetValue::readWhole`
+  reading each field. A cache of the last mapped region would remove most of it.
+- `TargetType::name()` copies a name for every class value, to pick a reader
+  (patch 11), which is 11%.
+
+Still open:
+- Whether default symbol visibility under `ENABLE_MYA_HEAP` is needed on
+  Darwin. On Linux it is not: with every symbol hidden (8,644 exported from
+  libJavaScriptCore, against 252,098), all 809 assertions pass and the reach is
+  unchanged.
+- Whether every heap is enumerated on Darwin. On Linux it is, as far as WTF
+  allocates from libpas: the HeapWalk suite allocates one object each with
+  small, large (8 MB), aligned and compact `fastMalloc`, a TZone class and the
+  primitive Gigacage, and libpas enumerates each one at its address.
+- Whether the walk should be faster. At about 240 µs a cell, a web process's
+  heap of a few million cells takes about 10 minutes to reach.

@@ -357,9 +357,13 @@ if (NOT HAS_RUN_WEBKIT_COMMON)
 
     # This has to come after Options${PORT} to see ENABLE_MYA_HEAP
     if (ENABLE_MYA_HEAP)
-        set(CMAKE_C_VISIBILITY_PRESET default)
-        set(CMAKE_CXX_VISIBILITY_PRESET default)
-        set(CMAKE_VISIBILITY_INLINES_HIDDEN OFF)
+        # On Linux every test passes with hidden symbols: the walk reads the
+        # symbol table, which keeps them. Darwin has not been checked.
+        if (APPLE)
+            set(CMAKE_C_VISIBILITY_PRESET default)
+            set(CMAKE_CXX_VISIBILITY_PRESET default)
+            set(CMAKE_VISIBILITY_INLINES_HIDDEN OFF)
+        endif ()
         # So that each image describes the types it uses.
         WEBKIT_APPEND_GLOBAL_COMPILER_FLAGS(-fstandalone-debug)
         # The vtable check needs every destructor's linkage name, and with

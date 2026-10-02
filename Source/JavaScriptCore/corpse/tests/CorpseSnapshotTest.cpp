@@ -44,6 +44,7 @@
 #include <mach/mach.h>
 #else
 #include <sys/stat.h>
+#include <sys/wait.h>
 #endif
 #include <unistd.h>
 
@@ -191,6 +192,29 @@ static void testCopies()
         TEST_ASSERT(!kill(secondCopy, 0), "and leaves the copy of another snapshot");
     }
     TEST_ASSERT(kill(secondCopy, 0) && errno == ESRCH, "which ends with its own snapshot");
+
+    // Out of process, the copy is the target's child: released, it ends, and
+    // stays the target's zombie until the target exits and this process, its
+    // subreaper, inherits and reaps it.
+    analyzeOutOfProcessThenRelease(createChangingGlobal, analyzeChangingGlobal, [](pid_t target, pid_t copy) {
+        auto isZombie = [&] {
+            auto stat = JSC::Corpse::readProcFile(copy, "stat");
+            size_t end = stat ? stat->rfind(')') : std::string::npos;
+            return end != std::string::npos && end + 2 < stat->size() && (*stat)[end + 2] == 'Z';
+        };
+        bool ended = false;
+        for (unsigned attempt = 0; attempt < 1000 && !ended; ++attempt) {
+            ended = isZombie();
+            if (!ended)
+                usleep(10 * 1000);
+        }
+        TEST_ASSERT(ended, "releasing a snapshot of another process ends its copy");
+        kill(target, SIGKILL);
+        while (waitpid(target, nullptr, 0) < 0 && errno == EINTR) { }
+        pid_t reaped = -1;
+        while ((reaped = waitpid(copy, nullptr, 0)) < 0 && errno == EINTR) { }
+        TEST_ASSERT(reaped == copy, "and once the target exits, this process reaps it");
+    });
 #endif
 }
 

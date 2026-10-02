@@ -245,6 +245,12 @@ void analyzeInAndOutOfProcess(JSC::Corpse::Address (*create)(), NOESCAPE const F
 // an object create() reports itself, from a state it never returns from.
 void analyzeInSeparateProcess(JSC::Corpse::Address (*create)(), NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address object)>& analyze);
 
+#if OS(LINUX)
+// create() an object in a separate process, analyze() its snapshot, release the
+// snapshot, then call afterRelease() while the target still runs.
+void analyzeOutOfProcessThenRelease(JSC::Corpse::Address (*create)(), NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address object)>& analyze, NOESCAPE const Function<void(pid_t target, pid_t copy)>& afterRelease);
+#endif
+
 // create() an object in a separate process, snapshot it, and analyze() the
 // snapshot only after that process has exited.
 void analyzeAfterTargetExits(JSC::Corpse::Address (*create)(), NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address object)>& analyze);
@@ -253,6 +259,8 @@ void analyzeAfterTargetExits(JSC::Corpse::Address (*create)(), NOESCAPE const Fu
 // replace that copy's file with another executable once the object is
 // reported, then snapshot it and analyze() it: a rebuilt executable.
 void analyzeAfterExecutableReplaced(JSC::Corpse::Address (*create)(), NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address object)>& analyze);
+// The same, with the snapshot analyzed only after the target has exited.
+void analyzeAfterExecutableReplacedAndTargetExits(JSC::Corpse::Address (*create)(), NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address object)>& analyze);
 
 // The main function for a copy of this process launched as `--target <offset>`: runs the
 // create function at `offset` into this executable and holds its object.

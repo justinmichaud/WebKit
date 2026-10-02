@@ -34,39 +34,52 @@
 #include <JavaScriptCore/CorpseThread.h>
 #include <string>
 #include <string_view>
+#include <wtf/NeverDestroyed.h>
 
 namespace JSCToolsTest {
 
+using JSC::Corpse::Address;
+using JSC::Corpse::Snapshot;
 using JSC::Corpse::Thread;
 
-void testThreads()
+static constexpr const char* alphaName = "jsctools alpha";
+static constexpr const char* betaName = "jsctools beta";
+// Longer than a pthread name can hold, so that truncation is exercised.
+static constexpr const char* longName =
+    "jsctools a thread whose name is far too long to fit in the space a pthread name has";
+
+static ParkedThreads& parkedThreads()
 {
-    SuiteTracer tracer("Thread");
-    if (!tracer.shouldRun())
+    static NeverDestroyed<ParkedThreads> parked;
+    return parked;
+}
+
+struct ParkedThreadsFixture {
+    uint64_t count;
+};
+
+// In the target: threads parked under known names, until the process exits.
+static Address createParkedThreads()
+{
+    static ParkedThreadsFixture fixture { };
+    ParkedThreads& parked = parkedThreads();
+    bool spawned = parked.spawn(alphaName) && parked.spawn(betaName) && parked.spawn(longName);
+    if (!spawned || !parked.waitUntilAllParked())
+        return { };
+    fixture.count = parked.count();
+    return Address { &fixture };
+}
+
+static void analyzeParkedThreads(Snapshot& snapshot, Address address)
+{
+    auto fixture = snapshot.memory().ptr<ParkedThreadsFixture>(address);
+    TEST_ASSERT(fixture && fixture->count == 3, "the target's threads parked themselves");
+    if (!fixture)
         return;
 
-    static constexpr const char* alphaName = "jsctools alpha";
-    static constexpr const char* betaName = "jsctools beta";
-    // Longer than a pthread name can hold, so that truncation is exercised.
-    static constexpr const char* longName =
-        "jsctools a thread whose name is far too long to fit in the space a pthread name has";
-
-    ParkedThreads parked;
-    TEST_ASSERT(parked.spawn(alphaName), "a named thread starts");
-    TEST_ASSERT(parked.spawn(betaName), "a second named thread starts");
-    TEST_ASSERT(parked.spawn(longName), "a thread with an overlong name starts");
-    if (!parked.waitUntilAllParked()) {
-        TEST_ASSERT(false, "the spawned threads parked themselves");
-        return;
-    }
-
-    SelfSnapshot self;
-    if (!self.isValid())
-        return;
-
-    const Vector<Thread>& threads = self.snapshot().threads();
-    TEST_ASSERT(threads.size() >= 1 + parked.count(),
-        "the corpse holds at least this process's own threads");
+    const Vector<Thread>& threads = snapshot.threads();
+    TEST_ASSERT(threads.size() >= 1 + fixture->count,
+        "the snapshot holds at least the target's own threads");
 
     bool foundAlpha = false;
     bool foundBeta = false;
@@ -74,19 +87,25 @@ void testThreads()
     std::string expectedTruncated(std::string_view(longName).substr(0, ParkedThreads::maximumNameLength));
 
     for (const Thread& thread : threads) {
+        bool parked = true;
         if (thread.name() == alphaName)
             foundAlpha = true;
         else if (thread.name() == betaName)
             foundBeta = true;
         else if (thread.name() == expectedTruncated)
             foundTruncated = true;
+        else
+            parked = false;
 
         TEST_ASSERT(thread.id(), "every thread has an identifier");
         TEST_ASSERT(thread.name().length() <= ParkedThreads::maximumNameLength,
             "no thread name is longer than a pthread name can be");
 
-        // The stack is defined as the region the stack pointer points into, so if
-        // both were read they have to agree.
+        // A parked thread is blocked, so its stack pointer was read. A running
+        // thread's may not be. The stack is the region the stack pointer points
+        // into, so if both were read they have to agree.
+        if (parked)
+            TEST_ASSERT(thread.stackPointer(), "a parked thread has a stack pointer");
         if (thread.stackPointer()) {
             TEST_ASSERT(thread.hasStack(), "a thread with a stack pointer has a stack region");
             if (thread.hasStack()) {
@@ -101,15 +120,24 @@ void testThreads()
             "a thread's run state has a name");
     }
 
-    TEST_ASSERT(foundAlpha, "a named thread appears in the corpse under its name");
+    TEST_ASSERT(foundAlpha, "a named thread appears in the snapshot under its name");
     TEST_ASSERT(foundBeta, "a second named thread appears under its name");
     TEST_ASSERT(foundTruncated, "an overlong thread name appears cut to what a pthread name holds");
 
     // Reading the threads is the expensive part, so it happens once.
-    const Vector<Thread>& again = self.snapshot().threads();
+    const Vector<Thread>& again = snapshot.threads();
     TEST_ASSERT(&again == &threads, "the threads of a snapshot are read once and kept");
+}
 
-    parked.stopAndJoin();
+void testThreads()
+{
+    SuiteTracer tracer("Thread");
+    if (!tracer.shouldRun())
+        return;
+
+    analyzeInAndOutOfProcess(createParkedThreads, analyzeParkedThreads);
+    // The target's threads end with it; this process's are stopped here.
+    parkedThreads().stopAndJoin();
 }
 
 } // namespace JSCToolsTest

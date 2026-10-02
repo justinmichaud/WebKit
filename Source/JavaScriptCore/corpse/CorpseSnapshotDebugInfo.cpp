@@ -38,7 +38,6 @@
 #include "CorpseLimits.h"
 #include "CorpseProcess.h"
 #include "CorpseSnapshot.h"
-#include <cxxabi.h>
 #include <lldb/API/LLDB.h>
 #include <mutex>
 #include <optional>
@@ -304,14 +303,75 @@ const TargetType* SnapshotDebugInfo::classOfVTable(Snapshot& snapshot, Address v
     return nullptr;
 }
 
-// abi::__cxa_demangle's spelling of a linkage name, or empty.
-static std::string demangled(const char* linkageName)
+// Where an unnamed local type, such as a lambda's closure type, starts in a
+// demangled name, and its length; or no length.
+static size_t unnamedLocalTypeLength(std::string_view name)
 {
-    int status = 0;
-    std::unique_ptr<char, decltype(&free)> result { abi::__cxa_demangle(linkageName, nullptr, nullptr, &status), &free };
-    if (status || !result)
-        return { };
-    return result.get();
+    auto skipDigits = [&](size_t index) {
+        while (index < name.size() && name[index] >= '0' && name[index] <= '9')
+            ++index;
+        return index;
+    };
+    auto skipParentheses = [&](size_t index) -> size_t {
+        unsigned depth = 0;
+        for (; index < name.size(); ++index) {
+            if (name[index] == '(')
+                ++depth;
+            else if (name[index] == ')' && depth && !--depth)
+                return index + 1;
+        }
+        return 0;
+    };
+    if (name.starts_with("$_"))
+        return skipDigits(2);
+    if (name.starts_with("'unnamed"))
+        return name.find('\'', 1) == std::string_view::npos ? 0 : name.find('\'', 1) + 1;
+    if (name.starts_with("'lambda")) {
+        size_t index = skipDigits(7);
+        if (index >= name.size() || name[index] != '\'')
+            return 0;
+        return skipParentheses(index + 1);
+    }
+    if (name.starts_with("{lambda(")) {
+        size_t end = name.find('}');
+        return end == std::string_view::npos ? 0 : end + 1;
+    }
+    return 0;
+}
+
+// A demangled name with each template or function argument that is an
+// unnamed local type spelled '?'. The two spellings compared below disagree on
+// such a type: the symbol table's names it as the compiler numbered it, in its
+// enclosing function as declared, and liblldb's as it numbered it again in the
+// class it rebuilt, in that function as instantiated. Only another unnamed
+// local type in the same position matches one, and in a build that folds no
+// functions, rule 1 has no other class to confuse it with.
+static std::string withUnnamedLocalTypesErased(std::string_view name)
+{
+    std::string result;
+    result.reserve(name.size());
+    Vector<size_t, 8> argumentStarts;
+    size_t index = 0;
+    while (index < name.size()) {
+        if (size_t length = unnamedLocalTypeLength(name.substr(index))) {
+            result.resize(argumentStarts.isEmpty() ? 0 : argumentStarts.last());
+            result += '?';
+            index += length;
+            continue;
+        }
+        char character = name[index++];
+        result += character;
+        if (character == '<' || character == '(')
+            argumentStarts.append(result.size());
+        else if ((character == '>' || character == ')') && !argumentStarts.isEmpty())
+            argumentStarts.removeLast();
+        else if (character == ',' && !argumentStarts.isEmpty()) {
+            if (index < name.size() && name[index] == ' ')
+                result += name[index++];
+            argumentStarts.last() = result.size();
+        }
+    }
+    return result;
 }
 
 // Whether `member`, a demangled member function, is a member of the class
@@ -339,15 +399,16 @@ static bool isMemberOf(std::string_view member, std::string_view className)
 // A member function the class declares, demangled: its destructor if liblldb
 // lists one, and otherwise any other. liblldb leaves the implicit members out
 // of a class, so a class whose destructor is implicit lists none. liblldb
-// computes each one's linkage name with clang's mangler from the class itself.
+// computes each one's linkage name with clang's mangler from the class itself,
+// and demangles it with LLVM's demangler, as it does the symbol table's names.
 static std::string declaredMember(lldb::SBType& type)
 {
     std::string result;
     uint32_t count = type.GetNumberOfMemberFunctions();
     for (uint32_t index = 0; index < count; ++index) {
         lldb::SBTypeMemberFunction function = type.GetMemberFunctionAtIndex(index);
-        const char* linkageName = function.GetMangledName();
-        std::string member = linkageName ? demangled(linkageName) : std::string { };
+        const char* demangledName = function.GetDemangledName();
+        std::string member = demangledName ? demangledName : std::string { };
         if (member.empty())
             continue;
         if (function.GetKind() == lldb::eMemberFunctionKindDestructor)
@@ -372,7 +433,10 @@ bool SnapshotDebugInfo::vtableSymbolNames(Address vtable, const TargetType& type
         return false;
     }
     // Anything but a complete object's vtable, such as a construction vtable (_ZTC), names no class.
-    std::string vtableClass = std::string_view { vtableName }.starts_with("_ZTV") ? demangled(vtableName) : std::string { };
+    // The name is liblldb's, from the demangler that spelled the member's.
+    // Debian 12's __cxa_demangle cannot demangle a C++20 constraint.
+    const char* vtableDemangledName = std::string_view { vtableName }.starts_with("_ZTV") ? symbol.GetName() : nullptr;
+    std::string vtableClass = vtableDemangledName ? vtableDemangledName : std::string { };
     constexpr std::string_view vtablePrefix = "vtable for ";
     if (!vtableClass.starts_with(vtablePrefix)) {
         CORPSE_REPORT("The vtable at 0x%llx is in '%s', which is not a class's vtable", vtable.toTargetVMAddress(), vtableName);
@@ -388,7 +452,7 @@ bool SnapshotDebugInfo::vtableSymbolNames(Address vtable, const TargetType& type
         CORPSE_REPORT("'%s', the class of the destructor in the vtable at 0x%llx, declares no member function with a linkage name", type.name().legacyCStringPointer(), vtable.toTargetVMAddress());
         return false;
     }
-    if (!isMemberOf(member, vtableClass)) {
+    if (!isMemberOf(withUnnamedLocalTypesErased(member), withUnnamedLocalTypesErased(vtableClass))) {
         CORPSE_REPORT("The vtable at 0x%llx is the vtable of '%s', but the class its destructor gives declares '%s'", vtable.toTargetVMAddress(), vtableClass.c_str(), member.c_str());
         return false;
     }

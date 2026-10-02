@@ -203,7 +203,12 @@ static std::optional<Address> loaderDebugState(Memory& memory, int pid)
 struct FileStart {
     uint64_t address;
     std::string path;
+    // The kernel marks a mapping " (deleted)" when its file was unlinked, as a
+    // linker, install or a package manager does when it writes a new file at the path.
+    bool replaced { false };
 };
+
+static constexpr std::string_view deletedSuffix = " (deleted)";
 
 static Vector<FileStart> fileStarts(int pid)
 {
@@ -238,7 +243,11 @@ static Vector<FileStart> fileStarts(int pid)
         if (std::from_chars(range.data(), range.data() + range.size(), start, 16).ec != std::errc { }
             || std::from_chars(fields[2].data(), fields[2].data() + fields[2].size(), offset, 16).ec != std::errc { } || offset)
             continue;
-        result.append({ start, std::string { line.substr(pathStart) } });
+        std::string_view path = line.substr(pathStart);
+        bool replaced = path.ends_with(deletedSuffix);
+        if (replaced)
+            path.remove_suffix(deletedSuffix.size());
+        result.append({ start, std::string { path }, replaced });
     }
     return result;
 }
@@ -310,9 +319,14 @@ Vector<Image> Image::collect(Snapshot& snapshot)
         }
         next = Address { entry->l_next };
         auto path = readPath(memory, Address { entry->l_name });
-        // Only the executable's entry has no name.
-        if (path && !path->length())
+        // Only the executable's entry has no name. /proc/<pid>/exe marks a
+        // replaced executable as maps does.
+        if (path && !path->length()) {
             path = executablePathOf(pid);
+            std::string_view exe { path->length() ? path->legacyCStringPointer() : "" };
+            if (exe.ends_with(deletedSuffix))
+                path = UTF8CString(byteCast<char8_t>(std::span { exe.data(), exe.size() - deletedSuffix.size() }));
+        }
         if (!path || !path->length()) {
             Diagnostics::count(DiagnosticCounter::ImagesWithoutPath);
             continue;
@@ -321,11 +335,19 @@ Vector<Image> Image::collect(Snapshot& snapshot)
         // The file's lowest mapping at offset 0 at or above its slide is the
         // loader's; another, such as one liblldb maps in this process, is lower.
         std::unique_ptr<char, decltype(&free)> canonicalPath { realpath(path->legacyCStringPointer(), nullptr), &free };
-        std::optional<uint64_t> header;
+        const FileStart* fileStart = nullptr;
         for (const FileStart& start : starts) {
-            if (canonicalPath && start.path == canonicalPath.get() && start.address >= entry->l_addr && (!header || start.address < *header))
-                header = start.address;
+            if (canonicalPath && start.path == canonicalPath.get() && start.address >= entry->l_addr && (!fileStart || start.address < fileStart->address))
+                fileStart = &start;
         }
+        if (fileStart && fileStart->replaced) {
+            // The file at the path is another, which liblldb would read as this image.
+            CORPSE_REPORT("The file of the image '%s' of pid %d was replaced after it was loaded", path->legacyCStringPointer(), pid);
+            continue;
+        }
+        std::optional<uint64_t> header;
+        if (fileStart)
+            header = fileStart->address;
         if (!header) {
             // The vDSO, which no file holds.
             Diagnostics::count(DiagnosticCounter::ImagesWithoutFile);

@@ -389,7 +389,7 @@ static bool readAll(int fd, std::span<uint8_t> destination)
     return true;
 }
 
-static void spawnAndAnalyze(const char* executable, char* const* arguments, TargetAfterSnapshot after, NOESCAPE const Function<void()>& afterReport, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
+static void spawnAndAnalyze(const char* executable, char* const* arguments, TargetAfterSnapshot after, NOESCAPE const Function<void()>& afterReport, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze, NOESCAPE const Function<void(pid_t target, pid_t copy)>& afterRelease)
 {
     // Every end is close-on-exec, so that no other spawned program keeps one.
     std::array<int, 2> addressPipe { -1, -1 };
@@ -463,6 +463,8 @@ static void spawnAndAnalyze(const char* executable, char* const* arguments, Targ
         while (waitpid(child, nullptr, 0) < 0 && errno == EINTR) { }
     }
     analyze(*snapshot, JSC::Corpse::Address { address });
+    snapshot = nullptr;
+    afterRelease(child, static_cast<pid_t>(copy));
 }
 
 static std::optional<uint64_t> createOffset(CreateTargetObject create)
@@ -476,7 +478,7 @@ static std::optional<uint64_t> createOffset(CreateTargetObject create)
     return createAddress - executableBase();
 }
 
-static void analyzeOutOfProcess(const char* executablePath, CreateTargetObject create, TargetAfterSnapshot after, NOESCAPE const Function<void()>& afterReport, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
+static void analyzeOutOfProcess(const char* executablePath, CreateTargetObject create, TargetAfterSnapshot after, NOESCAPE const Function<void()>& afterReport, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze, NOESCAPE const Function<void(pid_t, pid_t)>& afterRelease = [](pid_t, pid_t) { })
 {
     auto offset = createOffset(create);
     if (!offset)
@@ -488,7 +490,7 @@ static void analyzeOutOfProcess(const char* executablePath, CreateTargetObject c
         const_cast<char*>(offsetText.legacyCStringPointer()),
         nullptr
     };
-    spawnAndAnalyze(executablePath, arguments, after, afterReport, analyze);
+    spawnAndAnalyze(executablePath, arguments, after, afterReport, analyze, afterRelease);
 }
 
 static UTF8CString thisExecutablePath()
@@ -520,6 +522,15 @@ void analyzeInSeparateProcess(CreateTargetObject create, NOESCAPE const Function
     analyzeOutOfProcess(create, TargetAfterSnapshot::KeepsRunning, analyze);
 }
 
+#if OS(LINUX)
+void analyzeOutOfProcessThenRelease(CreateTargetObject create, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze, NOESCAPE const Function<void(pid_t target, pid_t copy)>& afterRelease)
+{
+    UTF8CString executablePath = thisExecutablePath();
+    if (!executablePath.isNull())
+        analyzeOutOfProcess(executablePath.legacyCStringPointer(), create, TargetAfterSnapshot::KeepsRunning, [] { }, analyze, afterRelease);
+}
+#endif
+
 void analyzeAfterTargetExits(CreateTargetObject create, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
 {
     analyzeOutOfProcess(create, TargetAfterSnapshot::Exits, analyze);
@@ -548,7 +559,7 @@ static bool copyFile(const char* from, const char* to)
     return copied;
 }
 
-void analyzeAfterExecutableReplaced(CreateTargetObject create, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
+static void analyzeAfterExecutableReplaced(CreateTargetObject create, TargetAfterSnapshot after, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
 {
     UTF8CString executablePath = thisExecutablePath();
     if (executablePath.isNull())
@@ -564,11 +575,21 @@ void analyzeAfterExecutableReplaced(CreateTargetObject create, NOESCAPE const Fu
     TEST_ASSERT(copied, "a copy of this executable is made");
     if (!copied)
         return;
-    analyzeOutOfProcess(copyPath.legacyCStringPointer(), create, TargetAfterSnapshot::KeepsRunning, [&] {
+    analyzeOutOfProcess(copyPath.legacyCStringPointer(), create, after, [&] {
         // A new file at the path, as a linker writes one; the target keeps the old one mapped.
         bool replaced = copyFile("/usr/bin/true", replacementPath.legacyCStringPointer()) && !rename(replacementPath.legacyCStringPointer(), copyPath.legacyCStringPointer());
         TEST_ASSERT(replaced, "the target's executable is replaced by another");
     }, analyze);
+}
+
+void analyzeAfterExecutableReplaced(CreateTargetObject create, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
+{
+    analyzeAfterExecutableReplaced(create, TargetAfterSnapshot::KeepsRunning, analyze);
+}
+
+void analyzeAfterExecutableReplacedAndTargetExits(CreateTargetObject create, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
+{
+    analyzeAfterExecutableReplaced(create, TargetAfterSnapshot::Exits, analyze);
 }
 
 #endif // ENABLE(MYA)

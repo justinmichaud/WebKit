@@ -31,6 +31,7 @@
 #if HAVE(LLDB)
 
 #include <JavaScriptCore/CorpseAddress.h>
+#include <JavaScriptCore/CorpseImage.h>
 #include <JavaScriptCore/CorpseRemote.h>
 #include <JavaScriptCore/CorpseSnapshot.h>
 #include <JavaScriptCore/CorpseSnapshotDebugInfo.h>
@@ -59,6 +60,7 @@ namespace JSCToolsTest {
 namespace {
 
 using JSC::Corpse::Address;
+using JSC::Corpse::Image;
 using JSC::Corpse::Remote;
 using JSC::Corpse::RemoteTraits;
 using JSC::Corpse::Snapshot;
@@ -170,6 +172,8 @@ void analyzeCrossImageObject(Snapshot& snapshot, Address object)
     auto value = completeObjectAt(snapshot, object);
     if (!value)
         return;
+    TEST_ASSERT(std::string_view { value->type().name().legacyCStringPointer() } == "JSCToolsTest::(anonymous namespace)::CrossImageFireDetail",
+        "the dynamic type is the test's own class, in its anonymous namespace");
     TEST_ASSERT_EQ(value->type().byteSize(), sizeof(CrossImageFireDetail), "the debug info gives the class its size");
     auto marker = value->properField("m_marker").as<uint64_t>();
     TEST_ASSERT(marker && *marker == crossImageMarker, "the field holds the target's value");
@@ -191,6 +195,8 @@ void analyzeLaterDestructorObject(Snapshot& snapshot, Address object)
     auto value = completeObjectAt(snapshot, object);
     if (!value)
         return;
+    TEST_ASSERT(std::string_view { value->type().name().legacyCStringPointer() } == "JSCToolsTest::(anonymous namespace)::LaterDestructor",
+        "a class whose slot 0 is an inherited function is found by its destructor, not as its base");
     TEST_ASSERT_EQ(value->type().byteSize(), sizeof(LaterDestructor), "a class whose destructor is not its first virtual function is found by its destructor");
     auto marker = value->properField("m_marker").as<uint64_t>();
     TEST_ASSERT(marker && *marker == crossImageMarker, "the field holds the target's value");
@@ -266,7 +272,21 @@ void analyzeObjectsInReplacedExecutable(Snapshot& snapshot, Address address)
     // process, and would find the original executable among them. A rebuilt
     // image is one liblldb has not seen.
     lldb::SBDebugger::MemoryPressureDetected();
+#if OS(LINUX)
+    // The kernel marks the old file's mappings deleted, and the image is
+    // reported and left out, so liblldb never reads the new file as it.
+    RefPtr<SnapshotDebugInfo> debugInfo;
+    {
+        ExpectedErrors expectedErrors;
+        debugInfo = SnapshotDebugInfo::create(snapshot);
+    }
+    TEST_ASSERT(std::ranges::none_of(snapshot.images(), [](const Image& image) {
+        return std::string_view { image.path().legacyCStringPointer() }.find(".replaced-") != std::string_view::npos;
+    }), "the replaced executable is not among the images");
+#else
+    // liblldb refuses the new file, whose UUID is not the image's.
     RefPtr debugInfo = SnapshotDebugInfo::create(snapshot);
+#endif
     TEST_ASSERT(debugInfo, "a snapshot whose executable was replaced still has the debug info of its other images");
     if (!objects || !debugInfo)
         return;
@@ -277,6 +297,24 @@ void analyzeObjectsInReplacedExecutable(Snapshot& snapshot, Address address)
     }
     const TargetType* type = debugInfo->dynamicTypeAt(snapshot, Address { objects->sameImage }, completeObject);
     TEST_ASSERT(type && std::string_view { type->name().legacyCStringPointer() } == "JSC::StringFireDetail", "a class of JavaScriptCore still has its type");
+}
+
+// No object: the analysis asks about addresses that hold none.
+Address createNothing()
+{
+    return { };
+}
+
+void analyzeNullAndUnreadable(Snapshot& snapshot, Address)
+{
+    RefPtr debugInfo = SnapshotDebugInfo::create(snapshot);
+    TEST_ASSERT(debugInfo, "a snapshot has debug info");
+    if (!debugInfo)
+        return;
+    Address completeObject;
+    ExpectedErrors expectedErrors(2);
+    TEST_ASSERT(!debugInfo->dynamicTypeAt(snapshot, Address { }, completeObject), "a null address has no dynamic type");
+    TEST_ASSERT(!debugInfo->dynamicTypeAt(snapshot, Address { static_cast<uint64_t>(0x10) }, completeObject), "unreadable memory has no dynamic type");
 }
 
 // What the container wrappers read. The class is polymorphic so that its vtable gives its type.
@@ -394,21 +432,11 @@ void testDebugInfo()
     analyzeAfterTargetExits(createSystemLibraryObject, analyzeSystemLibraryObject);
     analyzeAfterTargetExits(createContainers, analyzeContainers);
 
-    analyzeAfterExecutableReplaced(createObjectsInBothImages, analyzeObjectsInReplacedExecutable);
+    analyzeAfterTargetExits(createNothing, analyzeNullAndUnreadable);
+    analyzeAfterExecutableReplacedAndTargetExits(createObjectsInBothImages, analyzeObjectsInReplacedExecutable);
 
-    {
-        RefPtr<JSC::Corpse::Process> process = JSC::Corpse::Process::create(getpid());
-        TEST_ASSERT(process->attach(), "attaching to this process succeeds");
-        Snapshot snapshot(process);
-        RefPtr debugInfo = SnapshotDebugInfo::create(snapshot);
-        TEST_ASSERT(debugInfo, "a snapshot has debug info");
-        if (debugInfo) {
-            Address completeObject;
-            ExpectedErrors expectedErrors(2);
-            TEST_ASSERT(!debugInfo->dynamicTypeAt(snapshot, Address { }, completeObject), "a null address has no dynamic type");
-            TEST_ASSERT(!debugInfo->dynamicTypeAt(snapshot, Address { static_cast<uint64_t>(0x10) }, completeObject), "unreadable memory has no dynamic type");
-        }
-    }
+    analyzeAfterExecutableReplaced(createObjectsInBothImages, analyzeObjectsInReplacedExecutable);
+    analyzeInAndOutOfProcess(createNothing, analyzeNullAndUnreadable);
 }
 
 #else // No SB API, so there is nothing to ask.

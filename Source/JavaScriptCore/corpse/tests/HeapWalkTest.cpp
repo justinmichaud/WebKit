@@ -78,6 +78,7 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 #include <wtf/NeverDestroyed.h>
 #include <wtf/Packed.h>
 #include <wtf/StdLibExtras.h>
+#include <wtf/TZoneMallocInlines.h>
 #include <wtf/Vector.h>
 #include <wtf/text/ASCIILiteral.h>
 #include <wtf/text/MakeString.h>
@@ -124,6 +125,28 @@ constexpr ASCIILiteral lateScript = "globalThis.late = [];\n"
 
 constexpr std::array<size_t, 2> leakedSizes { 5000, 7000 };
 constexpr std::array<size_t, 2> freedSizes { 4000, 300000 };
+
+// One object from each way WTF allocates from libpas, leaked, so that the
+// enumeration is seen to cover every heap they come from.
+struct TZoneProbe {
+    WTF_MAKE_TZONE_ALLOCATED(TZoneProbe);
+public:
+    std::array<uint64_t, 12> words { };
+};
+WTF_MAKE_TZONE_ALLOCATED_IMPL(TZoneProbe);
+
+enum class Probe : uint8_t { Small, Large, Aligned, Compact, TZone, Gigacage };
+constexpr size_t numberOfProbes = static_cast<size_t>(Probe::Gigacage) + 1;
+constexpr std::array<ASCIILiteral, numberOfProbes> probeNames {
+    "a small fastMalloc object"_s,
+    "a large fastMalloc object"_s,
+    "a fastAlignedMalloc object"_s,
+    "a fastCompactMalloc object"_s,
+    "a TZone-allocated object"_s,
+    "a primitive Gigacage object"_s,
+};
+constexpr std::array<size_t, numberOfProbes> probeSizes { 96, 8 * MB, 8192, 96, sizeof(TZoneProbe), 4096 };
+constexpr size_t probeAlignment = 4096;
 
 // C++ objects the reach walk has to find from the roots, a chain of two.
 // Aligned for CompactPtr, which can drop the low bits of an address.
@@ -205,6 +228,7 @@ struct HeapWalkFixture {
     uint64_t arrayElement { 0 }; // The last element of a C array.
     std::array<uint64_t, 2> leaked { }; // Held only here, as integers.
     std::array<uint64_t, 2> freed { }; // A small and a large object, freed before the enumeration.
+    std::array<uint64_t, numberOfProbes> probes { }; // Leaked, one from each allocator, as Probe says.
     uint64_t allocations { 0 }; // What libpas enumerates in the target, sorted.
     uint64_t allocationCount { 0 };
     std::array<uint64_t, numberOfPlanted> planted { };
@@ -212,6 +236,7 @@ struct HeapWalkFixture {
     uint64_t globalObject { 0 };
     uint64_t string { 0 }; // The JSString of the fixture's name.
     uint64_t stringImpl { 0 }; // Its StringImpl.
+    uint64_t stringImplRefCount { 0 }; // One: only the JSString holds it.
     // Objects the VM owns through pointers to classes this executable only declares.
     uint64_t jsonCache { 0 };
     uint64_t builtinExecutables { 0 };
@@ -356,6 +381,14 @@ Address createFixture()
     fixture.builtinExecutables = std::bit_cast<uint64_t>(vm.builtinExecutables());
     fixture.regExpCache = std::bit_cast<uint64_t>(vm.regExpCache());
     fixture.leaked = { std::bit_cast<uint64_t>(fastMalloc(leakedSizes[0])), std::bit_cast<uint64_t>(fastMalloc(leakedSizes[1])) };
+    fixture.probes = {
+        std::bit_cast<uint64_t>(fastMalloc(probeSizes[static_cast<size_t>(Probe::Small)])),
+        std::bit_cast<uint64_t>(fastMalloc(probeSizes[static_cast<size_t>(Probe::Large)])),
+        std::bit_cast<uint64_t>(fastAlignedMalloc(probeAlignment, probeSizes[static_cast<size_t>(Probe::Aligned)])),
+        std::bit_cast<uint64_t>(fastCompactMalloc(probeSizes[static_cast<size_t>(Probe::Compact)])),
+        std::bit_cast<uint64_t>(new TZoneProbe),
+        std::bit_cast<uint64_t>(Gigacage::tryMalloc(Gigacage::Primitive, probeSizes[static_cast<size_t>(Probe::Gigacage)])),
+    };
     fixture.vm = std::bit_cast<uint64_t>(&vm);
     fixture.object = std::bit_cast<uint64_t>(object);
     fixture.structure = std::bit_cast<uint64_t>(object->structure());
@@ -363,6 +396,7 @@ Address createFixture()
     fixture.date = std::bit_cast<uint64_t>(date.asCell());
     fixture.string = std::bit_cast<uint64_t>(name.asCell());
     fixture.stringImpl = std::bit_cast<uint64_t>(JSC::asString(name)->tryGetValueImpl());
+    fixture.stringImplRefCount = JSC::asString(name)->tryGetValueImpl()->refCount();
 
     vm.heap.collectSync(JSC::CollectionScope::Full);
 
@@ -649,6 +683,8 @@ void checkReach(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFixture&
         && isObject(fixture.leaked[0], leakedSizes[0]) && isObject(fixture.leaked[1], leakedSizes[1]),
         "libpas enumerates each of the fixture's C++ objects, at least as large as it was allocated");
     TEST_ASSERT(!indexOf(fixture.freed[0]) && !indexOf(fixture.freed[1]), "libpas enumerates no freed object, small or large");
+    for (size_t index = 0; index < numberOfProbes; ++index)
+        TEST_ASSERT(fixture.probes[index] && isObject(fixture.probes[index], probeSizes[index]), makeString("libpas enumerates "_s, probeNames[index]));
     unsigned cellsOutside = 0;
     heap.forEachLiveCell([&](const HeapWalk::Cell& cell) {
         if (!indexOf(cell.address.toTargetVMAddress()))
@@ -660,14 +696,16 @@ void checkReach(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFixture&
     // The allocations the target leaks on purpose, and the one it plants to be missed, are expected misses.
     Vector<HeapWalk::Allocation> excluded;
     uint64_t excludedBytes = 0;
-    for (uint64_t address : { fixture.leaked[0], fixture.leaked[1], fixture.staleInMap }) {
+    Vector<uint64_t> expectedMisses { fixture.leaked[0], fixture.leaked[1], fixture.staleInMap };
+    expectedMisses.appendRange(fixture.probes.begin(), fixture.probes.end());
+    for (uint64_t address : expectedMisses) {
         if (auto index = indexOf(address)) {
             excluded.append(allocations[*index]);
             excludedBytes += allocations[*index].size;
         }
     }
     std::ranges::sort(excluded, { }, &HeapWalk::Allocation::address);
-    TEST_ASSERT_EQ(excluded.size(), 3u, "libpas enumerates the objects the target means the walk to miss");
+    TEST_ASSERT_EQ(excluded.size(), expectedMisses.size(), "libpas enumerates the objects the target means the walk to miss");
 
     MonotonicTime start = MonotonicTime::now();
     HeapWalk::Reach reach = heap.reach(allocations, excluded, 10);
@@ -685,8 +723,18 @@ void checkReach(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFixture&
     TEST_ASSERT_EQ(reach.bytesExcluded, excludedBytes, "the excluded bytes are the sizes of the excluded allocations");
     HeapWalk::Reach unexcluded = heap.reach(allocations, { }, 0);
     TEST_ASSERT_EQ(unexcluded.bytesReached, reach.bytesReached, "excluding missed allocations changes what the walk reaches by nothing");
-    TEST_ASSERT(!unexcluded.bytesExcluded && unexcluded.percent() == 100.0 * reach.bytesReached / reach.bytesAllocated
-        && reach.percent() == 100.0 * reach.bytesReached / (reach.bytesAllocated - excludedBytes),
+    // The byte counts, from the allocations and which of them the walk reached.
+    uint64_t allocatedBytes = 0;
+    uint64_t reachedBytes = 0;
+    for (size_t index = 0; index < allocations.size(); ++index) {
+        allocatedBytes += allocations[index].size;
+        if (reach.isReached[index])
+            reachedBytes += allocations[index].size;
+    }
+    TEST_ASSERT_EQ(reach.bytesAllocated, allocatedBytes, "the allocated bytes are the sizes of the enumerated allocations");
+    TEST_ASSERT_EQ(reach.bytesReached, reachedBytes, "the reached bytes are the sizes of the allocations the walk reached");
+    TEST_ASSERT(!unexcluded.bytesExcluded && unexcluded.percent() == 100.0 * reachedBytes / allocatedBytes
+        && reach.percent() == 100.0 * reachedBytes / (allocatedBytes - excludedBytes),
         "excluding them raises the percentage by exactly their bytes' share");
 
     // Patch 10: JS cells, read as their classes, lead to the VM as JavaScriptCore describes it.
@@ -694,6 +742,7 @@ void checkReach(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFixture&
         "the walk reaches what the VM owns through pointers to classes this executable only declares");
     TEST_ASSERT_EQ(reach.notFollowed[static_cast<size_t>(HeapWalk::NotFollowed::CellWithoutClass)], 0u, "the walk reads every JS cell as its class");
     // The name is not an atom, so only its JSString holds its StringImpl.
+    TEST_ASSERT_EQ(fixture.stringImplRefCount, 1u, "only the JSString of the fixture's name holds its StringImpl");
     TEST_ASSERT(isReached(fixture.stringImpl), "the walk reaches the StringImpl of a JSString");
 
     // Patch 11: each planted object is behind a value the walk reads by its C++ source's logic.
@@ -706,6 +755,9 @@ void checkReach(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFixture&
         auto allocation = indexOf(fixture.planted[index]);
         TEST_ASSERT(allocation && reach.bytesTypedIn[*allocation] == sizeof(ReachableObject), makeString("the walk types the whole object behind "_s, plantedNames[index]));
     }
+    // A StringImpl's characters follow it, in no declared type.
+    auto stringImplAllocation = indexOf(fixture.stringImpl);
+    TEST_ASSERT(stringImplAllocation && reach.bytesTypedIn[*stringImplAllocation] == sizeof(StringImpl), "the walk types the whole StringImpl behind a JSString");
     TEST_ASSERT(reach.bytesTyped && reach.bytesTyped <= reach.bytesAllocated - reach.bytesExcluded - reach.bytesFreeInBlocks, "the walk types part of the heap");
 
     if (!verbose)

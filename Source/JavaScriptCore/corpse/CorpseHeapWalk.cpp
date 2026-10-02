@@ -491,6 +491,7 @@ private:
     void walkPackedPointer(const TargetValue&);
     void walkJSString(const TargetValue&);
     void walkPropertyTable(const TargetValue&);
+    void walkOptional(const TargetValue&);
 
     // The class and field being walked, which an overrun names.
     String context() const;
@@ -726,7 +727,9 @@ void ReachWalk::followPointer(Address address, const TargetType& pointee)
 void ReachWalk::follow(Address address, const TargetType& type)
 {
     // Only into an allocation, so that a pointer into static data leads nowhere.
-    auto index = allocationOf(address, type.byteSize());
+    // A pointee that runs past the end of its allocation is followed, and
+    // listed as an overrun: the walk read the object as a type bigger than it is.
+    auto index = allocationOf(address, 1);
     if (!index)
         return;
     m_reached[*index] = true;
@@ -764,7 +767,52 @@ bool ReachWalk::walkByName(const TargetValue& value, std::string_view name)
         walkPropertyTable(value);
         return true;
     }
+    if (name.starts_with("std::optional<") || name.starts_with("std::__1::optional<")) {
+        walkOptional(value);
+        return true;
+    }
     return false;
+}
+
+// Whether a std::optional holds a value: libstdc++'s
+// _Optional_payload_base::_M_engaged or libc++'s
+// __optional_destruct_base::__engaged_, a few bases and members down.
+static std::optional<bool> isEngagedOptional(const TargetValue& value, unsigned depth = 0)
+{
+    auto* klass = std::get_if<TargetType::Class>(&value.type().layout());
+    if (!klass || depth > 4)
+        return std::nullopt;
+    for (const TargetType::Field& field : klass->properFields) {
+        std::string_view name { field.name.legacyCStringPointer() };
+        if (name == "_M_engaged" || name == "__engaged_") {
+            auto engaged = value.field(field).integer();
+            if (!engaged)
+                return std::nullopt;
+            return !!*engaged;
+        }
+    }
+    for (const TargetType::Field& field : klass->properFields) {
+        if (auto engaged = isEngagedOptional(value.field(field), depth + 1))
+            return engaged;
+    }
+    for (const TargetType::Base& base : klass->bases) {
+        if (auto engaged = isEngagedOptional(value.base(base), depth + 1))
+            return engaged;
+    }
+    return std::nullopt;
+}
+
+// A std::optional's value only when it holds one. An empty optional's storage
+// holds whatever was there before.
+void ReachWalk::walkOptional(const TargetValue& optional)
+{
+    auto engaged = isEngagedOptional(optional);
+    if (!engaged) {
+        CORPSE_REPORT("The std::optional at 0x%llx has no engaged flag this walk knows", forReport(optional.address()));
+        return;
+    }
+    if (*engaged)
+        walkMembers(optional, IsComplete::Yes);
 }
 
 // Every element, not only the first.
@@ -1029,15 +1077,23 @@ const TargetType* HeapWalk::classOfClassInfo(const Remote<ClassInfo>& classInfo,
     const TargetType* klass = m_debugInfo->classInCompileUnitOf(classInfo.address(), "s_info");
     // ClassInfo::staticClassSize is sizeof the class it was made for.
     auto size = klass ? classInfo.field<unsigned>("staticClassSize").integer() : std::nullopt;
-    if (klass && (!size || static_cast<uint64_t>(*size) != klass->byteSize())) {
-        if (size)
-            CORPSE_REPORT("The ClassInfo at 0x%llx is for %lld-byte classes, but its '%s' is %zu bytes", forReport(classInfo.address()), static_cast<long long>(*size), klass->name().legacyCStringPointer(), klass->byteSize());
+    if (klass && !size) {
+        CORPSE_REPORT("Could not read the class size of the ClassInfo at 0x%llx", forReport(classInfo.address()));
+        klass = nullptr;
+    }
+    if (klass && static_cast<uint64_t>(*size) != klass->byteSize()) {
+        CORPSE_REPORT("The ClassInfo at 0x%llx is for %lld-byte classes, but its '%s' is %zu bytes", forReport(classInfo.address()), static_cast<long long>(*size), klass->name().legacyCStringPointer(), klass->byteSize());
         klass = nullptr;
     }
     // ClassInfo::parentClass is the ClassInfo of one of its bases.
     Remote<ClassInfo> parent = klass ? classInfo.field<const ClassInfo*>("parentClass").dereference() : Remote<ClassInfo> { };
+    if (klass && parent && depth >= maxClassInfoDepth) {
+        CORPSE_REPORT("The ClassInfo of '%s' at 0x%llx has more than %u ancestors", klass->name().legacyCStringPointer(), forReport(classInfo.address()), maxClassInfoDepth);
+        klass = nullptr;
+    }
     if (klass && parent) {
-        const TargetType* parentClass = depth < maxClassInfoDepth ? classOfClassInfo(parent, depth + 1) : nullptr;
+        // Its own lookup reported why a parent has no class.
+        const TargetType* parentClass = classOfClassInfo(parent, depth + 1);
         Vector<const TargetType*, 8> bases { klass };
         bool isBase = false;
         for (size_t index = 0; index < bases.size() && !isBase && parentClass; ++index) {
@@ -1050,6 +1106,8 @@ const TargetType* HeapWalk::classOfClassInfo(const Remote<ClassInfo>& classInfo,
         if (!isBase) {
             if (parentClass)
                 CORPSE_REPORT("The parent of the ClassInfo of '%s' at 0x%llx is for '%s', which is not one of its bases", klass->name().legacyCStringPointer(), forReport(classInfo.address()), parentClass->name().legacyCStringPointer());
+            else
+                CORPSE_REPORT("The ClassInfo of '%s' at 0x%llx has a parent with no class", klass->name().legacyCStringPointer(), forReport(classInfo.address()));
             klass = nullptr;
         }
     }
