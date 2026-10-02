@@ -1119,6 +1119,15 @@ Most of the 29 s is liblldb's: completing WebCore's types (about 6 s, in
 `IsPolymorphicClass` and `GetByteSize`), finding 24,764 global variables one
 symbol at a time (about 3.5 s), and resolving vtables (about 2 s).
 
+## 17. Heap Dump
+
+Using the heap dump, mya can export a heap dump that WebInspector can read. A test case should collect a heap dump of a complex subtest from SP3, and confirm:
+
+- All unreached / untyped allocations are accounted for.
+- The normal jsc heap dump is a strict subset of the mya heap dump.
+- the measured size (via sizeof) of the mya heap dump matches the rss, and the differences are precicely accounted for (i.e, system allocations). This must be done in an automated way.
+- A sanity check is that we should be able to diff two heap dumps and see only our new cpp allocations. In a controlled test, this should be the case.
+
 ## What the walk misses
 
 As `mya heap` reports it for google.com, without reading anything by hand.

@@ -800,7 +800,7 @@ private:
         }
         printf("  %zu values read as a type bigger than their allocation\n", reach.overruns.size());
         // The same overrun at many addresses is one kind: its text without its numbers.
-        HashMap<String, uint64_t> overrunKinds;
+        HashMap<String, std::pair<uint64_t, String>> overrunKinds;
         for (const String& overrun : reach.overruns) {
             StringBuilder kind;
             for (unsigned index = 0; index < overrun.length();) {
@@ -813,14 +813,18 @@ private:
                 } else
                     kind.append(overrun[index++]);
             }
-            overrunKinds.add(kind.toString(), 0).iterator->value++;
+            auto& entry = overrunKinds.add(kind.toString(), std::pair<uint64_t, String> { 0, overrun }).iterator->value;
+            ++entry.first;
         }
-        Vector<std::pair<String, uint64_t>> kinds;
-        for (auto& [kind, count] : overrunKinds)
-            kinds.append({ kind, count });
-        std::ranges::sort(kinds, std::ranges::greater { }, &std::pair<String, uint64_t>::second);
+        Vector<std::pair<uint64_t, String>> kinds;
+        for (auto& [kind, entry] : overrunKinds)
+            kinds.append(entry);
+        std::ranges::sort(kinds, std::ranges::greater { }, &std::pair<uint64_t, String>::first);
         for (size_t index = 0; index < kinds.size() && index < listCount; ++index)
-            printf("  overrun, %llu times: %s\n", static_cast<unsigned long long>(kinds[index].second), string(kinds[index].first).legacyCStringPointer());
+            printf("  overrun, %llu like: %s\n", static_cast<unsigned long long>(kinds[index].first), string(kinds[index].second).legacyCStringPointer());
+        printf("  %zu arrays declared past the readable memory they start in\n", reach.clippedArrays.size());
+        for (size_t index = 0; index < reach.clippedArrays.size() && index < listCount; ++index)
+            printf("  clipped array: %s\n", string(reach.clippedArrays[index]).legacyCStringPointer());
     }
 
     // Dispatches `p[/<format>] <expression>`. The only expression understood so

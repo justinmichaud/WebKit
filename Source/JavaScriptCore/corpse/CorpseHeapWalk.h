@@ -215,6 +215,8 @@ public:
         // Each value whose type runs past the end of its allocation, with the field that led to it: a
         // pointee is then not followed, and storage a reader reads is cut at the end.
         Vector<String> overruns;
+        // Each array whose declared count runs past the readable memory it starts in.
+        Vector<String> clippedArrays;
         std::array<uint64_t, numberOfNotFollowedReasons> notFollowed { };
         uint64_t cellsWithClass { 0 };
         uint64_t cellBytesBeyondClass { 0 }; // In cells bigger than their class and the storage after it the walk reads.

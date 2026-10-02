@@ -733,6 +733,9 @@ private:
     uint64_t m_cellBytesBeyondClass { 0 };
     const TargetType* m_contextClass { nullptr };
     const TargetType::Field* m_contextField { nullptr };
+    Address m_contextSlot; // The word that holds the pointer being followed, when the walk knows it.
+    std::pair<Address, const TargetType*> m_contextObject { }; // The value whose members are being walked.
+    Vector<String> m_clippedArrays;
 };
 
 String ReachWalk::context() const
@@ -1101,10 +1104,13 @@ void ReachWalk::walkInPlace(Address address, const TargetType& type, const Targe
     if (std::holds_alternative<TargetType::Class>(layout)) {
         m_contextClass = &type;
         m_contextField = nullptr;
-        if (readerFor(type) != Reader::None)
+        if (readerFor(type) != Reader::None) {
             walkByName(TargetValue::at(m_snapshot, address, type));
-        else
-            walkPlan(address, planFor(type, IsComplete::Yes, nullptr));
+            return;
+        }
+        auto saved = std::exchange(m_contextObject, std::pair<Address, const TargetType*> { address, &type });
+        walkPlan(address, planFor(type, IsComplete::Yes, nullptr));
+        m_contextObject = saved;
         return;
     }
     if (auto* pointer = std::get_if<TargetType::Pointer>(&layout)) {
@@ -1113,7 +1119,9 @@ void ReachWalk::walkInPlace(Address address, const TargetType& type, const Targe
             return;
         m_contextClass = owner;
         m_contextField = field;
+        m_contextSlot = address;
         followPointer(Address { *word }.stripped(), pointer->pointee);
+        m_contextSlot = { };
         return;
     }
     if (auto* array = std::get_if<TargetType::Array>(&layout)) {
@@ -1126,6 +1134,10 @@ void ReachWalk::walkInPlace(Address address, const TargetType& type, const Targe
         if (!region || !region->isReadable())
             return;
         uint64_t count = std::min<uint64_t>(array->count, (region->end() - address) / array->element.byteSize());
+        if (count < array->count) {
+            m_clippedArrays.append(makeString("the "_s, array->count, "-element '"_s, type.name(), "' at 0x"_s, hex(address.toTargetVMAddress()),
+                ", reached through "_s, context(), ", of which "_s, count, " are in readable memory"_s));
+        }
         for (uint64_t index = 0; index < count; ++index)
             walkInPlace(address + index * array->element.byteSize(), array->element, owner, field);
     }
@@ -1135,7 +1147,9 @@ void ReachWalk::walkInPlace(Address address, const TargetType& type, const Targe
 // reader may recognise, as a Packed<T*> is a PackedAlignedPtr.
 void ReachWalk::walkMembers(const TargetValue& value, IsComplete isComplete, const char* except)
 {
+    auto saved = std::exchange(m_contextObject, std::pair<Address, const TargetType*> { value.address(), &value.type() });
     walkPlan(value.address(), planFor(value.type(), isComplete, except));
+    m_contextObject = saved;
 }
 
 // The members of a class, flattened once per class into the values that may
@@ -1224,7 +1238,9 @@ void ReachWalk::walkPlan(Address address, const Plan& plan)
                 break;
             m_contextClass = slot.owner;
             m_contextField = slot.field;
+            m_contextSlot = slotAddress;
             followPointer(Address { word }.stripped(), *slot.type);
+            m_contextSlot = { };
             break;
         }
         case Slot::Kind::Reader:
@@ -1292,7 +1308,9 @@ void ReachWalk::follow(Address address, const TargetType& type)
     if (type.byteSize() > (allocation.address + allocation.size) - address) {
         notFollowed(NotFollowed::DoesNotFit);
         m_overruns.append(makeString("the "_s, type.byteSize(), "-byte '"_s, type.name(), "' at 0x"_s, hex(address.toTargetVMAddress()),
-            ", reached through "_s, context(), ", runs past the end of its "_s, allocation.size, "-byte allocation"_s));
+            ", reached through "_s, context(), m_contextSlot ? makeString(" at 0x"_s, hex(m_contextSlot.toTargetVMAddress())) : String(),
+            m_contextObject.second ? makeString(" in a '"_s, m_contextObject.second->name(), "' at 0x"_s, hex(m_contextObject.first.toTargetVMAddress())) : String(),
+            ", runs past the end of its "_s, allocation.size, "-byte allocation at 0x"_s, hex(allocation.address.toTargetVMAddress())));
         return;
     }
     markReached(*index);
@@ -2201,6 +2219,7 @@ void ReachWalk::summarize(const Vector<HeapWalk::Allocation>& excluded, size_t l
     result.globalVariables = m_globalVariables;
     result.untypedDataSymbols = m_untypedDataSymbols;
     result.overruns = WTF::move(m_overruns);
+    result.clippedArrays = WTF::move(m_clippedArrays);
     for (auto& [klass, bytes] : m_bytesBeyondClass)
         result.cellBytesBeyondClassByClass.append({ makeString(klass->name()), bytes });
     std::ranges::sort(result.cellBytesBeyondClassByClass, std::ranges::greater { }, &std::pair<String, uint64_t>::second);
