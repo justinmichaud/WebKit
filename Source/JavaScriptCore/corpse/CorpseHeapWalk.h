@@ -69,8 +69,8 @@ class ReachWalk;
 // The JS heap of a VM in a corpse, walked through the target's debug info.
 // The walk starts from a roots object, whose type comes from its vtable. Every
 // other type it reads is the type of a field reached from there, of a global
-// variable, or of a class in mya's lists of JavaScriptCore's classes, found by
-// name in JavaScriptCore's image, so the layouts are the target's whatever it
+// variable, of the class a cell's ClassInfo is the s_info of, or of a class
+// JavaScriptCore's image names, so the layouts are the target's whatever it
 // was built for.
 class HeapWalk {
 public:
@@ -78,6 +78,7 @@ public:
         Address address;
         uint64_t size;
         HeapCell::Kind kind;
+        Address preciseAllocation { }; // The PreciseAllocation that holds it, if it is not in a MarkedBlock.
     };
 
     // `roots` is an object of a polymorphic class with the fields `JSC::VM* vm`
@@ -86,10 +87,16 @@ public:
     // the walk needs by name.
     HeapWalk(Snapshot&, Address roots);
 
+    // The heap of the VM at `vm`, in a target that records no roots, such as a
+    // web process, which is never at mya's safe point. The VM is read as
+    // JavaScriptCore's own debug info describes it, in the image mapped at
+    // `javaScriptCoreImage`.
+    HeapWalk(Snapshot&, Address vm, Address javaScriptCoreImage);
+
     bool isValid() const { return static_cast<bool>(m_vm); }
     Remote<VM> vm() const { return m_vm; }
-    // The roots, as their dynamic type. Null if the walk is invalid.
-    const TargetValue* roots() const { return isValid() ? &*m_roots : nullptr; }
+    // The roots, as their dynamic type. Null if the walk is invalid or started from a VM.
+    const TargetValue* roots() const { return isValid() && m_roots ? &*m_roots : nullptr; }
 
     // Whether the roots say the target was at mya's safe point when it was
     // snapshotted, where no collection runs. Only then are the walk's results
@@ -101,22 +108,29 @@ public:
     // liveness rules of a heap between collections.
     void forEachLiveCell(const Function<IterationStatus(const Cell&)>&) const;
 
+    // Every precise allocation of the heap, live or not: the address of its
+    // PreciseAllocation header, of its cell, and whether its cell is live.
+    struct PreciseAllocationState {
+        Address header;
+        Address cell;
+        uint64_t cellSize;
+        bool isLive;
+    };
+    Vector<PreciseAllocationState> preciseAllocations() const;
+
     // The cell at `address`, as a JSCell, and the Structure a cell's
     // StructureID bits name.
     Remote<JSCell> jsCell(Address) const;
     Remote<Structure> structure(uint32_t structureIDBits) const;
 
-    // The C++ class of the JS cell at `address`: the class in mya's list of
-    // cell classes (CorpseCellClasses.h) whose s_info is its Structure's
-    // ClassInfo, checked against that ClassInfo's size and parent. Null,
-    // having reported why once per ClassInfo, if there is none.
+    // The C++ class of the JS cell at `address`: the class whose s_info is
+    // its Structure's ClassInfo, checked against that ClassInfo's size and
+    // parent. Null, having reported why once per ClassInfo, if there is none.
     const TargetType* cellClass(Address) const;
 
-    // The s_info symbols of JavaScriptCore's image whose class is not in
-    // mya's list of cell classes, by name: each needs a line in the list.
-    Vector<String> unlistedCellClasses() const;
-    // How many classes of the list JavaScriptCore's image has.
-    size_t listedCellClassCount() const;
+    // The s_info symbols of JavaScriptCore's image that name no class, of the
+    // `count` it has.
+    Vector<String> classInfosWithoutClass(size_t& count) const;
 
     using AtomBits = WTF::BitSet<MarkedBlock::atomsPerBlock>;
 
@@ -124,6 +138,11 @@ public:
         Address address;
         uint64_t size;
     };
+    // Every live libpas object of the target, sorted, as libpas's own
+    // enumerator lists them from outside a process: through the root the
+    // target keeps for libmalloc's enumeration, read from the snapshot.
+    // Nullopt, having reported why, if it cannot be read.
+    std::optional<Vector<Allocation>> libpasAllocations() const;
     // Why the walk did not follow a value that may point somewhere.
     enum class NotFollowed : uint8_t {
         Declaration, // A pointer to a class that is only declared.
@@ -131,8 +150,9 @@ public:
         NoDynamicType, // A pointer to a polymorphic class whose object has no dynamic type; followed as its static type.
         CellWithoutClass, // A JS cell whose ClassInfo names no class.
         TypeNotReached, // An encoded pointer whose pointee type the walk does not have.
+        DoesNotFit, // A pointer to a type bigger than what is left of the allocation it points into.
     };
-    static constexpr size_t numberOfNotFollowedReasons = static_cast<size_t>(NotFollowed::TypeNotReached) + 1;
+    static constexpr size_t numberOfNotFollowedReasons = static_cast<size_t>(NotFollowed::DoesNotFit) + 1;
 
     // What holds an allocation the walk missed, as the walk finds it: the
     // first of these that holds a word whose value lies inside the allocation.
@@ -161,6 +181,7 @@ public:
         Allocation allocation;
         uint64_t bytesUntyped;
         String typeAtStart; // The type the walk read at the allocation's start, if any.
+        String reachedBy; // The field or object that first reached it.
     };
 
     struct Reach {
@@ -168,7 +189,7 @@ public:
         uint64_t bytesExcluded { 0 }; // Of the allocations the caller excludes.
         uint64_t bytesReached { 0 }; // Of the allocations the walk reaches any address in.
         uint64_t bytesTyped { 0 }; // Read as some type, each byte once.
-        uint64_t bytesFreeInBlocks { 0 }; // In MarkedBlocks, outside their live cells and headers.
+        uint64_t bytesFreeInBlocks { 0 }; // In MarkedBlocks and precise allocations, outside their live cells and headers.
 
         // How much of the program's own memory the walk reaches, and reads as a type.
         double percent() const { return ratio(bytesReached, bytesAllocated - bytesExcluded); }
@@ -186,13 +207,18 @@ public:
             return total;
         }
         Vector<Untyped> mostUntyped; // Of the allocations reached, most untyped bytes first.
+        // The untyped bytes of the allocations reached, by the type the walk read at their start,
+        // or, for those it read nothing at the start of, by what reached them; most first.
+        Vector<std::pair<String, uint64_t>> untypedByKind;
         Vector<bool> isReached; // For each allocation, in the order given.
         Vector<uint64_t> bytesTypedIn; // Likewise.
-        // Each value whose type runs past the end of its allocation, with the field that led to it.
+        // Each value whose type runs past the end of its allocation, with the field that led to it: a
+        // pointee is then not followed, and storage a reader reads is cut at the end.
         Vector<String> overruns;
         std::array<uint64_t, numberOfNotFollowedReasons> notFollowed { };
         uint64_t cellsWithClass { 0 };
-        uint64_t cellBytesBeyondClass { 0 }; // In cells bigger than their class, such as objects with inline storage.
+        uint64_t cellBytesBeyondClass { 0 }; // In cells bigger than their class and the storage after it the walk reads.
+        Vector<std::pair<String, uint64_t>> cellBytesBeyondClassByClass; // The classes with the most, most first.
         uint64_t globalVariables { 0 }; // Walked as roots.
         uint64_t untypedDataSymbols { 0 }; // Data symbols that are no variable the debug info describes, such as vtables.
 
@@ -214,10 +240,12 @@ private:
     friend class ReachWalk;
     using BlockSet = UncheckedKeyHashSet<MarkedBlock*>;
 
-    Remote<ClassInfo> classInfoOf(Address cell) const;
-    // The classes of mya's list of cell classes, by the address of their s_info.
-    const HashMap<uint64_t, const TargetType*>& cellClasses() const;
-    bool isClassInfoOf(const Remote<ClassInfo>&, const TargetType&, const HashMap<uint64_t, const TargetType*>&) const;
+    void initialize(Snapshot&, Remote<VM>&&, std::optional<int64_t> atSafePoint);
+    Snapshot& snapshot() const { return *m_snapshot; }
+
+    std::optional<Address> classInfoOf(Address cell) const;
+    const TargetType* classOfClassInfo(Address, unsigned depth) const;
+    bool isClassInfoOf(const Remote<ClassInfo>&, const TargetType&, unsigned depth) const;
 
     Remote<MarkedBlock::Header> header(Address block) const;
     bool forEachBlock(const Function<IterationStatus(Address block)>&) const;
@@ -225,6 +253,7 @@ private:
     IterationStatus walkBlock(Address block, const HashMap<uint64_t, AtomBits>& newlyAllocatedAfterStop, const MarkedSpaceState&, const Function<IterationStatus(const Cell&)>&) const;
     IterationStatus walkPreciseAllocations(const Remote<MarkedSpace>&, const Function<IterationStatus(const Cell&)>&) const;
 
+    Snapshot* m_snapshot { nullptr };
     RefPtr<SnapshotDebugInfo> m_debugInfo;
     std::optional<TargetValue> m_roots;
     Remote<VM> m_vm;
@@ -236,6 +265,21 @@ private:
     const TargetType* m_blockHeaderClass { nullptr };
     const TargetType* m_localAllocatorClass { nullptr };
     const TargetType* m_stringImplClass { nullptr }; // For JSString::m_fiber, a uintptr_t.
+    const TargetType* m_jsValueClass { nullptr }; // For butterflies, inline storage and Strong handles.
+    const TargetType* m_finalObjectClass { nullptr };
+    const TargetType* m_preciseAllocationClass { nullptr }; // For the header before a precise allocation's cell.
+    const TargetType* m_ropeStringClass { nullptr }; // A rope shares JSString's ClassInfo.
+    const TargetType* m_cellButterflyClass { nullptr };
+    const TargetType* m_lexicalEnvironmentClass { nullptr };
+    const TargetType* m_stringImplOwnerClass { nullptr }; // JSString, whose cells of JSRopeString's size are ropes.
+    const TargetType* m_watchpointSetClass { nullptr }; // For InlineWatchpointSet::m_data, a uintptr_t.
+    // For the storage after a PropertyTable's index, a WeakBlock and an ExpressionInfo.
+    const TargetType* m_propertyTableEntryClass { nullptr };
+    const TargetType* m_compactPropertyTableEntryClass { nullptr };
+    const TargetType* m_byteType { nullptr };
+    const TargetType* m_weakImplClass { nullptr };
+    const TargetType* m_expressionInfoChapterClass { nullptr };
+    const TargetType* m_expressionInfoEncodedInfoClass { nullptr };
     // For CodeBlock::m_jitData, a void*. Null in a build without that tier.
     const TargetType* m_baselineJITDataClass { nullptr };
     const TargetType* m_dfgJITDataClass { nullptr };
@@ -245,8 +289,11 @@ private:
     const TargetType* m_wtfConfigClass { nullptr };
     const TargetType* m_jscConfigClass { nullptr };
     uint64_t m_startOfStructureHeap { 0 };
-    mutable std::optional<HashMap<uint64_t, const TargetType*>> m_cellClasses;
-    mutable HashSet<uint64_t> m_reportedClassInfos;
+    uint64_t m_structureIDOffset { 0 }; // Of JSCell::m_structureID's bits.
+    uint64_t m_classInfoOffset { 0 }; // Of Structure::m_classInfo.
+    uint64_t m_inlineCapacityOffset { 0 }; // Of Structure::m_inlineCapacity.
+    // By the address of their s_info; null for a ClassInfo that names none.
+    mutable HashMap<uint64_t, const TargetType*> m_cellClasses;
 };
 
 // A JSValue holds its cell, if it is one, as SlotVisitor::appendUnbarriered(JSValue) visits it.

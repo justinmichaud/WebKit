@@ -66,6 +66,7 @@ constexpr unsigned maxLinkedListLength = 64 * 1024;
 constexpr unsigned maxHashTableSize = 64 * 1024 * 1024;
 constexpr unsigned maxVectorSize = 16 * 1024 * 1024;
 constexpr unsigned maxClassInfoDepth = 64; // JSC's deepest ClassInfo chain is about 10.
+constexpr uint64_t maxConservativeScanSize = 64 * MB; // Of a block of merged statics, which is a few KB.
 
 // A lookup that finds nothing will read every image's load commands and exports
 // trie, which measured 101 MB for the ~2,800 image process above and 0.4 MB for

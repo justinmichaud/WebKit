@@ -32,6 +32,7 @@
 #include <JavaScriptCore/CorpseAddress.h>
 #include <JavaScriptCore/CorpseClient.h>
 #include <JavaScriptCore/CorpseError.h>
+#include <JavaScriptCore/CorpseHeapWalk.h>
 #include <JavaScriptCore/CorpseProcess.h>
 #include <JavaScriptCore/CorpseRegion.h>
 #include <JavaScriptCore/CorpseSnapshot.h>
@@ -57,11 +58,13 @@
 #include <wtf/CheckedArithmetic.h>
 #include <wtf/DoublyLinkedList.h>
 #include <wtf/HashMap.h>
+#include <wtf/MonotonicTime.h>
 #include <wtf/Ref.h>
 #include <wtf/RefPtr.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/Vector.h>
 #include <wtf/text/CString.h>
+#include <wtf/text/StringBuilder.h>
 
 #if HAVE(READLINE)
 // readline/history.h has a Function typedef that conflicts with WTF::Function;
@@ -217,6 +220,7 @@ private:
         fputs("  status (st)               Show whether mya is attached\n", out);
         fputs("  snapshot (sn, snap) ...   Capture and manage snapshots\n", out);
         fputs("  thread (th) ...           Inspect the threads in a snapshot\n", out);
+        fputs("  heap [<vm>]               Walk the JS heap of the VM at <vm>, or of WebCore's main VM\n", out);
         fputs("  p[/x] &<symbol>           Print a symbol's address, /x for hex\n", out);
         fputs("  history (hi, hist) ...    Show and manage the command history\n", out);
         fputs("  help [<command>]          Show this help, or help for <command>\n", out);
@@ -679,6 +683,144 @@ private:
         std::string_view token = lex.nextToken();
         fprintf(stderr, "mya: Unknown thread subcommand '%.*s'\n",
             static_cast<int>(token.length()), token.data());
+    }
+
+    // Dispatches `heap [<vm>]`: walks the JS heap of the snapshot in use from
+    // the VM at the hex address <vm>, or from WebCore's g_commonVMOrNull, and
+    // reports how much of libpas's heap the walk reaches and reads as a type,
+    // and what holds what it misses.
+    void handleHeap(Lexer lex)
+    {
+        using JSC::Corpse::HeapWalk;
+        Snapshot* snapshot = snapshotById(m_currentSnapshot);
+        if (!snapshot) {
+            fputs("No snapshot in use. Capture one with `snapshot`, or select one with `snapshot <n>`.\n", stderr);
+            return;
+        }
+        Address vm;
+        if (!lex.atEnd()) {
+            std::string token { lex.nextToken() };
+            char* end = nullptr;
+            unsigned long long value = strtoull(token.c_str(), &end, 16);
+            if (!value || *end || !lex.atEnd()) {
+                fputs("Usage: heap [<vm address, in hex>]\n", stderr);
+                return;
+            }
+            vm = Address { static_cast<uint64_t>(value) };
+        } else {
+            // WebCore's main thread VM, or else the VM JavaScriptCore last entered.
+            for (const char* name : { "_ZN7WebCore16g_commonVMOrNullE", "_ZN3JSC9VMManager10s_recentVME" }) {
+                Address variable = snapshot->symbol(name);
+                auto pointer = variable ? snapshot->memory().ptr<uint64_t>(variable) : JSC::Corpse::Memory::Ptr<uint64_t> { };
+                if (pointer && *pointer) {
+                    vm = Address { *pointer };
+                    break;
+                }
+            }
+            if (!vm) {
+                fputs("mya: No VM in this snapshot; name a VM's address\n", stderr);
+                return;
+            }
+        }
+        Address javaScriptCore;
+        for (const JSC::Corpse::Image& image : snapshot->images()) {
+            std::string_view path { image.path().legacyCStringPointer() };
+            if (path.ends_with("/JavaScriptCore") || path.ends_with("/libJavaScriptCore.so") || path.find("/libjavascriptcore") != std::string_view::npos)
+                javaScriptCore = image.loadAddress();
+        }
+        if (!javaScriptCore) {
+            fputs("mya: JavaScriptCore is not among the snapshot's images\n", stderr);
+            return;
+        }
+
+        MonotonicTime start = MonotonicTime::now();
+        HeapWalk heap(*snapshot, vm, javaScriptCore);
+        if (!heap.isValid()) {
+            fprintf(stderr, "mya: No JS heap at 0x%llx\n", static_cast<unsigned long long>(vm.toTargetVMAddress()));
+            return;
+        }
+        MonotonicTime opened = MonotonicTime::now();
+        size_t cells = 0;
+        uint64_t cellBytes = 0;
+        heap.forEachLiveCell([&](const HeapWalk::Cell& cell) {
+            ++cells;
+            cellBytes += cell.size;
+            return IterationStatus::Continue;
+        });
+        MonotonicTime walked = MonotonicTime::now();
+        auto allocations = heap.libpasAllocations();
+        if (!allocations)
+            return;
+        MonotonicTime enumerated = MonotonicTime::now();
+        constexpr size_t listCount = 25;
+        HeapWalk::Reach reach = heap.reach(*allocations, { }, { }, listCount);
+        MonotonicTime reached = MonotonicTime::now();
+
+        auto string = [](const String& value) {
+            return value.utf8();
+        };
+        printf("The heap of the VM at 0x%llx, %s\n", static_cast<unsigned long long>(vm.toTargetVMAddress()),
+            heap.isAtSafePoint() ? "at mya's safe point" : "unverified: the target was not at mya's safe point");
+        printf("  %zu live cells, %llu bytes, in %llu libpas allocations of %llu bytes\n", cells, static_cast<unsigned long long>(cellBytes),
+            static_cast<unsigned long long>(allocations->size()), static_cast<unsigned long long>(reach.bytesAllocated));
+        printf("  reached: %.2f%% (%llu bytes)\n", reach.percent(), static_cast<unsigned long long>(reach.bytesReached));
+        printf("  typed:   %.2f%% (%llu bytes, with %llu free in MarkedBlocks)\n", reach.typedPercent(), static_cast<unsigned long long>(reach.bytesTyped), static_cast<unsigned long long>(reach.bytesFreeInBlocks));
+        printf("  %llu JS cells read as their class, %llu bytes beyond their class; %llu global variables, %llu untyped data symbols\n",
+            static_cast<unsigned long long>(reach.cellsWithClass), static_cast<unsigned long long>(reach.cellBytesBeyondClass),
+            static_cast<unsigned long long>(reach.globalVariables), static_cast<unsigned long long>(reach.untypedDataSymbols));
+        printf("  time: %.0f ms to open the debug info, %.0f ms to walk the cells, %.0f ms to enumerate libpas, %.0f ms to reach, type and explain; %.0f ms in all\n",
+            (opened - start).milliseconds(), (walked - opened).milliseconds(), (enumerated - walked).milliseconds(), (reached - enumerated).milliseconds(), (reached - start).milliseconds());
+        constexpr std::array<const char*, HeapWalk::numberOfNotFollowedReasons> reasons {
+            "pointers to declarations", "pointers to types without a size", "polymorphic pointees without a dynamic type",
+            "JS cells without a class", "encoded pointers to types not reached", "pointers to types that do not fit their allocation",
+        };
+        for (size_t index = 0; index < reasons.size(); ++index)
+            printf("  not followed: %llu %s\n", static_cast<unsigned long long>(reach.notFollowed[index]), reasons[index]);
+        constexpr std::array<const char*, HeapWalk::numberOfMissCauses> causes {
+            "held by a reached allocation", "held by static data", "held by other memory", "held by other misses", "held by nothing",
+        };
+        for (size_t index = 0; index < causes.size(); ++index)
+            printf("  missed: %llu bytes %s\n", static_cast<unsigned long long>(reach.bytesMissedByCause[index]), causes[index]);
+        size_t listed = 0;
+        for (const HeapWalk::Miss& miss : reach.misses) {
+            if (listed++ == listCount)
+                break;
+            printf("  miss: %llu bytes at 0x%llx, %llu with what only it holds, %s: %s%s%s\n", static_cast<unsigned long long>(miss.allocation.size),
+                static_cast<unsigned long long>(miss.allocation.address.toTargetVMAddress()), static_cast<unsigned long long>(miss.bytesHeld),
+                causes[static_cast<size_t>(miss.cause)], string(miss.holder).legacyCStringPointer(), miss.content.isEmpty() ? "" : "; it holds ", string(miss.content).legacyCStringPointer());
+        }
+        for (auto& [kind, bytes] : reach.untypedByKind)
+            printf("  untyped bytes: %llu in allocations with %s\n", static_cast<unsigned long long>(bytes), string(kind).legacyCStringPointer());
+        for (auto& [name, bytes] : reach.cellBytesBeyondClassByClass)
+            printf("  beyond class: %llu bytes of '%s' cells\n", static_cast<unsigned long long>(bytes), string(name).legacyCStringPointer());
+        for (const HeapWalk::Untyped& untyped : reach.mostUntyped) {
+            printf("  untyped: %llu of %llu bytes at 0x%llx, read as %s, reached by %s\n", static_cast<unsigned long long>(untyped.bytesUntyped), static_cast<unsigned long long>(untyped.allocation.size),
+                static_cast<unsigned long long>(untyped.allocation.address.toTargetVMAddress()), untyped.typeAtStart.isNull() ? "nothing at its start" : string(untyped.typeAtStart).legacyCStringPointer(),
+                string(untyped.reachedBy).legacyCStringPointer());
+        }
+        printf("  %zu values read as a type bigger than their allocation\n", reach.overruns.size());
+        // The same overrun at many addresses is one kind: its text without its numbers.
+        HashMap<String, uint64_t> overrunKinds;
+        for (const String& overrun : reach.overruns) {
+            StringBuilder kind;
+            for (unsigned index = 0; index < overrun.length();) {
+                if (overrun.substring(index, 2) == "0x"_s) {
+                    for (index += 2; index < overrun.length() && isASCIIHexDigit(overrun[index]); ++index) { }
+                    kind.append('#');
+                } else if (isASCIIDigit(overrun[index])) {
+                    for (; index < overrun.length() && isASCIIDigit(overrun[index]); ++index) { }
+                    kind.append('#');
+                } else
+                    kind.append(overrun[index++]);
+            }
+            overrunKinds.add(kind.toString(), 0).iterator->value++;
+        }
+        Vector<std::pair<String, uint64_t>> kinds;
+        for (auto& [kind, count] : overrunKinds)
+            kinds.append({ kind, count });
+        std::ranges::sort(kinds, std::ranges::greater { }, &std::pair<String, uint64_t>::second);
+        for (size_t index = 0; index < kinds.size() && index < listCount; ++index)
+            printf("  overrun, %llu times: %s\n", static_cast<unsigned long long>(kinds[index].second), string(kinds[index].first).legacyCStringPointer());
     }
 
     // Dispatches `p[/<format>] <expression>`. The only expression understood so
@@ -1335,6 +1477,11 @@ private:
         if (is("th") || is("thread")) {
             recordCommand(line);
             handleThread(lex);
+            return;
+        }
+        if (is("heap")) {
+            recordCommand(line);
+            handleHeap(lex);
             return;
         }
         if (command == "p" || command == "print") {

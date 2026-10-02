@@ -32,6 +32,8 @@
 #include <JavaScriptCore/CorpseAddress.h>
 #include <memory>
 #include <optional>
+#include <span>
+#include <string_view>
 #include <wtf/Function.h>
 #include <wtf/HashMap.h>
 #include <wtf/RefCounted.h>
@@ -43,6 +45,7 @@
 
 namespace lldb {
 class SBDebugger;
+class SBCompileUnit;
 class SBModule;
 class SBTarget;
 class SBType;
@@ -76,14 +79,19 @@ public:
     const TargetType* dynamicTypeIfAnyAt(Snapshot&, Address, Address& completeObject);
 
     // The complete class liblldb names `name` in the image mapped at
-    // `inImage`, such as an entry of mya's list of cell classes. `name` is
-    // spelled as liblldb spells it. Null, silently, if that image has none.
+    // `inImage`. `name` is spelled as liblldb spells it. Null, silently, if
+    // that image has none.
     const TargetType* classNamed(Address inImage, const char* name);
+    // The same, in the image that describes `neighbor`, such as WebCore for one
+    // of its classes, or else in the first image that has one.
+    const TargetType* classNamedBeside(const TargetType& neighbor, const char* name);
 
-    // Where the static data member `member` of `klass` is: the symbol, in the
-    // image mapped at `inImage`, whose name is the member's linkage name.
-    // Nullopt, silently, if the class has no such member or the image no such symbol.
-    std::optional<Address> staticMemberAddress(Address inImage, const TargetType& klass, const char* member);
+    // The class whose static data member `member` is the variable starting at
+    // `variable`, such as a JS cell class's s_info: the one class whose member
+    // has the linkage name of the symbol there. `codeOfClass`, functions that
+    // may be the class's, finds an instance of a class template whose name
+    // liblldb spells differently. Null, having reported why, if there is none.
+    const TargetType* classOfStaticMember(Address variable, const char* member, std::span<const Address> codeOfClass);
 
     struct Symbol {
         Address address;
@@ -103,13 +111,19 @@ public:
         Address address;
         const TargetType& type;
     };
+    struct Range {
+        Address address;
+        uint64_t size;
+    };
     // Every global variable of every image with debug info at an address
     // `isCandidate` accepts, as its declared type: each data symbol the debug
     // info describes as a variable at the symbol's address. A function-local
     // static is found in its function. The candidate data symbols that are no
     // variable the debug info describes, such as guard variables, are counted
-    // in `untyped`.
-    Vector<GlobalVariable> globalVariables(const Function<bool(Address)>& isCandidate, size_t& untyped);
+    // in `untyped`, and the blocks of statics LLVM's GlobalMerge merged into
+    // one symbol, whose variables have no symbol of their own, are listed in
+    // `merged`.
+    Vector<GlobalVariable> globalVariables(const Function<bool(Address)>& isCandidate, size_t& untyped, Vector<Range>& merged);
 
 private:
     friend class TargetType;
@@ -136,6 +150,8 @@ private:
     // over vtable slots ends.
     const TargetType* classOfDestructor(Address function, bool& inImage);
     bool isInImage(Address) const;
+    // The one class of `unit` whose name starts with `namePrefix` that `matches`.
+    const TargetType* classInCompileUnit(lldb::SBCompileUnit&, const lldb::SBModule&, std::string_view namePrefix, const Function<bool(lldb::SBType&)>& matches);
     // The module of the image mapped at `address`, which may be invalid.
     lldb::SBModule moduleAt(Address) const;
 
@@ -144,6 +160,14 @@ private:
     // By name; types of one name from different images or anonymous namespaces share an entry.
     HashMap<String, Vector<std::unique_ptr<TargetType>>> m_types;
     HashMap<Address, const TargetType*> m_classesOfVTables;
+    struct DynamicTypeOfFirstWord {
+        int64_t offsetToTop;
+        const TargetType* type; // Null if an object with this first word has none.
+    };
+    HashMap<Address, DynamicTypeOfFirstWord> m_dynamicTypesOfFirstWords;
+    struct CompileUnitClasses;
+    // By the compile unit's image and source file.
+    HashMap<String, std::unique_ptr<CompileUnitClasses>> m_compileUnitClasses;
 };
 
 } // namespace Corpse

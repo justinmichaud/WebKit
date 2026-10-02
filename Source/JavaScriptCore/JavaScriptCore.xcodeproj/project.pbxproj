@@ -1870,7 +1870,6 @@
 		DD38CA03D03F45F09699BF9F /* CorpseImage.h in Headers */ = {isa = PBXBuildFile; fileRef = 44DFA0959F8443918E97F342 /* CorpseImage.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		E3EF497D7DA94ED8B61EDD60 /* CorpseRemote.h in Headers */ = {isa = PBXBuildFile; fileRef = E6B032F41DE24CC994F1B609 /* CorpseRemote.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		95854EDCB18D4ABCA5F65E2E /* CorpseHeapWalk.h in Headers */ = {isa = PBXBuildFile; fileRef = 23B73A5B14274A6D9CE923FF /* CorpseHeapWalk.h */; settings = {ATTRIBUTES = (Private, ); }; };
-		F11DA542582149CFB5B4BFA6 /* CorpseCellClasses.h in Headers */ = {isa = PBXBuildFile; fileRef = 256F8939A04E4F21886A9111 /* CorpseCellClasses.h */; };
 		090DE21C7C0945CB953F653C /* CorpseTargetValue.h in Headers */ = {isa = PBXBuildFile; fileRef = 337602DDDA3B4A62BBFF3D32 /* CorpseTargetValue.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		AB3763E342CB4561B6AA47B5 /* CorpseTargetType.h in Headers */ = {isa = PBXBuildFile; fileRef = 1645A496EB8C4AFEBFC2DA4E /* CorpseTargetType.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		5E8EAC2E70DC4819B4D48B01 /* CorpseSnapshotDebugInfo.h in Headers */ = {isa = PBXBuildFile; fileRef = 79A90D14EE9E4B22A597E1FB /* CorpseSnapshotDebugInfo.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -4131,7 +4130,6 @@
 		44DFA0959F8443918E97F342 /* CorpseImage.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseImage.h; sourceTree = "<group>"; };
 		E6B032F41DE24CC994F1B609 /* CorpseRemote.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseRemote.h; sourceTree = "<group>"; };
 		23B73A5B14274A6D9CE923FF /* CorpseHeapWalk.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseHeapWalk.h; sourceTree = "<group>"; };
-		256F8939A04E4F21886A9111 /* CorpseCellClasses.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseCellClasses.h; sourceTree = "<group>"; };
 		337602DDDA3B4A62BBFF3D32 /* CorpseTargetValue.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseTargetValue.h; sourceTree = "<group>"; };
 		1645A496EB8C4AFEBFC2DA4E /* CorpseTargetType.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseTargetType.h; sourceTree = "<group>"; };
 		79A90D14EE9E4B22A597E1FB /* CorpseSnapshotDebugInfo.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseSnapshotDebugInfo.h; sourceTree = "<group>"; };
@@ -7012,7 +7010,6 @@
 				2C6EB9C72F84ED87DF23277A /* CorpseAddress.h */,
 				7E83C42317D785F3003DC41B /* CorpseByteParser.cpp */,
 				7E83C42217D785F3003DC41B /* CorpseByteParser.h */,
-				256F8939A04E4F21886A9111 /* CorpseCellClasses.h */,
 				422D2FE4AA2401EA8C3F2D8F /* CorpseClient.cpp */,
 				9CBE14E70FB474FCFCD6A8B9 /* CorpseClient.h */,
 				2AC15166B6F71CD338DD8D6F /* CorpseError.cpp */,
@@ -11761,7 +11758,6 @@
 				52678F911A04177C006A306D /* ControlFlowProfiler.h in Headers */,
 				725D045D67B3017EAC56561C /* CorpseAddress.h in Headers */,
 				7E83C42817D785F3003DC41B /* CorpseByteParser.h in Headers */,
-				F11DA542582149CFB5B4BFA6 /* CorpseCellClasses.h in Headers */,
 				80B96670131FB9EBB9AD49CC /* CorpseClient.h in Headers */,
 				85428E7BE0B3557DD2988043 /* CorpseError.h in Headers */,
 				7E83C43717D785F3003DC41B /* CorpseExportsTrie.h in Headers */,

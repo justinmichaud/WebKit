@@ -64,6 +64,8 @@ SnapshotDebugInfo::SnapshotDebugInfo(std::unique_ptr<lldb::SBDebugger>&& debugge
 SnapshotDebugInfo::~SnapshotDebugInfo()
 {
     m_classesOfVTables.clear();
+    m_dynamicTypesOfFirstWords.clear();
+    m_compileUnitClasses.clear();
     m_types.clear();
     m_debugger->DeleteTarget(*m_target);
     lldb::SBDebugger::Destroy(*m_debugger);
@@ -245,16 +247,35 @@ const TargetType* SnapshotDebugInfo::dynamicTypeAt(Snapshot& snapshot, Address a
         return nullptr;
     }
     Address vtable = Address { *vptr }.stripped();
+    if (!vtable || vtable == Address::deletedValue()) {
+        CORPSE_REPORT_IF(reportFailures, "The object at 0x%llx has no vtable pointer", address.toTargetVMAddress());
+        return nullptr;
+    }
+    // A vtable fixes where its complete object starts and the class it is, so
+    // each first word is resolved once, including those that are no vtable.
+    if (auto known = m_dynamicTypesOfFirstWords.find(vtable); known != m_dynamicTypesOfFirstWords.end()) {
+        if (!known->value.type) {
+            CORPSE_REPORT_IF(reportFailures, "The object at 0x%llx has no dynamic type, as an earlier lookup of its vtable found", address.toTargetVMAddress());
+            return nullptr;
+        }
+        completeObject = address + static_cast<uint64_t>(known->value.offsetToTop);
+        return known->value.type;
+    }
+    Address firstWord = vtable;
+    auto remember = [&](const TargetType* type) {
+        m_dynamicTypesOfFirstWords.add(firstWord, DynamicTypeOfFirstWord { type ? static_cast<int64_t>(completeObject - address) : 0, type });
+        return type;
+    };
     // An object that is not polymorphic, read as if it were, holds anything in
     // its first word; only a pointer into an image's data can be a vtable.
     if (!isInImage(vtable)) {
         CORPSE_REPORT_IF(reportFailures, "The vtable at 0x%llx is in no image with debug info", vtable.toTargetVMAddress());
-        return nullptr;
+        return remember(nullptr);
     }
     auto offsetToTop = memory.ptr<int64_t>(vtable - offsetToTopBeforeAddressPoint);
     if (!offsetToTop) {
         CORPSE_REPORT_IF(reportFailures, "Could not read the offset to top of the vtable at 0x%llx", vtable.toTargetVMAddress());
-        return nullptr;
+        return remember(nullptr);
     }
     completeObject = address + static_cast<uint64_t>(*offsetToTop);
 
@@ -268,7 +289,7 @@ const TargetType* SnapshotDebugInfo::dynamicTypeAt(Snapshot& snapshot, Address a
         vtable = Address { *vptr }.stripped();
         if (!isInImage(vtable)) {
             CORPSE_REPORT_IF(reportFailures, "The vtable at 0x%llx is in no image with debug info", vtable.toTargetVMAddress());
-            return nullptr;
+            return remember(nullptr);
         }
     }
 
@@ -278,7 +299,7 @@ const TargetType* SnapshotDebugInfo::dynamicTypeAt(Snapshot& snapshot, Address a
     });
     if (!entry.isNewEntry && !entry.iterator->value)
         CORPSE_REPORT_IF(reportFailures, "The vtable at 0x%llx names no class, as an earlier lookup found", vtable.toTargetVMAddress());
-    return entry.iterator->value;
+    return remember(entry.iterator->value);
 }
 
 const TargetType* SnapshotDebugInfo::classOfVTable(Snapshot& snapshot, Address vtable, ReportFailures reportFailures)
@@ -471,21 +492,128 @@ const TargetType* SnapshotDebugInfo::classNamed(Address inImage, const char* nam
     return &type(found);
 }
 
-std::optional<Address> SnapshotDebugInfo::staticMemberAddress(Address inImage, const TargetType& klass, const char* member)
+const TargetType* SnapshotDebugInfo::classNamedBeside(const TargetType& neighbor, const char* name)
 {
+    auto isComplete = [](lldb::SBType& found) {
+        return found.IsValid() && found.IsTypeComplete() && found.GetByteSize();
+    };
+    lldb::SBModule module = neighbor.m_type->GetModule();
+    lldb::SBType found = module.IsValid() ? module.FindFirstType(name) : lldb::SBType { };
+    // liblldb does not know the module of every type, such as one it completed from another unit.
+    for (uint32_t index = 0; !isComplete(found) && index < m_target->GetNumModules(); ++index)
+        found = m_target->GetModuleAtIndex(index).FindFirstType(name);
+    if (!isComplete(found))
+        return nullptr;
+    return &type(found);
+}
+
+struct SnapshotDebugInfo::CompileUnitClasses {
+    Vector<lldb::SBType> classes;
+};
+
+const TargetType* SnapshotDebugInfo::classOfStaticMember(Address variable, const char* member, std::span<const Address> codeOfClass)
+{
+    lldb::SBAddress resolved = m_target->ResolveLoadAddress(variable.toTargetVMAddress());
+    lldb::SBSymbol symbol = resolved.GetSymbol();
+    const char* linkageName = symbol.IsValid() ? symbol.GetMangledName() : nullptr;
+    const char* demangledName = symbol.IsValid() ? symbol.GetName() : nullptr;
+    if (!linkageName || !demangledName || symbol.GetStartAddress().GetLoadAddress(*m_target) != variable.toTargetVMAddress()) {
+        CORPSE_REPORT("No variable with a linkage name starts at 0x%llx", variable.toTargetVMAddress());
+        return nullptr;
+    }
+    std::string_view name { demangledName };
+    std::string scopedMember = std::string { "::" } + member;
+    if (!name.ends_with(scopedMember)) {
+        CORPSE_REPORT("The variable at 0x%llx is '%s', not a static member '%s'", variable.toTargetVMAddress(), demangledName, member);
+        return nullptr;
+    }
+    std::string className { name.substr(0, name.size() - scopedMember.size()) };
+
     // liblldb names a static member with clang's own mangler, from the class
-    // it built, as the compiler named its definition's symbol.
-    lldb::SBTypeStaticField field = klass.m_type->GetStaticFieldWithName(member);
-    const char* linkageName = field.IsValid() ? field.GetMangledName() : nullptr;
-    if (!linkageName)
-        return std::nullopt;
-    lldb::SBSymbol symbol = moduleAt(inImage).FindSymbol(linkageName);
-    if (!symbol.IsValid())
-        return std::nullopt;
-    lldb::addr_t address = symbol.GetStartAddress().GetLoadAddress(*m_target);
-    if (address == LLDB_INVALID_ADDRESS)
-        return std::nullopt;
-    return Address { address };
+    // it built, so a match means this class declares that member.
+    std::string_view expected { linkageName };
+    auto declaresVariable = [&](lldb::SBType& candidate) {
+        lldb::SBTypeStaticField field = candidate.GetStaticFieldWithName(member);
+        const char* candidateName = field.IsValid() ? field.GetMangledName() : nullptr;
+        return candidateName && std::string_view { candidateName } == expected;
+    };
+    // liblldb spells a template's closing brackets as clang prints C++98.
+    std::string spelledName = className;
+    for (size_t index = spelledName.find(">>"); index != std::string::npos; index = spelledName.find(">>", index))
+        spelledName.insert(index + 1, " ");
+    lldb::SBTypeList named = resolved.GetModule().FindTypes(spelledName.c_str());
+    for (uint32_t index = 0; index < named.GetSize(); ++index) {
+        lldb::SBType candidate = named.GetTypeAtIndex(index);
+        if (candidate.IsTypeComplete() && declaresVariable(candidate))
+            return &type(candidate);
+    }
+
+    // The demangler and liblldb spell some template arguments differently, such
+    // as an enumerator, so an instance of a class template is found among the
+    // classes of a compile unit that has code of the class, by the template's
+    // name. A code address finds its compile unit from the unit's code ranges.
+    size_t arguments = className.find('<');
+    if (arguments == std::string::npos) {
+        CORPSE_REPORT("No class named '%s' declares '%s'", className.c_str(), linkageName);
+        return nullptr;
+    }
+    std::string_view templateName = std::string_view { className }.substr(0, arguments + 1);
+    auto inUnitOf = [&](lldb::SBAddress codeAddress) {
+        lldb::SBCompileUnit unit = codeAddress.GetCompileUnit();
+        return classInCompileUnit(unit, codeAddress.GetModule(), templateName, [&](lldb::SBType& candidate) {
+            return declaresVariable(candidate);
+        });
+    };
+    for (Address code : codeOfClass) {
+        if (auto* klass = inUnitOf(m_target->ResolveLoadAddress(code.stripped().toTargetVMAddress())))
+            return klass;
+    }
+    // A class that inherits every function of its method table has code of its
+    // own elsewhere, whose symbol the demangler names as a member of it.
+    std::string memberPrefix = className + "::";
+    lldb::SBModule module = resolved.GetModule();
+    size_t symbolCount = module.GetNumSymbols();
+    for (size_t index = 0; index < symbolCount; ++index) {
+        lldb::SBSymbol code = module.GetSymbolAtIndex(index);
+        const char* name = code.GetType() == lldb::eSymbolTypeCode ? code.GetName() : nullptr;
+        if (!name || !std::string_view { name }.starts_with(memberPrefix))
+            continue;
+        if (auto* klass = inUnitOf(code.GetStartAddress()))
+            return klass;
+    }
+    CORPSE_REPORT("No class of the compile units of the code of '%s' declares '%s'", className.c_str(), linkageName);
+    return nullptr;
+}
+
+const TargetType* SnapshotDebugInfo::classInCompileUnit(lldb::SBCompileUnit& unit, const lldb::SBModule& module, std::string_view namePrefix, const Function<bool(lldb::SBType&)>& matches)
+{
+    lldb::SBFileSpec unitFile = unit.GetFileSpec();
+    lldb::SBFileSpec moduleFile = module.GetFileSpec();
+    if (!unit.IsValid() || !unitFile.GetFilename())
+        return nullptr;
+    auto string = [](const char* characters) {
+        return String::fromUTF8(characters ? characters : "");
+    };
+    String key = makeString(string(moduleFile.GetDirectory()), '/', string(moduleFile.GetFilename()), '\n', string(unitFile.GetDirectory()), '/', string(unitFile.GetFilename()));
+    auto& unitClasses = m_compileUnitClasses.ensure(key, [&] {
+        auto result = makeUniqueWithoutFastMallocCheck<CompileUnitClasses>();
+        lldb::SBTypeList types = unit.GetTypes(lldb::eTypeClassClass | lldb::eTypeClassStruct);
+        for (uint32_t index = 0; index < types.GetSize(); ++index)
+            result->classes.append(types.GetTypeAtIndex(index));
+        return result;
+    }).iterator->value;
+    std::optional<lldb::SBType> match;
+    for (lldb::SBType& candidate : unitClasses->classes) {
+        const char* candidateName = candidate.GetName();
+        if (!candidateName || !std::string_view { candidateName }.starts_with(namePrefix) || !matches(candidate))
+            continue;
+        if (match && !(*match == candidate)) {
+            CORPSE_REPORT("Two classes of the compile unit '%s' match", unitFile.GetFilename());
+            return nullptr;
+        }
+        match = candidate;
+    }
+    return match ? &type(*match) : nullptr;
 }
 
 auto SnapshotDebugInfo::dataSymbolsEndingWith(Address inImage, const char* suffix) -> Vector<Symbol>
@@ -568,11 +696,12 @@ static std::optional<lldb::SBValue> functionLocalStatic(lldb::SBTarget& target, 
     return std::nullopt;
 }
 
-auto SnapshotDebugInfo::globalVariables(const Function<bool(Address)>& isCandidate, size_t& untyped) -> Vector<GlobalVariable>
+auto SnapshotDebugInfo::globalVariables(const Function<bool(Address)>& isCandidate, size_t& untyped, Vector<Range>& merged) -> Vector<GlobalVariable>
 {
     CORPSE_DIAGNOSTICS(diagnostics, "listing the global variables of the images with debug info");
     Vector<GlobalVariable> result;
     untyped = 0;
+    merged.clear();
     uint32_t moduleCount = m_target->GetNumModules();
     for (uint32_t moduleIndex = 0; moduleIndex < moduleCount; ++moduleIndex) {
         lldb::SBModule module = m_target->GetModuleAtIndex(moduleIndex);
@@ -602,6 +731,11 @@ auto SnapshotDebugInfo::globalVariables(const Function<bool(Address)>& isCandida
             lldb::SBType variableType = variable ? variable->GetType() : lldb::SBType { };
             if (!variableType.IsValid()) {
                 ++untyped;
+                // A Mach-O symbol has no size, so liblldb ends it where the next symbol starts.
+                std::string_view symbolName { symbol.GetName() ? symbol.GetName() : "" };
+                lldb::addr_t end = symbol.GetEndAddress().GetLoadAddress(*m_target);
+                if ((symbolName.starts_with("_MergedGlobals") || symbolName.starts_with(".L_MergedGlobals")) && end != LLDB_INVALID_ADDRESS && end > address)
+                    merged.append({ Address { address }, end - address });
                 continue;
             }
             result.append({ Address { address }, type(variableType) });
@@ -650,7 +784,12 @@ const TargetType* SnapshotDebugInfo::classNamed(Address, const char*)
     RELEASE_ASSERT_NOT_REACHED();
 }
 
-std::optional<Address> SnapshotDebugInfo::staticMemberAddress(Address, const TargetType&, const char*)
+const TargetType* SnapshotDebugInfo::classNamedBeside(const TargetType&, const char*)
+{
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+const TargetType* SnapshotDebugInfo::classOfStaticMember(Address, const char*, std::span<const Address>)
 {
     RELEASE_ASSERT_NOT_REACHED();
 }
@@ -670,7 +809,7 @@ String SnapshotDebugInfo::symbolAt(Address)
     RELEASE_ASSERT_NOT_REACHED();
 }
 
-auto SnapshotDebugInfo::globalVariables(const Function<bool(Address)>&, size_t&) -> Vector<GlobalVariable>
+auto SnapshotDebugInfo::globalVariables(const Function<bool(Address)>&, size_t&, Vector<Range>&) -> Vector<GlobalVariable>
 {
     RELEASE_ASSERT_NOT_REACHED();
 }

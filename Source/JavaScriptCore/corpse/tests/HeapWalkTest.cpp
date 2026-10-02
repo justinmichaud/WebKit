@@ -301,6 +301,8 @@ struct HeapWalkFixture {
     uint64_t string { 0 }; // The JSString of the fixture's name.
     uint64_t stringImpl { 0 }; // Its StringImpl.
     uint64_t stringImplRefCount { 0 }; // One: only the JSString holds it.
+    uint64_t stringLength { 0 };
+    bool stringIs8Bit { false };
     // Objects the VM owns through pointers to classes this executable only declares.
     uint64_t jsonCache { 0 };
     uint64_t builtinExecutables { 0 };
@@ -478,6 +480,8 @@ Address createFixture()
     fixture.string = std::bit_cast<uint64_t>(name.asCell());
     fixture.stringImpl = std::bit_cast<uint64_t>(JSC::asString(name)->tryGetValueImpl());
     fixture.stringImplRefCount = JSC::asString(name)->tryGetValueImpl()->refCount();
+    fixture.stringLength = JSC::asString(name)->tryGetValueImpl()->length();
+    fixture.stringIs8Bit = JSC::asString(name)->tryGetValueImpl()->is8Bit();
 
     // A dictionary Structure keeps its PropertyTable, whose index buffer only its m_indexVector, an integer, holds.
     JSC::JSValue wide = object->get(globalObject, JSC::Identifier::fromString(vm, "wide"_s));
@@ -792,6 +796,33 @@ void checkReach(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFixture&
     TEST_ASSERT(!indexOf(fixture.freed[0]) && !indexOf(fixture.freed[1]), "libpas enumerates no freed object, small or large");
     for (size_t index = 0; index < numberOfProbes; ++index)
         TEST_ASSERT(fixture.probes[index] && isObject(fixture.probes[index], probeSizes[index]), makeString("libpas enumerates "_s, probeNames[index]));
+    // From outside the target, libpas enumerates what it enumerated inside,
+    // but for what the target allocated or freed after its own enumeration.
+    auto remote = heap.libpasAllocations();
+    TEST_ASSERT(remote && remote->size(), "libpas enumerates the target's heap from its snapshot");
+    if (remote) {
+        size_t matching = 0;
+        auto remoteSpan = remote->span();
+        for (const HeapWalk::Allocation& allocation : allocations) {
+            auto found = std::ranges::lower_bound(remoteSpan, allocation.address, { }, &HeapWalk::Allocation::address);
+            if (found != remoteSpan.end() && found->address == allocation.address && found->size == allocation.size)
+                ++matching;
+        }
+        if (verbose)
+            dataLogLn("    libpas enumerates ", remote->size(), " allocations from the snapshot, and ", allocations.size(), " in the target, ", matching, " of them the same");
+        TEST_ASSERT(matching >= allocations.size() - allocations.size() / 100 && remote->size() <= allocations.size() + allocations.size() / 100,
+            "libpas enumerates the same allocations from the snapshot as in the target");
+        auto isRemoteObject = [&](uint64_t address, size_t size) {
+            auto found = std::ranges::lower_bound(remoteSpan, Address { address }, { }, &HeapWalk::Allocation::address);
+            return found != remoteSpan.end() && found->address == Address { address } && found->size >= size;
+        };
+        TEST_ASSERT(std::ranges::all_of(fixture.reachable, [&](uint64_t address) { return isRemoteObject(address, sizeof(ReachableObject)); })
+            && isRemoteObject(fixture.leaked[0], leakedSizes[0]) && isRemoteObject(fixture.leaked[1], leakedSizes[1]),
+            "libpas enumerates each of the fixture's C++ objects from the snapshot");
+        for (size_t index = 0; index < numberOfProbes; ++index)
+            TEST_ASSERT(isRemoteObject(fixture.probes[index], probeSizes[index]), makeString("libpas enumerates "_s, probeNames[index], " from the snapshot"_s));
+    }
+
     unsigned cellsOutside = 0;
     heap.forEachLiveCell([&](const HeapWalk::Cell& cell) {
         if (!indexOf(cell.address.toTargetVMAddress()))
@@ -883,11 +914,16 @@ void checkReach(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFixture&
         auto allocation = indexOf(planted[index]);
         TEST_ASSERT(allocation && reach.bytesTypedIn[*allocation] == sizeof(ReachableObject), makeString("the walk types the whole object behind "_s, plantedNames[index]));
     }
-    // A StringImpl's characters follow it, in no declared type.
+    // A StringImpl's own characters follow its header, which they overlap the padding of.
     auto stringImplAllocation = indexOf(fixture.stringImpl);
-    TEST_ASSERT(stringImplAllocation && reach.bytesTypedIn[*stringImplAllocation] == sizeof(StringImpl), "the walk types the whole StringImpl behind a JSString");
+    size_t stringImplBytes = std::max<size_t>(sizeof(StringImpl), StringImpl::headerSize<Latin1Character>() + fixture.stringLength);
+    if (stringImplAllocation && reach.bytesTypedIn[*stringImplAllocation] != stringImplBytes)
+        dataLogLn("    the StringImpl's ", allocations[*stringImplAllocation].size, "-byte allocation has ", reach.bytesTypedIn[*stringImplAllocation], " bytes typed, not ", stringImplBytes);
+    TEST_ASSERT(fixture.stringIs8Bit && stringImplAllocation && reach.bytesTypedIn[*stringImplAllocation] == stringImplBytes, "the walk types the whole StringImpl behind a JSString, and its characters");
     TEST_ASSERT(reach.bytesTyped && reach.bytesTyped <= reach.bytesAllocated - reach.bytesExcluded - reach.bytesFreeInBlocks, "the walk types part of the heap");
     TEST_ASSERT(reach.overruns.isEmpty(), "the walk reads no value as a type bigger than its allocation");
+    TEST_ASSERT(std::ranges::none_of(reach.cellBytesBeyondClassByClass, [](auto& entry) { return entry.first == "JSC::JSFinalObject"_s; }),
+        "the walk reads a JSFinalObject's inline storage as JSValues");
 
     // Patch 13: with the global variables as roots, the walk misses nothing the test did not exclude.
     TEST_ASSERT(reach.globalVariables > 1000, "the walk reads the global variables of the images with debug info");
@@ -945,16 +981,21 @@ void checkReach(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFixture&
     dataLogLn("    ", reach.globalVariables, " global variables read as roots, and ", reach.untypedDataSymbols, " data symbols that are no variable");
     constexpr std::array<ASCIILiteral, HeapWalk::numberOfNotFollowedReasons> reasons {
         "pointers to declarations"_s, "pointers to types without a size"_s, "polymorphic pointees without a dynamic type"_s,
-        "JS cells without a class"_s, "encoded pointers to types not reached"_s,
+        "JS cells without a class"_s, "encoded pointers to types not reached"_s, "pointers to types that do not fit their allocation"_s,
     };
     for (size_t index = 0; index < reasons.size(); ++index)
         dataLogLn("    not followed: ", reach.notFollowed[index], " ", reasons[index]);
     for (size_t index = 0; index < causes.size(); ++index)
         dataLogLn("    missed and not excluded: ", reach.bytesMissedByCause[index], " bytes ", causes[index]);
     dataLogLn("    of which held by the safe point thread's own values: ", threadValueBytes, " bytes");
-    for (const HeapWalk::Untyped& untyped : reach.mostUntyped)
+    for (auto& [kind, bytes] : reach.untypedByKind)
+        dataLogLn("    untyped bytes: ", bytes, " in allocations with ", kind);
+    for (auto& [name, bytes] : reach.cellBytesBeyondClassByClass)
+        dataLogLn("    beyond class: ", bytes, " bytes of '", name, "' cells");
+    for (const HeapWalk::Untyped& untyped : reach.mostUntyped) {
         dataLogLn("    untyped: ", untyped.bytesUntyped, " of ", untyped.allocation.size, " bytes at 0x", hex(untyped.allocation.address.toTargetVMAddress()),
-            ", read as ", untyped.typeAtStart.isNull() ? "nothing at its start"_s : untyped.typeAtStart);
+            ", read as ", untyped.typeAtStart.isNull() ? "nothing at its start"_s : untyped.typeAtStart, ", reached by ", untyped.reachedBy);
+    }
     for (const String& overrun : reach.overruns)
         dataLogLn("    overrun: ", overrun);
 }
@@ -980,11 +1021,12 @@ void checkCellClasses(const HeapWalk& heap, const LiveCells& cells, const HeapWa
         classes.add(klass);
     }
     TEST_ASSERT_EQ(withoutClass, 0u, "every live JS cell's ClassInfo names its C++ class");
-    Vector<String> unlisted = heap.unlistedCellClasses();
-    for (const String& name : unlisted)
-        dataLogLn("    ", name, " is not in mya's list of cell classes, CorpseCellClasses.h");
-    TEST_ASSERT(unlisted.isEmpty(), "every s_info in JavaScriptCore is the s_info of a class in mya's list");
-    TEST_ASSERT(heap.listedCellClassCount() > 300, "JavaScriptCore has the classes of mya's list");
+    size_t classInfoCount = 0;
+    Vector<String> withoutClasses = heap.classInfosWithoutClass(classInfoCount);
+    for (const String& name : withoutClasses)
+        dataLogLn("    ", name, " names no class");
+    TEST_ASSERT(withoutClasses.isEmpty(), "every s_info in JavaScriptCore is the s_info of a class");
+    TEST_ASSERT(classInfoCount > 300, "JavaScriptCore has the s_info of hundreds of classes");
     TEST_ASSERT_EQ(biggerThanCell, 0u, "no live JS cell is smaller than its class");
     if (verbose)
         dataLogLn("    the live JS cells are of ", classes.size(), " C++ classes");

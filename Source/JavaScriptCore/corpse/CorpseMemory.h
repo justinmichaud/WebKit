@@ -33,6 +33,7 @@
 #include <stdint.h>
 #include <wtf/ForbidHeapAllocation.h>
 #include <wtf/HashMap.h>
+#include <wtf/HashSet.h>
 #include <wtf/RefPtr.h>
 #include <wtf/TZoneMalloc.h>
 #include <wtf/Vector.h>
@@ -101,10 +102,12 @@ public:
     size_t mappedPageCount() const;
 
     // Keeps the `count` most recently used mappings mapped after their last
-    // reader releases them, so that a walk reading many small values maps each
-    // page once rather than once per read. Zero, the default, releases a
-    // mapping with its last reader, and drops those kept.
+    // reader releases them, and maps reads in aligned windows of
+    // recentMappingWindowSize, so that a walk reading many small values maps
+    // each window once rather than once per read. Zero, the default, releases
+    // a mapping with its last reader, and drops those kept.
     void keepRecentMappings(size_t count);
+    static constexpr target_address_t recentMappingWindowSize = 1024 * 1024;
 
     void dump(const char* indent = "    ") const;
 
@@ -159,6 +162,8 @@ private:
     // The most recently used Regions, each kept with one reference, in a ring.
     Vector<RefPtr<Region>> m_recentRegions;
     size_t m_nextRecentRegion { 0 };
+    HashSet<target_address_t> m_unmappableWindows; // Windows with a hole, which reads map page by page.
+    HashSet<target_address_t> m_unmappablePages;
 };
 
 } // namespace Corpse
