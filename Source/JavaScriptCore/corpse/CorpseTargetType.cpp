@@ -54,7 +54,6 @@ static UTF8CString copyOf(const char* string)
 TargetType::TargetType(SnapshotDebugInfo& debugInfo, const lldb::SBType& canonicalType)
     : m_debugInfo(debugInfo)
     , m_type(makeUniqueWithoutFastMallocCheck<lldb::SBType>(canonicalType))
-    , m_byteSize(m_type->GetByteSize())
 {
 }
 
@@ -135,6 +134,17 @@ const TargetType* TargetType::templateArgument(unsigned index) const
     return &m_debugInfo.type(argument);
 }
 
+size_t TargetType::alignment() const
+{
+    return static_cast<size_t>(m_type->GetByteAlign());
+}
+
+size_t TargetType::readByteSize() const
+{
+    m_byteSize = static_cast<size_t>(m_type->GetByteSize());
+    return *m_byteSize;
+}
+
 std::optional<uint64_t> TargetType::templateIntegerArgument(unsigned index) const
 {
     if (index >= m_type->GetNumberOfTemplateArguments() || m_type->GetTemplateArgumentKind(index) != lldb::eTemplateArgumentKindIntegral)
@@ -163,7 +173,7 @@ TargetType::Layout TargetType::readLayout() const
             bool isBitfield = member.IsBitfield();
             // A flexible array member, like CStringBuffer's characters, starts where
             // the class ends: it is storage after the class, not part of it.
-            if (offsetInBits / 8 >= m_byteSize)
+            if (offsetInBits / 8 >= byteSize())
                 continue;
             result.properFields.append(Field {
                 copyOf(member.GetName()),
@@ -199,7 +209,7 @@ TargetType::Layout TargetType::readLayout() const
 
     if (typeClass & lldb::eTypeClassArray) {
         const TargetType& element = m_debugInfo.type(m_type->GetArrayElementType());
-        return Array { element, element.byteSize() ? m_byteSize / element.byteSize() : 0 };
+        return Array { element, element.byteSize() ? byteSize() / element.byteSize() : 0 };
     }
 
     if (typeClass & lldb::eTypeClassPointer)
@@ -244,6 +254,16 @@ const TargetType::Layout& TargetType::layout() const
 }
 
 const TargetType* TargetType::templateArgument(unsigned) const
+{
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+size_t TargetType::alignment() const
+{
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+size_t TargetType::readByteSize() const
 {
     RELEASE_ASSERT_NOT_REACHED();
 }

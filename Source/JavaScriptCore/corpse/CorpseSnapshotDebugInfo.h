@@ -31,6 +31,8 @@
 
 #include <JavaScriptCore/CorpseAddress.h>
 #include <memory>
+#include <optional>
+#include <wtf/Function.h>
 #include <wtf/HashMap.h>
 #include <wtf/RefCounted.h>
 #include <wtf/RefPtr.h>
@@ -41,6 +43,7 @@
 
 namespace lldb {
 class SBDebugger;
+class SBModule;
 class SBTarget;
 class SBType;
 }
@@ -72,12 +75,41 @@ public:
     // either way.
     const TargetType* dynamicTypeIfAnyAt(Snapshot&, Address, Address& completeObject);
 
-    // The class among those of the compile unit that defines the global
-    // variable starting at `variable` whose static member `memberName` has the
-    // linkage name `linkageName`, or, if that is null, the variable's own
-    // symbol's. Exactly one class must match. Null, having reported why, if
-    // none does.
-    const TargetType* classInCompileUnitOf(Address variable, const char* memberName, const char* linkageName = nullptr);
+    // The complete class liblldb names `name` in the image mapped at
+    // `inImage`, such as an entry of mya's list of cell classes. `name` is
+    // spelled as liblldb spells it. Null, silently, if that image has none.
+    const TargetType* classNamed(Address inImage, const char* name);
+
+    // Where the static data member `member` of `klass` is: the symbol, in the
+    // image mapped at `inImage`, whose name is the member's linkage name.
+    // Nullopt, silently, if the class has no such member or the image no such symbol.
+    std::optional<Address> staticMemberAddress(Address inImage, const TargetType& klass, const char* member);
+
+    struct Symbol {
+        Address address;
+        String name; // Demangled.
+    };
+    // Every data symbol of the image mapped at `inImage` whose mangled name
+    // ends in `suffix`.
+    Vector<Symbol> dataSymbolsEndingWith(Address inImage, const char* suffix);
+
+    // Where the symbol `name`, a mangled name, is in the image mapped at `inImage`.
+    std::optional<Address> symbolAddress(Address inImage, const char* name);
+
+    // The symbol `address` lies in, as "name" or "name+0x10". Null if none does.
+    String symbolAt(Address);
+
+    struct GlobalVariable {
+        Address address;
+        const TargetType& type;
+    };
+    // Every global variable of every image with debug info at an address
+    // `isCandidate` accepts, as its declared type: each data symbol the debug
+    // info describes as a variable at the symbol's address. A function-local
+    // static is found in its function. The candidate data symbols that are no
+    // variable the debug info describes, such as guard variables, are counted
+    // in `untyped`.
+    Vector<GlobalVariable> globalVariables(const Function<bool(Address)>& isCandidate, size_t& untyped);
 
 private:
     friend class TargetType;
@@ -104,15 +136,14 @@ private:
     // over vtable slots ends.
     const TargetType* classOfDestructor(Address function, bool& inImage);
     bool isInImage(Address) const;
+    // The module of the image mapped at `address`, which may be invalid.
+    lldb::SBModule moduleAt(Address) const;
 
     std::unique_ptr<lldb::SBDebugger> m_debugger;
     std::unique_ptr<lldb::SBTarget> m_target;
     // By name; types of one name from different images or anonymous namespaces share an entry.
     HashMap<String, Vector<std::unique_ptr<TargetType>>> m_types;
     HashMap<Address, const TargetType*> m_classesOfVTables;
-    struct CompileUnitClasses;
-    // By the compile unit's image and source file.
-    HashMap<String, std::unique_ptr<CompileUnitClasses>> m_compileUnitClasses;
 };
 
 } // namespace Corpse

@@ -58,3 +58,8 @@ STRIP_INSTALLED_PRODUCT = NO;
 HEADER_SEARCH_PATHS = $(SRCROOT) $(SRCROOT)/corpse "$(JAVASCRIPTCORE_FRAMEWORKS_DIR)/JavaScriptCore.framework/PrivateHeaders" $(inherited);
 
 SYSTEM_HEADER_SEARCH_PATHS = $(inherited) $(WK_LLDB_SYSTEM_HEADER_SEARCH_PATHS);
+
+// A heap walk reads every value of a heap through WTF's containers, which at
+// -O0 makes a walk of a small heap take twice as long. JavaScriptCore itself
+// stays as the configuration says.
+WK_DEFAULT_GCC_OPTIMIZATION_LEVEL[config=Debug] = 2;

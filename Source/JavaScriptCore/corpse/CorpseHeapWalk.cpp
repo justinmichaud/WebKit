@@ -28,11 +28,15 @@
 
 #if ENABLE(MYA)
 
+#include "CorpseCellClasses.h"
 #include "CorpseError.h"
 #include "CorpseLimits.h"
+#include "CorpseRegion.h"
+#include "CorpseThread.h"
 #include <JavaScriptCore/BlockDirectoryBits.h>
 #include <JavaScriptCore/CollectionScope.h>
 #include <JavaScriptCore/FreeList.h>
+#include <JavaScriptCore/JITCode.h>
 #include <JavaScriptCore/JSString.h>
 #include <JavaScriptCore/MarkedBlock.h>
 #include <JavaScriptCore/MarkedSpace.h>
@@ -46,8 +50,10 @@
 #include <wtf/CompactPtr.h>
 #include <wtf/HashMap.h>
 #include <wtf/HashSet.h>
+#include <wtf/SegmentedVector.h>
 #include <wtf/HexNumber.h>
 #include <wtf/StdLibExtras.h>
+#include <wtf/WTFConfig.h>
 #include <wtf/Vector.h>
 #include <wtf/text/MakeString.h>
 #include <wtf/text/WTFString.h>
@@ -99,15 +105,34 @@ HeapWalk::HeapWalk(Snapshot& snapshot, Address rootsAddress)
     m_jsCell = *cell.typed();
     m_startOfStructureHeap = structureStructure.address().toTargetVMAddress() - static_cast<uint64_t>(*bits);
 
-    TargetValue blockHeaderPointer = roots->properField("markedBlockHeader");
-    TargetValue localAllocatorPointer = roots->properField("localAllocator");
+    // Structure::s_info, which every Structure's ClassInfo is, is in JavaScriptCore's image.
+    m_javaScriptCoreImage = structureStructure.field<const ClassInfo*>("m_classInfo").pointerValue().value_or(Address { });
+    auto classNamed = [&](const char* name) -> const TargetType* {
+        const TargetType* klass = m_javaScriptCoreImage ? m_debugInfo->classNamed(m_javaScriptCoreImage, name) : nullptr;
+        if (!klass)
+            CORPSE_REPORT("JavaScriptCore's image has no class '%s'", name);
+        return klass;
+    };
+    m_blockHeaderClass = classNamed("JSC::MarkedBlock::Header");
+    m_localAllocatorClass = classNamed("JSC::LocalAllocator");
+    m_stringImplClass = classNamed("WTF::StringImpl");
+    m_fatEntryClass = classNamed("JSC::SymbolTableEntry::FatEntry");
+    m_wtfConfigClass = classNamed("WTF::Config");
+    m_jscConfigClass = classNamed("JSC::Config");
+    m_config = m_javaScriptCoreImage ? m_debugInfo->symbolAddress(m_javaScriptCoreImage, "g_config") : std::nullopt;
+    if (!m_config)
+        CORPSE_REPORT("JavaScriptCore's image has no symbol 'g_config'");
+#if ENABLE(JIT)
+    m_baselineJITDataClass = classNamed("JSC::BaselineJITData");
+#endif
+#if ENABLE(DFG_JIT)
+    m_dfgJITDataClass = classNamed("JSC::DFG::JITData");
+#endif
     auto atSafePoint = roots->properField("atSafePoint").integer();
-    if (!blockHeaderPointer || !localAllocatorPointer || !atSafePoint) {
+    if (!m_blockHeaderClass || !m_localAllocatorClass || !m_stringImplClass || !m_fatEntryClass || !m_wtfConfigClass || !m_jscConfigClass || !m_config || !atSafePoint) {
         m_vm = { };
         return;
     }
-    m_blockHeaderPointer = WTF::move(blockHeaderPointer);
-    m_localAllocatorPointer = WTF::move(localAllocatorPointer);
     m_isAtSafePoint = *atSafePoint;
 }
 
@@ -305,7 +330,7 @@ bool HeapWalk::forEachBlock(const Function<IterationStatus(Address block)>& func
 // MarkedBlock::header().
 Remote<MarkedBlock::Header> HeapWalk::header(Address block) const
 {
-    return Remote<MarkedBlock::Header*>(TargetValue { *m_blockHeaderPointer }).pointeeAt(block + MarkedBlock::headerAtom * MarkedBlock::atomSize);
+    return Remote<MarkedBlock::Header>(TargetValue::at(m_roots->snapshot(), block + MarkedBlock::headerAtom * MarkedBlock::atomSize, *m_blockHeaderClass));
 }
 
 // MarkedSpace::stopAllocating: BlockDirectory::stopAllocating for each
@@ -314,7 +339,6 @@ Remote<MarkedBlock::Header> HeapWalk::header(Address block) const
 std::optional<HashMap<uint64_t, HeapWalk::AtomBits>> HeapWalk::stopAllocating(const Remote<MarkedSpace>& space) const
 {
     using Allocators = SentinelLinkedList<LocalAllocator, BasicRawSentinelNode<LocalAllocator>>;
-    Remote<LocalAllocator*> allocatorPointer { TargetValue { *m_localAllocatorPointer } };
     HashMap<uint64_t, AtomBits> result;
     bool failed = false;
 
@@ -327,7 +351,7 @@ std::optional<HashMap<uint64_t, HeapWalk::AtomBits>> HeapWalk::stopAllocating(co
         }
         bool readable = RemoteTraits<Allocators>::forEach(directory.field<Allocators>("m_localAllocators"), [&](const Remote<BasicRawSentinelNode<LocalAllocator>>& node) {
             // A LocalAllocator's list node is its first base.
-            Remote<LocalAllocator> allocator = allocatorPointer.pointeeAt(node.address());
+            Remote<LocalAllocator> allocator { TargetValue::at(m_roots->snapshot(), node.address(), *m_localAllocatorClass) };
             if (allocator.base<void>(0).address() != node.address()) {
                 CORPSE_REPORT("The LocalAllocator at 0x%llx is not at its list node", forReport(node.address()));
                 failed = true;
@@ -452,6 +476,8 @@ public:
 
     void run();
     void summarize(const Vector<HeapWalk::Allocation>& excluded, size_t listCount, HeapWalk::Reach&);
+    // Fills in result.misses and result.bytesMissedByCause, after summarize.
+    void explainMisses(const Vector<HeapWalk::Allocation>& excluded, const Vector<HeapWalk::Allocation>& notReferrers, HeapWalk::Reach&);
 
 private:
     using NotFollowed = HeapWalk::NotFollowed;
@@ -472,6 +498,8 @@ private:
     enum class IsComplete : bool { No, Yes };
     // Every member but `except`, which a reader reads its own way.
     void walkMembers(const TargetValue&, IsComplete, const char* except = nullptr);
+    void walkGlobalVariables();
+    void walkStacks();
     void walkBlock(Address);
     void walkCell(const HeapWalk::Cell&);
 
@@ -483,9 +511,23 @@ private:
     // Readers for values whose pointers the debug info cannot describe, picked
     // by the qualified name of a class the walk has reached. True if `value` was
     // one, and has been read.
-    bool walkByName(const TargetValue&, std::string_view name);
+    bool walkByName(const TargetValue&);
+    enum class Reader : uint8_t { None, Vector, HashTable, RobinHoodHashTable, TrailingArray, ButterflyArray, SegmentedVector, ConcurrentBufferArray, SymbolTableEntry, CodeBlock, AlignedStorage, CodePointer, LazyPointer, CompactPointer, PackedPointer, JSString, PropertyTable, Optional };
+    Reader readerFor(const TargetType&);
+    static Reader readerNamed(std::string_view qualifiedName);
     void walkVector(const TargetValue&);
     void walkHashTable(const TargetValue&);
+    void walkRobinHoodHashTable(const TargetValue&);
+    void walkTrailingArray(const TargetValue&);
+    void walkButterflyArray(const TargetValue&);
+    void walkCodeBlock(const TargetValue&);
+    void walkSegmentedVector(const TargetValue&);
+    void walkConcurrentBufferArray(const TargetValue&);
+    void walkSymbolTableEntry(const TargetValue&);
+    void walkAlignedStorage(const TargetValue&);
+    // `count` values of type `element` from `address`, each an object of its own.
+    void walkElements(Address, const TargetType& element, uint64_t count);
+    void walkCodePointer(const TargetValue&);
     void walkTaggedPointer(const TargetValue&, const char* field, unsigned templateArgument, uint64_t tagMask);
     void walkCompactPointer(const TargetValue&);
     void walkPackedPointer(const TargetValue&);
@@ -502,12 +544,22 @@ private:
     Vector<bool> m_reached;
     // Each object is walked once as each type it is reached as.
     HashSet<std::pair<uint64_t, uint64_t>> m_visited;
+    HashMap<const TargetType*, Reader> m_readers;
     Vector<TargetValue> m_worklist;
     struct Range {
         uint64_t begin;
         uint64_t end;
+        const TargetType* type; // Read at `begin`.
     };
-    Vector<Range> m_typed; // Every object's bytes, clipped to its allocation.
+    Vector<Range> m_typed; // Every object's bytes, clipped to its allocation, sorted by summarize.
+    // What holds the word at `address`, of an allocation the walk reached.
+    String holderInReached(Address, size_t allocationIndex) const;
+    struct Holder {
+        HeapWalk::MissCause cause;
+        String description;
+        std::optional<size_t> missedHolder; // For MissCause::Missed, the allocation's index.
+    };
+    Holder holderOf(Address word);
     Vector<const TargetType*> m_typeAtStart; // For each allocation, the first type read where it starts.
     // A MarkedBlock is one allocation, whose free atoms are the JS heap's free memory.
     Vector<bool> m_isBlock;
@@ -515,6 +567,8 @@ private:
     Vector<String> m_overruns;
     std::array<uint64_t, HeapWalk::numberOfNotFollowedReasons> m_notFollowed { };
     uint64_t m_cellsWithClass { 0 };
+    uint64_t m_globalVariables { 0 };
+    uint64_t m_untypedDataSymbols { 0 };
     uint64_t m_cellBytesBeyondClass { 0 };
     const TargetType* m_contextClass { nullptr };
     const TargetType::Field* m_contextField { nullptr };
@@ -555,7 +609,7 @@ void ReachWalk::typed(Address address, uint64_t size, const TargetType& type)
             ", reached through "_s, context(), ", runs past the end of its "_s, allocation.size, "-byte allocation"_s));
         size = end - address.toTargetVMAddress();
     }
-    m_typed.append({ address.toTargetVMAddress(), address.toTargetVMAddress() + size });
+    m_typed.append({ address.toTargetVMAddress(), address.toTargetVMAddress() + size, &type });
 }
 
 void ReachWalk::enqueue(const TargetValue& value, IsObject isObject)
@@ -579,6 +633,10 @@ void ReachWalk::run()
     // JavaScriptCore describes it, with every type it owns complete.
     walkMembers(*m_heap.m_roots, IsComplete::Yes, "vm");
     drain();
+    walkGlobalVariables();
+    drain();
+    walkStacks();
+    drain();
     m_heap.forEachBlock([&](Address block) {
         walkBlock(block);
         drain();
@@ -589,6 +647,82 @@ void ReachWalk::run()
         drain();
         return IterationStatus::Continue;
     });
+}
+
+// Every global variable of every image with debug info, as its own image
+// describes it, including function-local statics.
+void ReachWalk::walkGlobalVariables()
+{
+    size_t untyped = 0;
+    const Vector<Region>& regions = m_snapshot.regions();
+    // Memory the target cannot write holds no address it allocated, except
+    // memory it froze after writing it: g_config, which is read below.
+    auto variables = m_heap.m_debugInfo->globalVariables([&](Address address) {
+        auto region = Region::findContaining(regions, address);
+        return region && region->isWritable();
+    }, untyped);
+    for (const SnapshotDebugInfo::GlobalVariable& variable : variables) {
+        ++m_globalVariables;
+        m_contextClass = nullptr;
+        m_contextField = nullptr;
+        TargetValue value = TargetValue::at(m_snapshot, variable.address, variable.type);
+        if (std::holds_alternative<TargetType::Class>(variable.type.layout()))
+            enqueue(value);
+        else
+            walk(value);
+    }
+    m_untypedDataSymbols = untyped;
+
+    // g_config is an array of words, which WTF reads as its Config at
+    // startOffsetOfWTFConfig (addressOfWTFConfig), and JavaScriptCore as its
+    // own at the WTF Config's spaceForExtensions (addressOfJSCConfig).
+    Address wtfConfig = *m_heap.m_config + WTF::startOffsetOfWTFConfig;
+    enqueue(TargetValue::at(m_snapshot, wtfConfig, *m_heap.m_wtfConfigClass));
+    auto* layout = std::get_if<TargetType::Class>(&m_heap.m_wtfConfigClass->layout());
+    for (const TargetType::Field& field : layout ? layout->properFields : Vector<TargetType::Field> { }) {
+        if (std::string_view { field.name.legacyCStringPointer() } == "spaceForExtensions")
+            enqueue(TargetValue::at(m_snapshot, wtfConfig + field.offset, *m_heap.m_jscConfigClass));
+    }
+}
+
+// The words of each thread's stack in use, from its stack pointer up, as
+// conservative roots, as the collector scans a stack: a word inside an
+// allocation reaches it, and an allocation that starts with a polymorphic
+// object is read as its dynamic type. A thread whose stack pointer is not
+// known has its whole stack scanned.
+void ReachWalk::walkStacks()
+{
+    constexpr size_t wordsPerRead = 64 * 1024;
+    for (const Thread& thread : m_snapshot.threads()) {
+        if (!thread.hasStack())
+            continue;
+        Address start = thread.stackPointer() && thread.stackRegion().contains(thread.stackPointer()) ? thread.stackPointer() : thread.stackRegion().base();
+        start = Address { roundUpToMultipleOf<sizeof(uint64_t)>(start.toTargetVMAddress()) };
+        Address end = thread.stackRegion().end();
+        while (start < end) {
+            size_t count = std::min<uint64_t>(wordsPerRead, (end - start) / sizeof(uint64_t));
+            if (!count)
+                break;
+            auto words = m_snapshot.memory().span<uint64_t>(start, count);
+            start = start + count * sizeof(uint64_t);
+            if (!words)
+                continue;
+            for (uint64_t word : std::span<const uint64_t> { words }) {
+                auto index = allocationOf(Address { word }, 1);
+                if (!index || m_reached[*index])
+                    continue;
+                m_reached[*index] = true;
+                Address allocation = m_allocations[*index].address;
+                Address completeObject;
+                const TargetType* dynamicType = m_heap.m_debugInfo->dynamicTypeIfAnyAt(m_snapshot, allocation, completeObject);
+                if (dynamicType && completeObject == allocation) {
+                    m_contextClass = nullptr;
+                    m_contextField = nullptr;
+                    enqueue(TargetValue::at(m_snapshot, allocation, *dynamicType), IsObject::Yes);
+                }
+            }
+        }
+    }
 }
 
 void ReachWalk::walkBlock(Address block)
@@ -642,6 +776,9 @@ void ReachWalk::walk(const TargetValue& value)
         return;
     }
     if (auto* array = std::get_if<TargetType::Array>(&layout)) {
+        // An integer leads nowhere, and a large table of them is common in static data.
+        if (std::holds_alternative<TargetType::Integer>(array->element.layout()) || std::holds_alternative<TargetType::Other>(array->element.layout()))
+            return;
         // An element of class type is an object in its own right, and the others are walked in place.
         for (size_t index = 0; index < array->count; ++index) {
             TargetValue element = TargetValue::at(m_snapshot, value.address() + index * array->element.byteSize(), array->element);
@@ -657,8 +794,7 @@ void ReachWalk::walkClass(const TargetValue& value)
 {
     m_contextClass = &value.type();
     m_contextField = nullptr;
-    auto name = value.type().name();
-    if (walkByName(value, std::string_view { name.legacyCStringPointer() }))
+    if (walkByName(value))
         return;
     walkMembers(value, IsComplete::Yes);
 }
@@ -686,10 +822,9 @@ void ReachWalk::walkMembers(const TargetValue& value, IsComplete isComplete, con
         TargetValue baseValue = value.base(base);
         if (!baseValue)
             return;
-        auto name = baseValue.type().name();
         m_contextClass = &baseValue.type();
         m_contextField = nullptr;
-        if (!walkByName(baseValue, std::string_view { name.legacyCStringPointer() }))
+        if (!walkByName(baseValue))
             walkMembers(baseValue, IsComplete::No);
     };
     for (const TargetType::Base& base : klass->bases)
@@ -736,42 +871,114 @@ void ReachWalk::follow(Address address, const TargetType& type)
     enqueue(TargetValue::at(m_snapshot, address, type), IsObject::Yes);
 }
 
-bool ReachWalk::walkByName(const TargetValue& value, std::string_view name)
+// Readers for the classes the debug info cannot describe, picked once per type
+// by its qualified name.
+auto ReachWalk::readerFor(const TargetType& type) -> Reader
 {
-    if (name.starts_with("WTF::Vector<")) {
+    return m_readers.ensure(&type, [&] {
+        auto qualifiedName = type.name();
+        return readerNamed(std::string_view { qualifiedName.legacyCStringPointer() });
+    }).iterator->value;
+}
+
+auto ReachWalk::readerNamed(std::string_view name) -> Reader
+{
+    if (name.starts_with("WTF::Vector<"))
+        return Reader::Vector;
+    if (name.starts_with("WTF::HashTable<"))
+        return Reader::HashTable;
+    if (name.starts_with("WTF::RobinHoodHashTable<"))
+        return Reader::RobinHoodHashTable;
+    if (name.starts_with("WTF::TrailingArray<"))
+        return Reader::TrailingArray;
+    if (name.starts_with("WTF::ButterflyArray<"))
+        return Reader::ButterflyArray;
+    if (name.starts_with("WTF::SegmentedVector<"))
+        return Reader::SegmentedVector;
+    if (name.starts_with("WTF::ConcurrentBuffer<") && name.ends_with(">::Array"))
+        return Reader::ConcurrentBufferArray;
+    if (name == "JSC::SymbolTableEntry")
+        return Reader::SymbolTableEntry;
+    if (name == "JSC::CodeBlock")
+        return Reader::CodeBlock;
+    if (name.starts_with("WTF::AlignedStorage<"))
+        return Reader::AlignedStorage;
+    if (name.starts_with("WTF::CodePtr<"))
+        return Reader::CodePointer;
+    if (name.starts_with("WTF::LazyUniqueRef<") || name.starts_with("WTF::LazyRef<"))
+        return Reader::LazyPointer;
+    if (name.starts_with("WTF::CompactPtr<"))
+        return Reader::CompactPointer;
+    if (name.starts_with("WTF::PackedAlignedPtr<"))
+        return Reader::PackedPointer;
+    if (name == "JSC::JSString")
+        return Reader::JSString;
+    if (name == "JSC::PropertyTable")
+        return Reader::PropertyTable;
+    if (name.starts_with("std::optional<") || name.starts_with("std::__1::optional<"))
+        return Reader::Optional;
+    return Reader::None;
+}
+
+bool ReachWalk::walkByName(const TargetValue& value)
+{
+    switch (readerFor(value.type())) {
+    case Reader::None:
+        return false;
+    case Reader::Vector:
         walkVector(value);
         return true;
-    }
-    if (name.starts_with("WTF::HashTable<")) {
+    case Reader::HashTable:
         walkHashTable(value);
         return true;
-    }
-    if (name.starts_with("WTF::LazyUniqueRef<") || name.starts_with("WTF::LazyRef<")) {
+    case Reader::RobinHoodHashTable:
+        walkRobinHoodHashTable(value);
+        return true;
+    case Reader::TrailingArray:
+        walkTrailingArray(value);
+        return true;
+    case Reader::ButterflyArray:
+        walkButterflyArray(value);
+        return true;
+    case Reader::SegmentedVector:
+        walkSegmentedVector(value);
+        return true;
+    case Reader::ConcurrentBufferArray:
+        walkConcurrentBufferArray(value);
+        return true;
+    case Reader::SymbolTableEntry:
+        walkSymbolTableEntry(value);
+        return true;
+    case Reader::CodeBlock:
+        walkCodeBlock(value);
+        return true;
+    case Reader::AlignedStorage:
+        walkAlignedStorage(value);
+        return true;
+    case Reader::CodePointer:
+        walkCodePointer(value);
+        return true;
+    case Reader::LazyPointer:
         // LazyRef::lazyTag and initializingTag: a pointer to the function that will make the object.
         walkTaggedPointer(value, "m_pointer", 1, 0x3);
         return true;
-    }
-    if (name.starts_with("WTF::CompactPtr<")) {
+    case Reader::CompactPointer:
         walkCompactPointer(value);
         return true;
-    }
-    if (name.starts_with("WTF::PackedAlignedPtr<")) {
+    case Reader::PackedPointer:
         walkPackedPointer(value);
         return true;
-    }
-    if (name == "JSC::JSString") {
+    case Reader::JSString:
         walkJSString(value);
         return true;
-    }
-    if (name == "JSC::PropertyTable") {
+    case Reader::PropertyTable:
         walkPropertyTable(value);
         return true;
-    }
-    if (name.starts_with("std::optional<") || name.starts_with("std::__1::optional<")) {
+    case Reader::Optional:
         walkOptional(value);
         return true;
     }
-    return false;
+    RELEASE_ASSERT_NOT_REACHED();
 }
 
 // Whether a std::optional holds a value: libstdc++'s
@@ -838,8 +1045,10 @@ void ReachWalk::walkVector(const TargetValue& vector)
         enqueue(TargetValue::at(m_snapshot, *address + index * element.byteSize(), element), IsObject::Yes);
 }
 
-// Every bucket that is neither empty nor deleted. A deleted bucket's value has
-// been destroyed but not cleared, so a raw pointer there still holds its old address.
+// Every bucket, empty, deleted or live, as the bucket's type. An empty bucket
+// holds its traits' empty value, and, in an ENABLE(MYA_HEAP) build, a deleted
+// one holds its deleted key and zeros (hashTraitsDeleteBucket), so no bucket
+// holds a stale address, and the table's traits are not needed.
 void ReachWalk::walkHashTable(const TargetValue& table)
 {
     walkMembers(table, IsComplete::Yes, "m_table");
@@ -847,22 +1056,233 @@ void ReachWalk::walkHashTable(const TargetValue& table)
     if (!buckets || !buckets->size)
         return;
     auto address = buckets->table.pointerValue();
+    if (!address)
+        return;
+    if (auto index = allocationOf(*address, 1))
+        m_reached[*index] = true;
     const TargetType& bucket = std::get<TargetType::Pointer>(buckets->table.type().layout()).pointee;
-    auto traits = defaultHashTraits(table.type());
-    if (!address || !bucket.byteSize() || !traits) {
-        notFollowed(NotFollowed::HashTableNotRead);
+    if (!bucket.byteSize()) {
+        notFollowed(NotFollowed::Declaration);
+        return;
+    }
+    for (unsigned index = 0; index < buckets->size; ++index)
+        enqueue(TargetValue::at(m_snapshot, *address + static_cast<uint64_t>(index) * bucket.byteSize(), bucket), IsObject::Yes);
+}
+
+void ReachWalk::walkElements(Address address, const TargetType& element, uint64_t count)
+{
+    if (!count)
+        return;
+    if (!element.byteSize()) {
+        notFollowed(NotFollowed::Declaration);
+        return;
+    }
+    for (uint64_t index = 0; index < count; ++index)
+        enqueue(TargetValue::at(m_snapshot, address + index * element.byteSize(), element), IsObject::Yes);
+}
+
+// Where `base` is in an object of class `derived`, among its non-virtual bases.
+static std::optional<size_t> baseOffset(const TargetType& derived, const TargetType& base, unsigned depth = 0)
+{
+    if (&derived == &base)
+        return 0;
+    auto* klass = std::get_if<TargetType::Class>(&derived.layout());
+    if (!klass || depth > 32)
+        return std::nullopt;
+    for (const TargetType::Base& candidate : klass->bases) {
+        if (auto offset = baseOffset(candidate.type, base, depth + 1))
+            return candidate.offset + *offset;
+    }
+    return std::nullopt;
+}
+
+// SegmentedVector::addressAt: the first InlineCapacity elements in
+// m_inlineStorageMember, then the segments of m_segments, sizeOfSegment(i)
+// elements each, m_size in all. It has no other members.
+void ReachWalk::walkSegmentedVector(const TargetValue& vector)
+{
+    const TargetType* element = vector.type().templateArgument(0);
+    auto segmentSize = vector.type().templateIntegerArgument(1);
+    auto inlineCapacity = vector.type().templateIntegerArgument(2);
+    auto growthPolicy = vector.type().templateIntegerArgument(3);
+    auto size = vector.properField("m_size").integer();
+    if (!element || !segmentSize || !*segmentSize || !inlineCapacity || !growthPolicy || !size) {
+        notFollowed(NotFollowed::TypeNotReached);
+        return;
+    }
+    uint64_t remaining = static_cast<uint64_t>(*size);
+    if (*inlineCapacity) {
+        // InlineStorageData::m_data, AlignedStorage<T>s, whose slots past m_size hold no element.
+        uint64_t count = std::min(remaining, *inlineCapacity);
+        walkElements(vector.properField("m_inlineStorageMember").address(), *element, count);
+        remaining -= count;
+    }
+    auto storage = vectorStorage(vector.properField("m_segments"));
+    auto segments = storage ? storage->buffer.pointerValue() : std::nullopt;
+    if (!segments || !*segments)
+        return;
+    if (auto index = allocationOf(*segments, 1))
+        m_reached[*index] = true;
+    bool doubling = *growthPolicy == static_cast<uint64_t>(SegmentedVectorGrowthPolicy::Doubling);
+    for (size_t segmentIndex = 0; segmentIndex < storage->size && remaining; ++segmentIndex) {
+        // SegmentedVector::sizeOfSegment.
+        uint64_t capacity = doubling ? *segmentSize << std::min<size_t>(segmentIndex, 48) : *segmentSize;
+        // A SegmentPtr is a unique_ptr with an empty deleter: the segment's address.
+        auto segment = m_snapshot.memory().ptr<uint64_t>(*segments + segmentIndex * sizeof(uint64_t));
+        if (!segment || !*segment)
+            return;
+        if (auto index = allocationOf(Address { *segment }, 1))
+            m_reached[*index] = true;
+        uint64_t count = std::min(capacity, remaining);
+        walkElements(Address { *segment }, *element, count);
+        remaining -= count;
+    }
+}
+
+// ConcurrentBuffer::Array: `size` elements in `data`, which is declared with one.
+void ReachWalk::walkConcurrentBufferArray(const TargetValue& array)
+{
+    auto size = array.properField("size").integer();
+    TargetValue data = array.properField("data");
+    auto* elements = data ? std::get_if<TargetType::Array>(&data.type().layout()) : nullptr;
+    if (!size || !elements)
+        return;
+    if (*size < 0 || static_cast<uint64_t>(*size) > maxVectorSize) {
+        CORPSE_REPORT("The ConcurrentBuffer array at 0x%llx claims %lld elements", forReport(array.address()), static_cast<long long>(*size));
+        return;
+    }
+    walkElements(data.address(), elements->element, static_cast<uint64_t>(*size));
+}
+
+// SymbolTableEntry::m_bits: a FatEntry*, unless SymbolTableEntry::SlimFlag is set (SymbolTableEntry::isFat).
+void ReachWalk::walkSymbolTableEntry(const TargetValue& entry)
+{
+    constexpr uint64_t slimFlag = 1; // SymbolTableEntry::SlimFlag, which is private.
+    auto bits = entry.properField("m_bits").integer();
+    if (!bits || !*bits || (static_cast<uint64_t>(*bits) & slimFlag))
+        return;
+    follow(Address { static_cast<uint64_t>(*bits) }, *m_heap.m_fatEntryClass);
+}
+
+// RobinHoodHashTable: every bucket of m_table, m_tableSize of them. It has no
+// deleted buckets: a removal shifts the buckets after it back, and an empty
+// bucket holds its traits' empty value.
+void ReachWalk::walkRobinHoodHashTable(const TargetValue& table)
+{
+    walkMembers(table, IsComplete::Yes, "m_table");
+    TargetValue buckets = table.properField("m_table");
+    auto address = buckets.pointerValue();
+    auto size = table.properField("m_tableSize").integer();
+    if (!address || !*address || !size)
+        return;
+    if (*size < 0 || static_cast<uint64_t>(*size) > maxHashTableSize) {
+        CORPSE_REPORT("The RobinHoodHashTable at 0x%llx claims %lld buckets", forReport(table.address()), static_cast<long long>(*size));
         return;
     }
     if (auto index = allocationOf(*address, 1))
         m_reached[*index] = true;
-    for (unsigned index = 0; index < buckets->size; ++index) {
-        Address bucketAddress = *address + static_cast<uint64_t>(index) * bucket.byteSize();
-        auto isEmptyOrDeleted = isEmptyOrDeletedBucket(m_snapshot, bucketAddress, *traits);
-        if (!isEmptyOrDeleted)
-            return;
-        if (!*isEmptyOrDeleted)
-            enqueue(TargetValue::at(m_snapshot, bucketAddress, bucket), IsObject::Yes);
+    walkElements(*address, std::get<TargetType::Pointer>(buckets.type().layout()).pointee, static_cast<uint64_t>(*size));
+}
+
+// TrailingArray<Derived, T>, a base of Derived: m_size elements of T after the
+// Derived object, at TrailingArray::offsetOfData().
+void ReachWalk::walkTrailingArray(const TargetValue& array)
+{
+    walkMembers(array, IsComplete::No);
+    const TargetType* derived = array.type().templateArgument(0);
+    const TargetType* element = array.type().templateArgument(1);
+    auto size = array.properField("m_size").integer();
+    if (!derived || !element || !element->alignment()) {
+        notFollowed(NotFollowed::TypeNotReached);
+        return;
     }
+    if (!size || *size < 0 || static_cast<uint64_t>(*size) > maxVectorSize)
+        return;
+    auto offset = baseOffset(*derived, array.type());
+    if (!offset) {
+        notFollowed(NotFollowed::TypeNotReached);
+        return;
+    }
+    Address data = array.address() - *offset + roundUpToMultipleOf(element->alignment(), derived->byteSize());
+    walkElements(data, *element, static_cast<uint64_t>(*size));
+}
+
+// ButterflyArray<Derived, LeadingType, TrailingType>, a base of Derived:
+// m_leadingSize elements of LeadingType just before the Derived object, and
+// m_trailingSize of TrailingType after it, at offsetOfTrailingData().
+void ReachWalk::walkButterflyArray(const TargetValue& array)
+{
+    walkMembers(array, IsComplete::No);
+    const TargetType* derived = array.type().templateArgument(0);
+    const TargetType* leading = array.type().templateArgument(1);
+    const TargetType* trailing = array.type().templateArgument(2);
+    auto leadingSize = array.properField("m_leadingSize").integer();
+    auto trailingSize = array.properField("m_trailingSize").integer();
+    if (!derived || !leading || !trailing || !trailing->alignment()) {
+        notFollowed(NotFollowed::TypeNotReached);
+        return;
+    }
+    auto offset = baseOffset(*derived, array.type());
+    if (!offset) {
+        notFollowed(NotFollowed::TypeNotReached);
+        return;
+    }
+    if (!leadingSize || !trailingSize || *leadingSize < 0 || *trailingSize < 0 || static_cast<uint64_t>(*leadingSize) > maxVectorSize || static_cast<uint64_t>(*trailingSize) > maxVectorSize)
+        return;
+    Address object = array.address() - *offset;
+    walkElements(object - static_cast<uint64_t>(*leadingSize) * leading->byteSize(), *leading, static_cast<uint64_t>(*leadingSize));
+    walkElements(object + roundUpToMultipleOf(trailing->alignment(), derived->byteSize()), *trailing, static_cast<uint64_t>(*trailingSize));
+}
+
+// CodeBlock::m_jitData, a void*: CodeBlock::baselineJITData() or dfgJITData(),
+// by whether the JITCode's type is an optimizing tier.
+void ReachWalk::walkCodeBlock(const TargetValue& codeBlock)
+{
+    walkMembers(codeBlock, IsComplete::No, "m_jitData");
+    auto jitData = codeBlock.properField("m_jitData").pointerValue();
+    if (!jitData || !*jitData)
+        return;
+    TargetValue jitCode = codeBlock.properField("m_jitCode").properField("m_ptr").dereference();
+    auto jitType = jitCode.properField("m_jitType").integer();
+    if (!jitType)
+        return;
+    const TargetType* type = JITCode::isOptimizingJIT(static_cast<JITType>(*jitType)) ? m_heap.m_dfgJITDataClass : m_heap.m_baselineJITDataClass;
+    if (!type) {
+        notFollowed(NotFollowed::TypeNotReached);
+        return;
+    }
+    follow(*jitData, *type);
+}
+
+// AlignedStorage::get(), which NeverDestroyed and LazyNeverDestroyed hold their
+// object in: m_storage, as the first template argument. A LazyNeverDestroyed
+// not yet constructed is zeros, which lead nowhere.
+void ReachWalk::walkAlignedStorage(const TargetValue& storage)
+{
+    TargetValue bytes = storage.properField("m_storage");
+    const TargetType* type = storage.type().templateArgument(0);
+    if (!bytes)
+        return;
+    if (!type || !type->byteSize()) {
+        notFollowed(NotFollowed::TypeNotReached);
+        return;
+    }
+    TargetValue value = TargetValue::at(m_snapshot, bytes.address(), *type);
+    if (std::holds_alternative<TargetType::Class>(type->layout()))
+        enqueue(value, IsObject::Yes);
+    else
+        walk(value);
+}
+
+// CodePtr::m_value: a tagged pointer into JIT code, which has no type. It
+// reaches the allocation it is in, whose bytes stay untyped.
+void ReachWalk::walkCodePointer(const TargetValue& codePointer)
+{
+    auto value = codePointer.properField("m_value").pointerValue();
+    if (!value || !*value)
+        return;
+    if (auto index = allocationOf(*value, 1))
+        m_reached[*index] = true;
 }
 
 // A pointer to the type of a template argument, held in an integer field with tag bits.
@@ -958,12 +1378,7 @@ void ReachWalk::walkJSString(const TargetValue& string)
     auto fiber = string.properField("m_fiber").integer();
     if (!fiber || !*fiber || (static_cast<uint64_t>(*fiber) & JSString::isRopeInPointer))
         return;
-    const TargetType* stringImpl = m_heap.stringImplClass(string.address());
-    if (!stringImpl) {
-        notFollowed(NotFollowed::TypeNotReached);
-        return;
-    }
-    follow(Address { static_cast<uint64_t>(*fiber) }, *stringImpl);
+    follow(Address { static_cast<uint64_t>(*fiber) }, *m_heap.m_stringImplClass);
 }
 
 void ReachWalk::summarize(const Vector<HeapWalk::Allocation>& excluded, size_t listCount, HeapWalk::Reach& result)
@@ -971,6 +1386,8 @@ void ReachWalk::summarize(const Vector<HeapWalk::Allocation>& excluded, size_t l
     result.notFollowed = m_notFollowed;
     result.cellsWithClass = m_cellsWithClass;
     result.cellBytesBeyondClass = m_cellBytesBeyondClass;
+    result.globalVariables = m_globalVariables;
+    result.untypedDataSymbols = m_untypedDataSymbols;
     result.overruns = WTF::move(m_overruns);
     result.isReached = m_reached;
 
@@ -996,7 +1413,6 @@ void ReachWalk::summarize(const Vector<HeapWalk::Allocation>& excluded, size_t l
         auto next = std::ranges::upper_bound(excludedRanges, allocation.address, { }, [](const HeapWalk::Allocation& range) { return range.address + range.size; });
         return next != excludedRanges.end() && next->address < allocation.address + allocation.size;
     };
-    Vector<HeapWalk::Allocation> missed;
     Vector<HeapWalk::Untyped> untyped;
     for (size_t index = 0; index < m_allocations.size(); ++index) {
         const HeapWalk::Allocation& allocation = m_allocations[index];
@@ -1011,31 +1427,213 @@ void ReachWalk::summarize(const Vector<HeapWalk::Allocation>& excluded, size_t l
             result.bytesFreeInBlocks += allocation.size - accounted;
         }
         result.bytesTyped += result.bytesTypedIn[index];
-        if (!m_reached[index]) {
-            missed.append(allocation);
+        if (!m_reached[index])
             continue;
-        }
         result.bytesReached += allocation.size;
         if (accounted > result.bytesTypedIn[index])
             untyped.append({ allocation, accounted - result.bytesTypedIn[index], m_typeAtStart[index] ? makeString(m_typeAtStart[index]->name()) : String() });
     }
-    std::ranges::sort(missed, std::ranges::greater { }, &HeapWalk::Allocation::size);
-    missed.shrink(std::min(missed.size(), listCount));
-    result.largestMissed = WTF::move(missed);
     std::ranges::sort(untyped, std::ranges::greater { }, &HeapWalk::Untyped::bytesUntyped);
     untyped.shrink(std::min(untyped.size(), listCount));
     result.mostUntyped = WTF::move(untyped);
 }
 
-HeapWalk::Reach HeapWalk::reach(const Vector<Allocation>& allocations, const Vector<Allocation>& excluded, size_t listCount) const
+// The deepest field of `type` that covers `offset`, as "Class::field".
+static String fieldAt(const TargetType& type, uint64_t offset)
+{
+    const TargetType* current = &type;
+    String result;
+    for (unsigned depth = 0; depth < 64; ++depth) {
+        if (auto* array = std::get_if<TargetType::Array>(&current->layout())) {
+            if (!array->element.byteSize())
+                break;
+            offset %= array->element.byteSize();
+            current = &array->element;
+            continue;
+        }
+        auto* klass = std::get_if<TargetType::Class>(&current->layout());
+        if (!klass)
+            break;
+        const TargetType* next = nullptr;
+        for (const TargetType::Field& field : klass->properFields) {
+            if (!field.bitSize && offset >= field.offset && offset < field.offset + field.type.byteSize()) {
+                result = makeString(current->name(), "::"_s, field.name);
+                offset -= field.offset;
+                next = &field.type;
+                break;
+            }
+        }
+        for (size_t index = 0; !next && index < klass->bases.size(); ++index) {
+            const TargetType::Base& base = klass->bases[index];
+            if (offset >= base.offset && offset < base.offset + base.type.byteSize()) {
+                offset -= base.offset;
+                next = &base.type;
+            }
+        }
+        if (!next)
+            break;
+        current = next;
+    }
+    return result;
+}
+
+String ReachWalk::holderInReached(Address word, size_t allocationIndex) const
+{
+    const HeapWalk::Allocation& allocation = m_allocations[allocationIndex];
+    uint64_t address = word.toTargetVMAddress();
+    // The innermost value the walk read that covers the word: the last to start at or before it.
+    auto ranges = m_typed.span();
+    auto after = std::ranges::upper_bound(ranges, address, { }, &Range::begin);
+    for (auto range = after; range != ranges.begin();) {
+        --range;
+        if (range->end <= address)
+            continue;
+        if (range->begin < allocation.address.toTargetVMAddress())
+            break;
+        String field = fieldAt(*range->type, address - range->begin);
+        if (!field.isNull())
+            return makeString("the field "_s, field, ", which the walk does not follow, at offset "_s, address - range->begin, " of a '"_s, range->type->name(), "' at 0x"_s, hex(range->begin));
+        return makeString("offset "_s, address - range->begin, " of a '"_s, range->type->name(), "' at 0x"_s, hex(range->begin), ", in no field of it"_s);
+    }
+    return makeString("offset "_s, word - allocation.address, " of the "_s, allocation.size, "-byte allocation at 0x"_s, hex(allocation.address.toTargetVMAddress()),
+        ", in no value the walk read; it read "_s, m_typeAtStart[allocationIndex] ? makeString('\'', m_typeAtStart[allocationIndex]->name(), "' at its start"_s) : "nothing at its start"_s);
+}
+
+auto ReachWalk::holderOf(Address word) -> Holder
+{
+    using MissCause = HeapWalk::MissCause;
+    if (auto index = allocationOf(word, sizeof(uint64_t))) {
+        if (m_reached[*index])
+            return { MissCause::Reached, holderInReached(word, *index), std::nullopt };
+        return { MissCause::Missed, makeString("the missed "_s, m_allocations[*index].size, "-byte allocation at 0x"_s, hex(m_allocations[*index].address.toTargetVMAddress())), *index };
+    }
+    String symbol = m_heap.m_debugInfo->symbolAt(word);
+    if (!symbol.isNull())
+        return { MissCause::StaticData, makeString("the symbol "_s, symbol), std::nullopt };
+    auto region = Region::findContaining(m_snapshot.regions(), word);
+    String name = region ? region->name() : String();
+    return { MissCause::OtherMemory, makeString("0x"_s, hex(word.toTargetVMAddress()), " in "_s, name.isEmpty() ? "anonymous memory"_s : name), std::nullopt };
+}
+
+// Every word of the snapshot's readable memory whose value lies inside a missed
+// allocation is a referrer of it; the best of them says what holds it.
+void ReachWalk::explainMisses(const Vector<HeapWalk::Allocation>& excluded, const Vector<HeapWalk::Allocation>& notReferrers, HeapWalk::Reach& result)
+{
+    using MissCause = HeapWalk::MissCause;
+    Vector<size_t> missed;
+    for (size_t index = 0; index < m_allocations.size(); ++index) {
+        if (!m_reached[index])
+            missed.append(index);
+    }
+    if (missed.isEmpty())
+        return;
+    CORPSE_DIAGNOSTICS(diagnostics, "explaining the %zu allocations the walk missed", missed.size());
+    uint64_t lowest = m_allocations[missed.first()].address.toTargetVMAddress();
+    uint64_t highest = (m_allocations[missed.last()].address + m_allocations[missed.last()].size).toTargetVMAddress();
+
+    // For each allocation, the best holder found: the first cause MissCause lists.
+    Vector<std::optional<Holder>> holders(m_allocations.size());
+    constexpr size_t maxReferrers = 8;
+    Vector<Vector<Address>> referrers(m_allocations.size());
+    const Vector<Thread>& threads = m_snapshot.threads();
+    auto ranges = notReferrers.span();
+    auto isNotReferrer = [&](Address word) {
+        auto next = std::ranges::upper_bound(ranges, word, { }, [](const HeapWalk::Allocation& range) { return range.address + range.size; });
+        if (next != ranges.end() && next->address <= word)
+            return true;
+        // A word below a thread's stack pointer is left over from a frame that has returned.
+        for (const Thread& thread : threads) {
+            if (thread.hasStack() && thread.stackPointer() && thread.stackRegion().contains(word) && word < thread.stackPointer())
+                return true;
+        }
+        return false;
+    };
+    auto consider = [&](Address word, uint64_t value) {
+        if (value < lowest || value >= highest)
+            return;
+        auto index = allocationOf(Address { value }, 1);
+        // A word of the allocation itself does not hold it.
+        if (!index || m_reached[*index] || allocationOf(word, 1) == index || isNotReferrer(word))
+            return;
+        if (referrers[*index].size() < maxReferrers)
+            referrers[*index].append(word);
+        std::optional<Holder>& best = holders[*index];
+        if (best && best->cause == MissCause::Reached)
+            return;
+        Holder holder = holderOf(word);
+        if (!best || holder.cause < best->cause)
+            best = WTF::move(holder);
+    };
+
+    constexpr size_t wordsPerRead = 64 * 1024;
+    for (const Region& region : m_snapshot.regions()) {
+        if (!region.isReadable())
+            continue;
+        for (auto [start, size] : region.residentParts(m_snapshot.corpsePort())) {
+            for (uint64_t offset = 0; offset + sizeof(uint64_t) <= size;) {
+                size_t count = std::min<uint64_t>(wordsPerRead, (size - offset) / sizeof(uint64_t));
+                Address chunk = start + offset;
+                offset += count * sizeof(uint64_t);
+                auto words = m_snapshot.memory().span<uint64_t>(chunk, count);
+                if (!words)
+                    continue;
+                std::span<const uint64_t> values { words };
+                for (size_t index = 0; index < values.size(); ++index)
+                    consider(chunk + index * sizeof(uint64_t), values[index]);
+            }
+        }
+    }
+
+    auto excludedRanges = excluded.span();
+    auto isExcluded = [&](const HeapWalk::Allocation& allocation) {
+        auto next = std::ranges::upper_bound(excludedRanges, allocation.address, { }, [](const HeapWalk::Allocation& range) { return range.address + range.size; });
+        return next != excludedRanges.end() && next->address < allocation.address + allocation.size;
+    };
+    Vector<size_t> missIndexOf(m_allocations.size());
+    for (size_t index : missed) {
+        HeapWalk::Miss miss { m_allocations[index], MissCause::NoReferrer, "nothing"_s, { }, { }, isExcluded(m_allocations[index]), m_allocations[index].size };
+        Address completeObject;
+        if (auto* dynamicType = m_heap.m_debugInfo->dynamicTypeIfAnyAt(m_snapshot, m_allocations[index].address, completeObject))
+            miss.content = makeString(dynamicType->name());
+        miss.referrers = WTF::move(referrers[index]);
+        if (holders[index]) {
+            miss.cause = holders[index]->cause;
+            miss.holder = holders[index]->description;
+        }
+        missIndexOf[index] = result.misses.size();
+        result.misses.append(WTF::move(miss));
+        if (!result.misses.last().isExcluded)
+            result.bytesMissedByCause[static_cast<size_t>(result.misses.last().cause)] += m_allocations[index].size;
+    }
+    // A miss only other misses hold is counted in what the first miss up its chain that something else holds holds.
+    for (size_t index : missed) {
+        size_t current = index;
+        for (unsigned depth = 0; depth < missed.size(); ++depth) {
+            const std::optional<Holder>& holder = holders[current];
+            if (!holder || holder->cause != MissCause::Missed || *holder->missedHolder == index)
+                break;
+            current = *holder->missedHolder;
+        }
+        if (current != index)
+            result.misses[missIndexOf[current]].bytesHeld += m_allocations[index].size;
+    }
+    std::ranges::sort(result.misses, std::ranges::greater { }, &HeapWalk::Miss::bytesHeld);
+}
+
+HeapWalk::Reach HeapWalk::reach(const Vector<Allocation>& allocations, const Vector<Allocation>& excluded, const Vector<Allocation>& notReferrers, size_t listCount) const
 {
     Reach result;
     if (!isValid())
         return result;
     CORPSE_DIAGNOSTICS(diagnostics, "measuring the reach of the walk of the heap at 0x%llx", forReport(m_vm.address()));
+    // The walk reads many small values, many to a page.
+    Memory& memory = m_roots->snapshot().memory();
+    memory.keepRecentMappings(4096);
     ReachWalk walk(*this, allocations);
     walk.run();
     walk.summarize(excluded, listCount, result);
+    walk.explainMisses(excluded, notReferrers, result);
+    memory.keepRecentMappings(0);
     return result;
 }
 
@@ -1053,66 +1651,106 @@ const TargetType* HeapWalk::cellClass(Address address) const
 {
     if (!isValid())
         return nullptr;
-    return classOfClassInfo(classInfoOf(address), 0);
-}
-
-const TargetType* HeapWalk::stringImplClass(Address string) const
-{
-    if (!m_stringImplClass) {
-        // The compile unit that defines JSString::s_info reads a string's characters, so it uses StringImpl whole.
-        Remote<ClassInfo> classInfo = classInfoOf(string);
-        m_stringImplClass = classInfo ? m_debugInfo->classInCompileUnitOf(classInfo.address(), "s_emptyAtomString", "_ZN3WTF10StringImpl17s_emptyAtomStringE") : nullptr;
-    }
-    return *m_stringImplClass;
-}
-
-const TargetType* HeapWalk::classOfClassInfo(const Remote<ClassInfo>& classInfo, unsigned depth) const
-{
+    Remote<ClassInfo> classInfo = classInfoOf(address);
     if (!classInfo)
         return nullptr;
     uint64_t key = classInfo.address().toTargetVMAddress();
-    if (auto entry = m_classesOfClassInfos.find(key); entry != m_classesOfClassInfos.end())
-        return entry->value;
+    if (auto klass = cellClasses().getOptional(key))
+        return *klass;
+    if (m_reportedClassInfos.add(key).isNewEntry) {
+        String symbol = m_debugInfo->symbolAt(classInfo.address());
+        CORPSE_REPORT("The ClassInfo at 0x%llx, '%s', is not the s_info of a class in mya's list of cell classes", forReport(classInfo.address()), symbol.isNull() ? "no symbol" : symbol.utf8().legacyCStringPointer());
+    }
+    return nullptr;
+}
 
-    const TargetType* klass = m_debugInfo->classInCompileUnitOf(classInfo.address(), "s_info");
-    // ClassInfo::staticClassSize is sizeof the class it was made for.
-    auto size = klass ? classInfo.field<unsigned>("staticClassSize").integer() : std::nullopt;
-    if (klass && !size) {
+// Each class of mya's list, by name in JavaScriptCore's image, and its s_info
+// by its linkage name there, checked against the ClassInfo's size and parent.
+const HashMap<uint64_t, const TargetType*>& HeapWalk::cellClasses() const
+{
+    if (m_cellClasses)
+        return *m_cellClasses;
+    CORPSE_DIAGNOSTICS(diagnostics, "finding the classes of mya's list of cell classes");
+    HashMap<uint64_t, const TargetType*> classes;
+    auto add = [&](const char* name) {
+        // A class not built on this platform finds nothing.
+        const TargetType* klass = m_debugInfo->classNamed(m_javaScriptCoreImage, name);
+        auto classInfo = klass ? m_debugInfo->staticMemberAddress(m_javaScriptCoreImage, *klass, "s_info") : std::nullopt;
+        if (!classInfo)
+            return;
+        if (!classes.add(classInfo->toTargetVMAddress(), klass).isNewEntry)
+            CORPSE_REPORT("Two classes of mya's list of cell classes have the s_info at 0x%llx", forReport(*classInfo));
+    };
+#define CORPSE_ADD_CELL_CLASS(name) add(name);
+    FOR_EACH_JSC_CELL_CLASS(CORPSE_ADD_CELL_CLASS)
+#undef CORPSE_ADD_CELL_CLASS
+
+    Vector<uint64_t> refused;
+    for (auto& [address, klass] : classes) {
+        Remote<ClassInfo> classInfo = Remote<Structure>(TargetValue { *m_structure }).field<const ClassInfo*>("m_classInfo").pointeeAt(Address { address });
+        if (!isClassInfoOf(classInfo, *klass, classes))
+            refused.append(address);
+    }
+    for (uint64_t address : refused)
+        classes.remove(address);
+    m_cellClasses = WTF::move(classes);
+    return *m_cellClasses;
+}
+
+// Whether `classInfo` is the ClassInfo of `klass`: ClassInfo::staticClassSize
+// is sizeof the class it was made for, and ClassInfo::parentClass is the
+// ClassInfo of one of its bases. Reported if not.
+bool HeapWalk::isClassInfoOf(const Remote<ClassInfo>& classInfo, const TargetType& klass, const HashMap<uint64_t, const TargetType*>& classes) const
+{
+    auto size = classInfo.field<unsigned>("staticClassSize").integer();
+    if (!size) {
         CORPSE_REPORT("Could not read the class size of the ClassInfo at 0x%llx", forReport(classInfo.address()));
-        klass = nullptr;
+        return false;
     }
-    if (klass && static_cast<uint64_t>(*size) != klass->byteSize()) {
-        CORPSE_REPORT("The ClassInfo at 0x%llx is for %lld-byte classes, but its '%s' is %zu bytes", forReport(classInfo.address()), static_cast<long long>(*size), klass->name().legacyCStringPointer(), klass->byteSize());
-        klass = nullptr;
+    if (static_cast<uint64_t>(*size) != klass.byteSize()) {
+        CORPSE_REPORT("The ClassInfo at 0x%llx is for %lld-byte classes, but its '%s' is %zu bytes", forReport(classInfo.address()), static_cast<long long>(*size), klass.name().legacyCStringPointer(), klass.byteSize());
+        return false;
     }
-    // ClassInfo::parentClass is the ClassInfo of one of its bases.
-    Remote<ClassInfo> parent = klass ? classInfo.field<const ClassInfo*>("parentClass").dereference() : Remote<ClassInfo> { };
-    if (klass && parent && depth >= maxClassInfoDepth) {
-        CORPSE_REPORT("The ClassInfo of '%s' at 0x%llx has more than %u ancestors", klass->name().legacyCStringPointer(), forReport(classInfo.address()), maxClassInfoDepth);
-        klass = nullptr;
+    auto parent = classInfo.field<const ClassInfo*>("parentClass").pointerValue();
+    if (!parent)
+        return false;
+    if (!*parent)
+        return true;
+    auto parentClass = classes.getOptional(parent->toTargetVMAddress());
+    if (!parentClass) {
+        CORPSE_REPORT("The parent of the ClassInfo of '%s' at 0x%llx is not the s_info of a class in mya's list", klass.name().legacyCStringPointer(), forReport(classInfo.address()));
+        return false;
     }
-    if (klass && parent) {
-        // Its own lookup reported why a parent has no class.
-        const TargetType* parentClass = classOfClassInfo(parent, depth + 1);
-        Vector<const TargetType*, 8> bases { klass };
-        bool isBase = false;
-        for (size_t index = 0; index < bases.size() && !isBase && parentClass; ++index) {
-            isBase = bases[index] == parentClass;
-            if (auto* layout = std::get_if<TargetType::Class>(&bases[index]->layout())) {
-                for (const TargetType::Base& base : layout->bases)
-                    bases.append(&base.type);
-            }
-        }
-        if (!isBase) {
-            if (parentClass)
-                CORPSE_REPORT("The parent of the ClassInfo of '%s' at 0x%llx is for '%s', which is not one of its bases", klass->name().legacyCStringPointer(), forReport(classInfo.address()), parentClass->name().legacyCStringPointer());
-            else
-                CORPSE_REPORT("The ClassInfo of '%s' at 0x%llx has a parent with no class", klass->name().legacyCStringPointer(), forReport(classInfo.address()));
-            klass = nullptr;
+    Vector<const TargetType*, 8> bases { &klass };
+    for (size_t index = 0; index < bases.size() && index < maxClassInfoDepth * 4; ++index) {
+        if (bases[index] == *parentClass)
+            return true;
+        if (auto* layout = std::get_if<TargetType::Class>(&bases[index]->layout())) {
+            for (const TargetType::Base& base : layout->bases)
+                bases.append(&base.type);
         }
     }
-    m_classesOfClassInfos.add(key, klass);
-    return klass;
+    CORPSE_REPORT("The parent of the ClassInfo of '%s' at 0x%llx is for '%s', which is not one of its bases", klass.name().legacyCStringPointer(), forReport(classInfo.address()), (*parentClass)->name().legacyCStringPointer());
+    return false;
+}
+
+Vector<String> HeapWalk::unlistedCellClasses() const
+{
+    Vector<String> result;
+    if (!isValid())
+        return result;
+    const auto& classes = cellClasses();
+    // "6s_infoE" ends the linkage name of every X::s_info.
+    for (const SnapshotDebugInfo::Symbol& symbol : m_debugInfo->dataSymbolsEndingWith(m_javaScriptCoreImage, "6s_infoE")) {
+        if (!classes.contains(symbol.address.toTargetVMAddress()))
+            result.append(symbol.name);
+    }
+    return result;
+}
+
+size_t HeapWalk::listedCellClassCount() const
+{
+    return isValid() ? cellClasses().size() : 0;
 }
 
 Remote<JSCell> HeapWalk::jsCell(Address address) const

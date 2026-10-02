@@ -169,6 +169,7 @@ Memory::Memory(TaskHandle corpsePort)
 
 Memory::~Memory()
 {
+    keepRecentMappings(0);
     for (auto& entry : m_regions) {
         for (auto& region : entry.value)
             RELEASE_ASSERT(region->refCount() == 1);
@@ -219,7 +220,19 @@ Memory::MapResult Memory::map(Address objAddress, size_t objSizeInBytes)
         return result;
 
     addRegion(result.region);
+    if (!m_recentRegions.isEmpty()) {
+        m_recentRegions[m_nextRecentRegion] = result.region;
+        m_nextRecentRegion = (m_nextRecentRegion + 1) % m_recentRegions.size();
+    }
     return result;
+}
+
+void Memory::keepRecentMappings(size_t count)
+{
+    // Dropping a kept Region releases it if no reader holds it.
+    m_recentRegions.clear();
+    m_recentRegions.resize(count);
+    m_nextRecentRegion = 0;
 }
 
 void Memory::addRegion(RefPtr<Region> region)

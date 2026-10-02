@@ -328,6 +328,19 @@ struct HashTraitHasCustomDelete {
     static constexpr bool value = ResultType::value;
 };
 
+#if ENABLE(MYA_HEAP)
+// mya reads every bucket of a table, deleted or not, as the bucket's type, so a
+// deleted bucket must hold nothing but its deleted value: no stale pointer the
+// destructor left behind. Only for storage whose object has been destroyed.
+template<typename T>
+void clearDestroyedHashTableValue(T& value)
+{
+    WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
+    memset(static_cast<void*>(std::addressof(value)), 0, sizeof(T)); // NOLINT
+    WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+}
+#endif
+
 template<typename Traits, typename T>
 void hashTraitsDeleteBucket(T& value)
 {
@@ -335,6 +348,9 @@ void hashTraitsDeleteBucket(T& value)
         Traits::customDeleteBucket(value);
     else {
         value.~T();
+#if ENABLE(MYA_HEAP)
+        clearDestroyedHashTableValue(value);
+#endif
         Traits::constructDeletedValue(value);
     }
 }
@@ -463,6 +479,9 @@ struct KeyValuePairHashTraits : GenericHashTraits<KeyValuePair<typename KeyTrait
 
         hashTraitsDeleteBucket<KeyTraits>(value.key);
         value.value.~ValueType();
+#if ENABLE(MYA_HEAP)
+        clearDestroyedHashTableValue(value.value);
+#endif
     }
 };
 

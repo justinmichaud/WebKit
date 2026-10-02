@@ -100,6 +100,12 @@ public:
     size_t regionCount() const;
     size_t mappedPageCount() const;
 
+    // Keeps the `count` most recently used mappings mapped after their last
+    // reader releases them, so that a walk reading many small values maps each
+    // page once rather than once per read. Zero, the default, releases a
+    // mapping with its last reader, and drops those kept.
+    void keepRecentMappings(size_t count);
+
     void dump(const char* indent = "    ") const;
 
     static size_t pageSize();
@@ -149,6 +155,10 @@ private:
     // can be more than one Region of different sizes which start at the same page
     // Address. The Vector is sorted in ascending size (i.e. pageCount).
     HashMap<Address, Vector<RefPtr<Region>>> m_regions;
+
+    // The most recently used Regions, each kept with one reference, in a ring.
+    Vector<RefPtr<Region>> m_recentRegions;
+    size_t m_nextRecentRegion { 0 };
 };
 
 } // namespace Corpse

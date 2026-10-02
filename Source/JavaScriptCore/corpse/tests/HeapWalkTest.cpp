@@ -33,10 +33,12 @@
 #include <JavaScriptCore/Completion.h>
 #include <JavaScriptCore/CorpseAddress.h>
 #include <JavaScriptCore/CorpseHeapWalk.h>
+#include <JavaScriptCore/CorpseRegion.h>
 #include <JavaScriptCore/CorpseRemote.h>
 #include <JavaScriptCore/CorpseSnapshot.h>
 #include <JavaScriptCore/DateInstance.h>
 #include <JavaScriptCore/DeferGCInlines.h>
+#include <JavaScriptCore/ExecutableMemoryHandle.h>
 #include <JavaScriptCore/HeapCell.h>
 #include <JavaScriptCore/HeapIterationScope.h>
 #include <JavaScriptCore/HeapObserver.h>
@@ -51,6 +53,7 @@
 #include <JavaScriptCore/MarkedBlock.h>
 #include <JavaScriptCore/MarkedSpaceInlines.h>
 #include <JavaScriptCore/Options.h>
+#include <JavaScriptCore/PropertyTable.h>
 #include <JavaScriptCore/SourceCode.h>
 #include <JavaScriptCore/StrongInlines.h>
 #include <JavaScriptCore/StructureID.h>
@@ -63,11 +66,13 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 #include <algorithm>
 #include <bit>
 #include <optional>
+#include <pthread.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string_view>
 #include <unistd.h>
 #include <utility>
+#include <wtf/CodePtr.h>
 #include <wtf/CompactPtr.h>
 #include <wtf/HashMap.h>
 #include <wtf/HashSet.h>
@@ -89,6 +94,7 @@ namespace {
 
 using JSC::Corpse::Address;
 using JSC::Corpse::HeapWalk;
+using JSC::Corpse::Region;
 using JSC::Corpse::Remote;
 using JSC::Corpse::Snapshot;
 using JSC::Corpse::TargetType;
@@ -110,7 +116,10 @@ constexpr ASCIILiteral targetScript = "globalThis.fixture = {\n"
     "    date: new Date(1234567890123),\n"
     "    name: [\"corpse\", \"heap\", \"walk\"].join(\"-\"),\n"
     "    children: [],\n"
+    "    wide: {},\n"
     "};\n"
+    "for (let i = 0; i < 200; ++i)\n"
+    "    fixture.wide[\"property\" + i] = i;\n"
     "for (let i = 0; i < 4; ++i)\n"
     "    fixture.children.push({ index: i, parent: fixture, label: \"child-\" + i });\n"
     "fixture.children[0].sibling = fixture.children[1];\n"
@@ -154,8 +163,13 @@ struct alignas(16) ReachableObject {
     WTF_DEPRECATED_MAKE_STRUCT_FAST_ALLOCATED(ReachableObject);
     WTF_ALLOW_STRUCT_COMPACT_POINTERS;
     ReachableObject* next { nullptr };
+    uint64_t heldAsInteger { 0 }; // An address the walk does not follow.
     std::array<uint8_t, 3000> bytes { };
 };
+
+// The addresses of the objects planted to be missed are kept XORed with this,
+// so that the fixture, which holds them, is not what holds them.
+constexpr uint64_t hiddenAddressMask = 0x5a5a5a5a5a5a5a5a;
 
 // Objects behind a value the debug info cannot describe as a pointer to
 // them, one for each way the walk reads such a value (patch 11).
@@ -166,8 +180,12 @@ enum class Planted : uint8_t {
     LazyPointer, // An initialized LazyUniqueRef, which holds an integer with tag bits.
     PackedPointer, // A Packed<T*>, which holds the pointer's low bytes.
     ShiftedPackedPointer, // A PackedAlignedPtr whose alignment lets it store the pointer shifted.
+    HashMapAfterDeletion, // A HashMap's value, in a table that has had a deletion.
+    NeverDestroyedPointer, // A NeverDestroyed<T*>, whose storage is bytes.
+    CodePointer, // A CodePtr, a void* into JIT code: the JIT allocation it points into.
+    PropertyTableIndex, // A PropertyTable's m_indexVector, an integer: the index buffer.
 };
-constexpr size_t numberOfPlanted = static_cast<size_t>(Planted::ShiftedPackedPointer) + 1;
+constexpr size_t numberOfPlanted = static_cast<size_t>(Planted::PropertyTableIndex) + 1;
 constexpr std::array<ASCIILiteral, numberOfPlanted> plantedNames {
     "the last element of a Vector"_s,
     "a HashSet's value"_s,
@@ -175,13 +193,54 @@ constexpr std::array<ASCIILiteral, numberOfPlanted> plantedNames {
     "a LazyUniqueRef"_s,
     "a Packed<T*>"_s,
     "a PackedAlignedPtr stored shifted"_s,
+    "a HashMap that has had a deletion"_s,
+    "a NeverDestroyed<T*>"_s,
+    "a CodePtr"_s,
+    "a PropertyTable's index vector"_s,
+};
+// The planted objects that are ReachableObjects, which the walk reads whole as their class.
+constexpr bool isPlantedObject(Planted planted)
+{
+    return planted != Planted::CodePointer && planted != Planted::PropertyTableIndex;
+}
+
+// Objects planted to be missed, one for each cause HeapWalk::MissCause names
+// that the test can plant, each with what must hold it.
+enum class Missed : uint8_t {
+    HeldAsInteger, // By ReachableObject::heldAsInteger, of an object the walk reaches.
+    GroupHead, // By nothing: its address is kept only XORed.
+    GroupMember, // By the group's head, which is missed.
+    StaleInMap, // By nothing: it was the value of a deleted HashMap entry, which is zeroed.
+    StaleInOptional, // By the stale payload of a reset std::optional<T*> in the roots, in static data.
+};
+constexpr size_t numberOfMissed = static_cast<size_t>(Missed::StaleInOptional) + 1;
+constexpr std::array<ASCIILiteral, numberOfMissed> missedNames {
+    "an object held only by an integer field"_s,
+    "an object held by nothing, which holds another"_s,
+    "an object held only by another missed object"_s,
+    "the stale value of a deleted HashMap entry"_s,
+    "the stale payload of a reset std::optional"_s,
+};
+constexpr std::array<HeapWalk::MissCause, numberOfMissed> missedCauses {
+    HeapWalk::MissCause::Reached,
+    HeapWalk::MissCause::NoReferrer,
+    HeapWalk::MissCause::Missed,
+    HeapWalk::MissCause::NoReferrer,
+    HeapWalk::MissCause::StaticData,
+};
+// What each one's holder names.
+constexpr std::array<ASCIILiteral, numberOfMissed> missedHolders {
+    "ReachableObject::heldAsInteger"_s,
+    "nothing"_s,
+    "the missed"_s,
+    "nothing"_s,
+    "createFixture()::roots"_s,
 };
 
 // Enough alignment for PackedAlignedPtr to store the pointer shifted, in a byte less.
 constexpr size_t shiftedPackedAlignment = 256;
 
-// Where HeapWalk starts. Its vtable gives its type, and its fields give the
-// VM and the two types no field reached from the VM has.
+// Where HeapWalk starts. Its vtable gives its type, and its fields give the VM.
 class MyaRoots {
     WTF_MAKE_NONCOPYABLE(MyaRoots);
 public:
@@ -192,8 +251,6 @@ public:
     virtual ~MyaRoots();
 
     JSC::VM* const vm;
-    JSC::MarkedBlock::Header* const markedBlockHeader { nullptr };
-    JSC::LocalAllocator* const localAllocator { nullptr };
     // Set only inside withMyaSafePoint.
     bool atSafePoint { false };
 
@@ -206,8 +263,12 @@ public:
     LazyUniqueRef<MyaRoots, ReachableObject> lazy;
     PackedPtr<ReachableObject> packed;
     PackedAlignedPtr<ReachableObject, shiftedPackedAlignment> shiftedPacked;
-    // One live entry, and a deleted one whose value still holds an object nothing else does.
+    // One live entry, and a deleted one, whose value held an object nothing else does.
     HashMap<uint64_t, ReachableObject*> map;
+    NeverDestroyed<ReachableObject*> neverDestroyed { nullptr };
+    CodePtr<NoPtrTag> code;
+    // Reset after holding an object nothing else does, which its stale payload still holds.
+    std::optional<ReachableObject*> staleOptional;
 };
 
 MyaRoots::~MyaRoots() = default;
@@ -232,7 +293,10 @@ struct HeapWalkFixture {
     uint64_t allocations { 0 }; // What libpas enumerates in the target, sorted.
     uint64_t allocationCount { 0 };
     std::array<uint64_t, numberOfPlanted> planted { };
-    uint64_t staleInMap { 0 }; // Held only as the stale value of a deleted HashMap entry.
+    std::array<uint64_t, numberOfMissed> missed { }; // XORed with hiddenAddressMask.
+    uint64_t codeHandle { 0 }; // The ExecutableMemoryHandle of the planted CodePtr's code, held only here.
+    uint64_t threadControlBlock { 0 }; // pthread_self() of the thread at the safe point, where the C library keeps its pthread specific data.
+    uint64_t wideStructure { 0 }; // The Structure of fixture.wide, whose PropertyTable's index buffer the analysis finds.
     uint64_t globalObject { 0 };
     uint64_t string { 0 }; // The JSString of the fixture's name.
     uint64_t stringImpl { 0 }; // Its StringImpl.
@@ -370,11 +434,28 @@ Address createFixture()
     fixture.planted[static_cast<size_t>(Planted::ShiftedPackedPointer)] = std::bit_cast<uint64_t>(shifted);
     myaRoots.shiftedPacked = shifted;
     static_assert(decltype(myaRoots.shiftedPacked)::isAlignmentShiftProfitable);
-    auto* stale = new ReachableObject;
-    fixture.staleInMap = std::bit_cast<uint64_t>(stale);
-    myaRoots.map.add(1, stale);
-    myaRoots.map.add(2, new ReachableObject);
+    myaRoots.neverDestroyed.get() = plant(Planted::NeverDestroyedPointer);
+
+    // A CodePtr into JIT code, whose ExecutableMemoryHandle is held only as an integer, so that only the CodePtr reaches the code.
+    // ExecutableAllocator::allocate is not exported; createImpl allocates the same way, without its accounting.
+    RefPtr<JSC::ExecutableMemoryHandle> code = JSC::ExecutableMemoryHandle::createImpl(64);
+    RELEASE_ASSERT(code);
+    myaRoots.code = CodePtr<NoPtrTag> { code->start().untaggedPtr() };
+    fixture.planted[static_cast<size_t>(Planted::CodePointer)] = code->startAsInteger();
+    fixture.codeHandle = std::bit_cast<uint64_t>(code.leakRef());
+
+    auto plantMissed = [&](Missed missed) {
+        auto* object = new ReachableObject;
+        fixture.missed[static_cast<size_t>(missed)] = std::bit_cast<uint64_t>(object) ^ hiddenAddressMask;
+        return object;
+    };
+    reachable->next->heldAsInteger = std::bit_cast<uint64_t>(plantMissed(Missed::HeldAsInteger));
+    plantMissed(Missed::GroupHead)->next = plantMissed(Missed::GroupMember);
+    myaRoots.map.add(1, plantMissed(Missed::StaleInMap));
+    myaRoots.map.add(2, plant(Planted::HashMapAfterDeletion));
     myaRoots.map.remove(1);
+    myaRoots.staleOptional = plantMissed(Missed::StaleInOptional);
+    myaRoots.staleOptional.reset();
 
     fixture.globalObject = std::bit_cast<uint64_t>(globalObject);
     fixture.jsonCache = std::bit_cast<uint64_t>(&vm.jsonCache());
@@ -397,6 +478,11 @@ Address createFixture()
     fixture.string = std::bit_cast<uint64_t>(name.asCell());
     fixture.stringImpl = std::bit_cast<uint64_t>(JSC::asString(name)->tryGetValueImpl());
     fixture.stringImplRefCount = JSC::asString(name)->tryGetValueImpl()->refCount();
+
+    // A dictionary Structure keeps its PropertyTable, whose index buffer only its m_indexVector, an integer, holds.
+    JSC::JSValue wide = object->get(globalObject, JSC::Identifier::fromString(vm, "wide"_s));
+    RELEASE_ASSERT(wide.isObject() && wide.getObject()->structure()->isDictionary());
+    fixture.wideStructure = std::bit_cast<uint64_t>(wide.getObject()->structure());
 
     vm.heap.collectSync(JSC::CollectionScope::Full);
 
@@ -429,6 +515,7 @@ void recordFixture(Address fixtureAddress)
     }
     std::ranges::sort(cells.first(count));
     fixture.liveCells = std::bit_cast<uint64_t>(cells.data());
+    fixture.threadControlBlock = std::bit_cast<uint64_t>(pthread_self());
     fixture.liveCellCount = count;
 
     // Last before the enumeration, so that nothing reuses them first.
@@ -652,6 +739,26 @@ void checkFixture(Snapshot& snapshot, const HeapWalk& heap, const LiveCells& cel
     TEST_ASSERT(internalNumber && *internalNumber == dateMagic, "the date's C++ double reads back");
 }
 
+// The index buffer of the PropertyTable of the Structure at `structure`: its
+// m_indexVector, less PropertyTable::isCompactFlag.
+uint64_t propertyTableIndexBuffer(Snapshot& snapshot, const HeapWalk& heap, Address structure)
+{
+    const TargetType* structureClass = heap.cellClass(structure);
+    if (!structureClass)
+        return 0;
+    // m_propertyTableUnsafe is a WriteBarrier, whose first base holds m_cell.
+    TargetValue barrier = TargetValue::at(snapshot, structure, *structureClass).properField("m_propertyTableUnsafe");
+    auto* barrierClass = barrier ? std::get_if<TargetType::Class>(&barrier.type().layout()) : nullptr;
+    if (!barrierClass || barrierClass->bases.isEmpty())
+        return 0;
+    auto table = barrier.base(barrierClass->bases[0]).properField("m_cell").pointerValue();
+    const TargetType* tableClass = table && *table ? heap.cellClass(*table) : nullptr;
+    if (!tableClass)
+        return 0;
+    auto indexVector = TargetValue::at(snapshot, *table, *tableClass).properField("m_indexVector").integer();
+    return indexVector ? static_cast<uint64_t>(*indexVector) & ~static_cast<uint64_t>(1) : 0; // PropertyTable::isCompactFlag, which is private.
+}
+
 // The reach (patch 9), the readers it needs (patches 10 and 11), and how much
 // of what it reaches it reads as a type (patch 12).
 void checkReach(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFixture& fixture)
@@ -693,11 +800,13 @@ void checkReach(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFixture&
     });
     TEST_ASSERT_EQ(cellsOutside, 0u, "every live cell is in an enumerated allocation: the JS heap's blocks are libpas objects");
 
-    // The allocations the target leaks on purpose, and the one it plants to be missed, are expected misses.
+    // The allocations the target leaks or plants to be missed on purpose are expected misses.
+    Vector<uint64_t> expectedMisses { fixture.leaked[0], fixture.leaked[1], fixture.codeHandle };
+    expectedMisses.appendRange(fixture.probes.begin(), fixture.probes.end());
+    for (uint64_t missed : fixture.missed)
+        expectedMisses.append(missed ^ hiddenAddressMask);
     Vector<HeapWalk::Allocation> excluded;
     uint64_t excludedBytes = 0;
-    Vector<uint64_t> expectedMisses { fixture.leaked[0], fixture.leaked[1], fixture.staleInMap };
-    expectedMisses.appendRange(fixture.probes.begin(), fixture.probes.end());
     for (uint64_t address : expectedMisses) {
         if (auto index = indexOf(address)) {
             excluded.append(allocations[*index]);
@@ -707,8 +816,15 @@ void checkReach(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFixture&
     std::ranges::sort(excluded, { }, &HeapWalk::Allocation::address);
     TEST_ASSERT_EQ(excluded.size(), expectedMisses.size(), "libpas enumerates the objects the target means the walk to miss");
 
+    // The target's records of its live cells and allocations hold every allocation's address.
+    Vector<HeapWalk::Allocation> records {
+        { Address { fixture.liveCells }, fixture.liveCellCount * sizeof(uint64_t) },
+        { Address { fixture.allocations }, fixture.allocationCount * sizeof(HeapWalk::Allocation) },
+    };
+    std::ranges::sort(records, { }, &HeapWalk::Allocation::address);
+
     MonotonicTime start = MonotonicTime::now();
-    HeapWalk::Reach reach = heap.reach(allocations, excluded, 10);
+    HeapWalk::Reach reach = heap.reach(allocations, excluded, records, 10);
     Seconds duration = MonotonicTime::now() - start;
     auto isReached = [&](uint64_t address) {
         auto index = indexOf(address);
@@ -721,8 +837,6 @@ void checkReach(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFixture&
 
     // The percentage counts only the program's own memory.
     TEST_ASSERT_EQ(reach.bytesExcluded, excludedBytes, "the excluded bytes are the sizes of the excluded allocations");
-    HeapWalk::Reach unexcluded = heap.reach(allocations, { }, 0);
-    TEST_ASSERT_EQ(unexcluded.bytesReached, reach.bytesReached, "excluding missed allocations changes what the walk reaches by nothing");
     // The byte counts, from the allocations and which of them the walk reached.
     uint64_t allocatedBytes = 0;
     uint64_t reachedBytes = 0;
@@ -733,9 +847,7 @@ void checkReach(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFixture&
     }
     TEST_ASSERT_EQ(reach.bytesAllocated, allocatedBytes, "the allocated bytes are the sizes of the enumerated allocations");
     TEST_ASSERT_EQ(reach.bytesReached, reachedBytes, "the reached bytes are the sizes of the allocations the walk reached");
-    TEST_ASSERT(!unexcluded.bytesExcluded && unexcluded.percent() == 100.0 * reachedBytes / allocatedBytes
-        && reach.percent() == 100.0 * reachedBytes / (allocatedBytes - excludedBytes),
-        "excluding them raises the percentage by exactly their bytes' share");
+    TEST_ASSERT(reach.percent() == 100.0 * reachedBytes / (allocatedBytes - excludedBytes), "the percentage is of the bytes not excluded");
 
     // Patch 10: JS cells, read as their classes, lead to the VM as JavaScriptCore describes it.
     TEST_ASSERT(isReached(fixture.jsonCache) && isReached(fixture.builtinExecutables) && isReached(fixture.regExpCache),
@@ -746,19 +858,83 @@ void checkReach(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFixture&
     TEST_ASSERT(isReached(fixture.stringImpl), "the walk reaches the StringImpl of a JSString");
 
     // Patch 11: each planted object is behind a value the walk reads by its C++ source's logic.
+    std::array<uint64_t, numberOfPlanted> planted = fixture.planted;
+    planted[static_cast<size_t>(Planted::PropertyTableIndex)] = propertyTableIndexBuffer(snapshot, heap, Address { fixture.wideStructure });
     for (size_t index = 0; index < numberOfPlanted; ++index)
-        TEST_ASSERT(fixture.planted[index] && isReached(fixture.planted[index]), makeString("the walk reaches the object behind "_s, plantedNames[index]));
-    TEST_ASSERT(!isReached(fixture.staleInMap), "and misses the one held only as the stale value of a deleted HashMap entry");
+        TEST_ASSERT(planted[index] && isReached(planted[index]), makeString("the walk reaches the object behind "_s, plantedNames[index]));
+
+    // Patch 9: the walk says what holds each object planted to be missed.
+    for (size_t index = 0; index < numberOfMissed; ++index) {
+        Address address { fixture.missed[index] ^ hiddenAddressMask };
+        auto miss = std::ranges::find_if(reach.misses, [&](const HeapWalk::Miss& miss) { return miss.allocation.address == address; });
+        bool explained = miss != reach.misses.end() && miss->isExcluded && miss->cause == missedCauses[index]
+            && miss->holder.contains(StringView { missedHolders[index] });
+        if (!explained && miss != reach.misses.end())
+            dataLogLn("    ", missedNames[index], " is held by ", miss->holder, ", cause ", static_cast<unsigned>(miss->cause));
+        TEST_ASSERT(explained, makeString("the walk misses "_s, missedNames[index], ", and says what holds it"_s));
+    }
+    auto groupHead = std::ranges::find_if(reach.misses, [&](const HeapWalk::Miss& miss) { return miss.allocation.address == Address { fixture.missed[static_cast<size_t>(Missed::GroupHead)] ^ hiddenAddressMask }; });
+    TEST_ASSERT(groupHead != reach.misses.end() && groupHead->bytesHeld == 2 * groupHead->allocation.size, "a missed object counts the missed object only it holds");
 
     // Patch 12: the walk reads each planted object as its class.
     for (size_t index = 0; index < numberOfPlanted; ++index) {
-        auto allocation = indexOf(fixture.planted[index]);
+        if (!isPlantedObject(static_cast<Planted>(index)))
+            continue;
+        auto allocation = indexOf(planted[index]);
         TEST_ASSERT(allocation && reach.bytesTypedIn[*allocation] == sizeof(ReachableObject), makeString("the walk types the whole object behind "_s, plantedNames[index]));
     }
     // A StringImpl's characters follow it, in no declared type.
     auto stringImplAllocation = indexOf(fixture.stringImpl);
     TEST_ASSERT(stringImplAllocation && reach.bytesTypedIn[*stringImplAllocation] == sizeof(StringImpl), "the walk types the whole StringImpl behind a JSString");
     TEST_ASSERT(reach.bytesTyped && reach.bytesTyped <= reach.bytesAllocated - reach.bytesExcluded - reach.bytesFreeInBlocks, "the walk types part of the heap");
+    TEST_ASSERT(reach.overruns.isEmpty(), "the walk reads no value as a type bigger than its allocation");
+
+    // Patch 13: with the global variables as roots, the walk misses nothing the test did not exclude.
+    TEST_ASSERT(reach.globalVariables > 1000, "the walk reads the global variables of the images with debug info");
+    constexpr std::array<ASCIILiteral, HeapWalk::numberOfMissCauses> causes {
+        "held by a reached allocation"_s, "held by static data"_s, "held by other memory"_s, "held by other misses"_s, "held by nothing"_s,
+    };
+    // The only misses allowed are what the safe point thread's own ThreadSpecific values hold:
+    // ParkingLot's ThreadData and the assembler's cached buffers. The C library keeps them in
+    // its thread control block, in a layout it does not publish, so the walk does not read them.
+    // A secondary thread's control block is in its stack mapping, which the walk scans.
+    auto controlBlock = Region::findContaining(snapshot.regions(), Address { fixture.threadControlBlock });
+    // The allocations the control block's words point into: the thread's values, reached by the walk or not.
+    HashSet<uint64_t> threadValues;
+    if (controlBlock) {
+        if (auto words = snapshot.memory().span<uint64_t>(controlBlock->base(), controlBlock->size() / sizeof(uint64_t))) {
+            for (uint64_t word : std::span<const uint64_t> { words }) {
+                if (auto index = indexOf(word))
+                    threadValues.add(allocations[*index].address.toTargetVMAddress());
+            }
+        }
+    }
+    // Held from the control block, from one of the thread's values, or from another miss, which is checked in turn.
+    auto isThreadValue = [&](const HeapWalk::Miss& miss) {
+        return std::ranges::any_of(miss.referrers, [&](Address word) {
+            if (controlBlock && controlBlock->contains(word))
+                return true;
+            auto index = indexOf(word.toTargetVMAddress());
+            return index && (!reach.isReached[*index] || threadValues.contains(allocations[*index].address.toTargetVMAddress()));
+        });
+    };
+    unsigned unexplained = 0;
+    uint64_t threadValueBytes = 0;
+    for (const HeapWalk::Miss& miss : reach.misses) {
+        if (miss.isExcluded)
+            continue;
+        if (isThreadValue(miss)) {
+            threadValueBytes += miss.allocation.size;
+            continue;
+        }
+        if (unexplained++ < 20) {
+            dataLogLn("    missed: ", miss.allocation.size, " bytes at 0x", hex(miss.allocation.address.toTargetVMAddress()), ", ", miss.bytesHeld, " with what only it holds, ",
+                causes[static_cast<size_t>(miss.cause)], ": ", miss.holder, miss.content.isEmpty() ? ""_s : makeString("; it holds "_s, miss.content));
+        }
+    }
+    TEST_ASSERT(controlBlock, "the safe point thread's control block is in the snapshot");
+    TEST_ASSERT_EQ(unexplained, 0u, "the walk reaches every allocation the test does not exclude, but for the safe point thread's own values");
+    TEST_ASSERT(threadValueBytes < 64 * KB, "the safe point thread's own values are small");
 
     if (!verbose)
         return;
@@ -766,14 +942,16 @@ void checkReach(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFixture&
         reach.bytesExcluded, " excluded, in ", allocations.size(), " libpas allocations, in ", duration.milliseconds(), " ms");
     dataLogLn("    it reads ", reach.typedPercent(), "% of the heap as a type: ", reach.bytesTyped, " bytes, with ", reach.bytesFreeInBlocks, " free in MarkedBlocks");
     dataLogLn("    ", reach.cellsWithClass, " JS cells read as their class, with ", reach.cellBytesBeyondClass, " bytes beyond their class");
+    dataLogLn("    ", reach.globalVariables, " global variables read as roots, and ", reach.untypedDataSymbols, " data symbols that are no variable");
     constexpr std::array<ASCIILiteral, HeapWalk::numberOfNotFollowedReasons> reasons {
         "pointers to declarations"_s, "pointers to types without a size"_s, "polymorphic pointees without a dynamic type"_s,
-        "JS cells without a class"_s, "encoded pointers to types not reached"_s, "HashTables with key traits not WTF's defaults"_s,
+        "JS cells without a class"_s, "encoded pointers to types not reached"_s,
     };
     for (size_t index = 0; index < reasons.size(); ++index)
         dataLogLn("    not followed: ", reach.notFollowed[index], " ", reasons[index]);
-    for (const HeapWalk::Allocation& missed : reach.largestMissed)
-        dataLogLn("    missed: ", missed.size, " bytes at 0x", hex(missed.address.toTargetVMAddress()));
+    for (size_t index = 0; index < causes.size(); ++index)
+        dataLogLn("    missed and not excluded: ", reach.bytesMissedByCause[index], " bytes ", causes[index]);
+    dataLogLn("    of which held by the safe point thread's own values: ", threadValueBytes, " bytes");
     for (const HeapWalk::Untyped& untyped : reach.mostUntyped)
         dataLogLn("    untyped: ", untyped.bytesUntyped, " of ", untyped.allocation.size, " bytes at 0x", hex(untyped.allocation.address.toTargetVMAddress()),
             ", read as ", untyped.typeAtStart.isNull() ? "nothing at its start"_s : untyped.typeAtStart);
@@ -802,6 +980,11 @@ void checkCellClasses(const HeapWalk& heap, const LiveCells& cells, const HeapWa
         classes.add(klass);
     }
     TEST_ASSERT_EQ(withoutClass, 0u, "every live JS cell's ClassInfo names its C++ class");
+    Vector<String> unlisted = heap.unlistedCellClasses();
+    for (const String& name : unlisted)
+        dataLogLn("    ", name, " is not in mya's list of cell classes, CorpseCellClasses.h");
+    TEST_ASSERT(unlisted.isEmpty(), "every s_info in JavaScriptCore is the s_info of a class in mya's list");
+    TEST_ASSERT(heap.listedCellClassCount() > 300, "JavaScriptCore has the classes of mya's list");
     TEST_ASSERT_EQ(biggerThanCell, 0u, "no live JS cell is smaller than its class");
     if (verbose)
         dataLogLn("    the live JS cells are of ", classes.size(), " C++ classes");
@@ -858,7 +1041,10 @@ void analyze(Snapshot& snapshot, Address fixtureAddress)
     if (!fixture)
         return;
 
+    MonotonicTime start = MonotonicTime::now();
     HeapWalk heap(snapshot, Address { fixture->roots });
+    if (verbose)
+        dataLogLn("    finding the heap, with the snapshot's debug info, takes ", (MonotonicTime::now() - start).milliseconds(), " ms");
     TEST_ASSERT(heap.isValid(), "the target's heap is found from its roots");
     if (!heap.isValid())
         return;

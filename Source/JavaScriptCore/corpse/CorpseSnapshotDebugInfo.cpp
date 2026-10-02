@@ -63,7 +63,6 @@ SnapshotDebugInfo::SnapshotDebugInfo(std::unique_ptr<lldb::SBDebugger>&& debugge
 
 SnapshotDebugInfo::~SnapshotDebugInfo()
 {
-    m_compileUnitClasses.clear();
     m_classesOfVTables.clear();
     m_types.clear();
     m_debugger->DeleteTarget(*m_target);
@@ -459,65 +458,156 @@ bool SnapshotDebugInfo::vtableSymbolNames(Address vtable, const TargetType& type
     return true;
 }
 
-// The classes of a compile unit, listed once.
-struct SnapshotDebugInfo::CompileUnitClasses {
-    Vector<lldb::SBType> classes;
-};
-
-const TargetType* SnapshotDebugInfo::classInCompileUnitOf(Address variable, const char* memberName, const char* linkageName)
+lldb::SBModule SnapshotDebugInfo::moduleAt(Address address) const
 {
-    lldb::SBAddress resolved = m_target->ResolveLoadAddress(variable.toTargetVMAddress());
-    lldb::SBSymbol symbol = resolved.GetSymbol();
-    if (!symbol.IsValid() || symbol.GetStartAddress() != resolved || !symbol.GetMangledName()) {
-        CORPSE_REPORT("No variable starts at 0x%llx", variable.toTargetVMAddress());
+    return m_target->ResolveLoadAddress(address.toTargetVMAddress()).GetModule();
+}
+
+const TargetType* SnapshotDebugInfo::classNamed(Address inImage, const char* name)
+{
+    lldb::SBType found = moduleAt(inImage).FindFirstType(name);
+    if (!found.IsValid() || !found.IsTypeComplete() || !found.GetByteSize())
         return nullptr;
-    }
-    if (!linkageName)
-        linkageName = symbol.GetMangledName();
+    return &type(found);
+}
 
-    // A data address is in no compile unit's code, so liblldb finds the global
-    // variable that contains it, and the compile unit that defines that.
-    lldb::SBSymbolContext context = m_target->ResolveSymbolContextForAddress(resolved, lldb::eSymbolContextCompUnit | lldb::eSymbolContextVariable);
-    lldb::SBCompileUnit unit = context.GetCompileUnit();
-    lldb::SBFileSpec unitFile = unit.GetFileSpec();
-    lldb::SBFileSpec moduleFile = context.GetModule().GetFileSpec();
-    if (!unit.IsValid() || !unitFile.GetFilename()) {
-        CORPSE_REPORT("No compile unit defines '%s' at 0x%llx", symbol.GetName(), variable.toTargetVMAddress());
-        return nullptr;
-    }
-
-    auto string = [](const char* characters) {
-        return String::fromUTF8(characters ? characters : "");
-    };
-    String key = makeString(string(moduleFile.GetDirectory()), '/', string(moduleFile.GetFilename()), '\n', string(unitFile.GetDirectory()), '/', string(unitFile.GetFilename()));
-    auto& unitClasses = m_compileUnitClasses.ensure(key, [&] {
-        auto result = makeUniqueWithoutFastMallocCheck<CompileUnitClasses>();
-        lldb::SBTypeList types = unit.GetTypes(lldb::eTypeClassClass | lldb::eTypeClassStruct);
-        for (uint32_t index = 0; index < types.GetSize(); ++index)
-            result->classes.append(types.GetTypeAtIndex(index));
-        return result;
-    }).iterator->value;
-
+std::optional<Address> SnapshotDebugInfo::staticMemberAddress(Address inImage, const TargetType& klass, const char* member)
+{
     // liblldb names a static member with clang's own mangler, from the class
-    // it built, so a match means this class declares that member.
-    std::optional<lldb::SBType> match;
-    std::string_view expected { linkageName };
-    for (lldb::SBType& candidate : unitClasses->classes) {
-        lldb::SBTypeStaticField member = candidate.GetStaticFieldWithName(memberName);
-        const char* candidateName = member.IsValid() ? member.GetMangledName() : nullptr;
-        if (!candidateName || std::string_view { candidateName } != expected)
+    // it built, as the compiler named its definition's symbol.
+    lldb::SBTypeStaticField field = klass.m_type->GetStaticFieldWithName(member);
+    const char* linkageName = field.IsValid() ? field.GetMangledName() : nullptr;
+    if (!linkageName)
+        return std::nullopt;
+    lldb::SBSymbol symbol = moduleAt(inImage).FindSymbol(linkageName);
+    if (!symbol.IsValid())
+        return std::nullopt;
+    lldb::addr_t address = symbol.GetStartAddress().GetLoadAddress(*m_target);
+    if (address == LLDB_INVALID_ADDRESS)
+        return std::nullopt;
+    return Address { address };
+}
+
+auto SnapshotDebugInfo::dataSymbolsEndingWith(Address inImage, const char* suffix) -> Vector<Symbol>
+{
+    Vector<Symbol> result;
+    lldb::SBModule module = moduleAt(inImage);
+    std::string_view expected { suffix };
+    size_t count = module.GetNumSymbols();
+    for (size_t index = 0; index < count; ++index) {
+        lldb::SBSymbol symbol = module.GetSymbolAtIndex(index);
+        const char* mangledName = symbol.GetMangledName();
+        if (symbol.GetType() != lldb::eSymbolTypeData || !mangledName || !std::string_view { mangledName }.ends_with(expected))
             continue;
-        if (match && !(*match == candidate)) {
-            CORPSE_REPORT("Two classes of the compile unit of 0x%llx declare '%s'", variable.toTargetVMAddress(), linkageName);
-            return nullptr;
+        lldb::addr_t address = symbol.GetStartAddress().GetLoadAddress(*m_target);
+        if (address == LLDB_INVALID_ADDRESS)
+            continue;
+        result.append({ Address { address }, String::fromUTF8(symbol.GetName()) });
+    }
+    return result;
+}
+
+std::optional<Address> SnapshotDebugInfo::symbolAddress(Address inImage, const char* name)
+{
+    lldb::SBSymbol symbol = moduleAt(inImage).FindSymbol(name);
+    lldb::addr_t address = symbol.IsValid() ? symbol.GetStartAddress().GetLoadAddress(*m_target) : LLDB_INVALID_ADDRESS;
+    if (address == LLDB_INVALID_ADDRESS)
+        return std::nullopt;
+    return Address { address };
+}
+
+String SnapshotDebugInfo::symbolAt(Address address)
+{
+    lldb::SBAddress resolved = m_target->ResolveLoadAddress(address.toTargetVMAddress());
+    lldb::SBSymbol symbol = resolved.GetSymbol();
+    if (!symbol.IsValid() || !symbol.GetName())
+        return { };
+    lldb::addr_t start = symbol.GetStartAddress().GetLoadAddress(*m_target);
+    String name = String::fromUTF8(symbol.GetName());
+    if (start == LLDB_INVALID_ADDRESS || start == address.toTargetVMAddress())
+        return name;
+    return makeString(name, "+0x"_s, hex(address.toTargetVMAddress() - start));
+}
+
+// The static variables of `block` and of the blocks nested in it.
+static void appendStaticVariables(lldb::SBTarget& target, lldb::SBBlock block, Vector<lldb::SBValue>& variables, unsigned depth = 0)
+{
+    // A function nests blocks a few deep; a cycle would be a liblldb bug.
+    if (!block.IsValid() || depth > 256)
+        return;
+    lldb::SBValueList list = block.GetVariables(target, false, false, true);
+    for (uint32_t index = 0; index < list.GetSize(); ++index)
+        variables.append(list.GetValueAtIndex(index));
+    for (lldb::SBBlock child = block.GetFirstChild(); child.IsValid(); child = child.GetSibling())
+        appendStaticVariables(target, child, variables, depth + 1);
+}
+
+// The function-local static `mangledName`, at `address`. Its name is "_ZZ",
+// then its function's name without "_Z", then "E" and its own name, so its
+// function's symbol is "_Z" and a prefix of the rest that ends before an "E".
+// The function is the one of those that declares a static at `address`.
+static std::optional<lldb::SBValue> functionLocalStatic(lldb::SBTarget& target, lldb::SBModule& module, std::string_view mangledName, lldb::addr_t address)
+{
+    std::string_view rest = mangledName.substr(3);
+    for (size_t end = rest.find('E'); end != std::string_view::npos; end = rest.find('E', end + 1)) {
+        std::string functionName = "_Z";
+        functionName += rest.substr(0, end);
+        lldb::SBSymbol symbol = module.FindSymbol(functionName.c_str());
+        if (!symbol.IsValid())
+            continue;
+        lldb::SBFunction function = symbol.GetStartAddress().GetFunction();
+        if (!function.IsValid())
+            continue;
+        Vector<lldb::SBValue> variables;
+        appendStaticVariables(target, function.GetBlock(), variables);
+        for (lldb::SBValue& variable : variables) {
+            if (variable.GetLoadAddress() == address)
+                return variable;
         }
-        match = candidate;
     }
-    if (!match) {
-        CORPSE_REPORT("No class of the compile unit of 0x%llx declares '%s'", variable.toTargetVMAddress(), linkageName);
-        return nullptr;
+    return std::nullopt;
+}
+
+auto SnapshotDebugInfo::globalVariables(const Function<bool(Address)>& isCandidate, size_t& untyped) -> Vector<GlobalVariable>
+{
+    CORPSE_DIAGNOSTICS(diagnostics, "listing the global variables of the images with debug info");
+    Vector<GlobalVariable> result;
+    untyped = 0;
+    uint32_t moduleCount = m_target->GetNumModules();
+    for (uint32_t moduleIndex = 0; moduleIndex < moduleCount; ++moduleIndex) {
+        lldb::SBModule module = m_target->GetModuleAtIndex(moduleIndex);
+        size_t symbolCount = module.GetNumSymbols();
+        for (size_t index = 0; index < symbolCount; ++index) {
+            lldb::SBSymbol symbol = module.GetSymbolAtIndex(index);
+            if (symbol.GetType() != lldb::eSymbolTypeData)
+                continue;
+            const char* name = symbol.GetMangledName() ? symbol.GetMangledName() : symbol.GetName();
+            lldb::addr_t address = symbol.GetStartAddress().GetLoadAddress(*m_target);
+            if (!name || address == LLDB_INVALID_ADDRESS || !isCandidate(Address { address }))
+                continue;
+            // liblldb lists a global by its linkage name too, so the symbol's
+            // name finds the variable it is, without a spelling of its own.
+            std::string_view mangledName { name };
+            std::optional<lldb::SBValue> variable;
+            if (mangledName.starts_with("_ZZ"))
+                variable = functionLocalStatic(*m_target, module, mangledName, address);
+            else {
+                lldb::SBValueList candidates = module.FindGlobalVariables(*m_target, name, 8);
+                for (uint32_t candidate = 0; candidate < candidates.GetSize() && !variable; ++candidate) {
+                    lldb::SBValue value = candidates.GetValueAtIndex(candidate);
+                    if (value.GetLoadAddress() == address)
+                        variable = value;
+                }
+            }
+            lldb::SBType variableType = variable ? variable->GetType() : lldb::SBType { };
+            if (!variableType.IsValid()) {
+                ++untyped;
+                continue;
+            }
+            result.append({ Address { address }, type(variableType) });
+        }
     }
-    return &type(*match);
+    return result;
 }
 
 } // namespace Corpse
@@ -555,7 +645,32 @@ const TargetType* SnapshotDebugInfo::dynamicTypeIfAnyAt(Snapshot&, Address, Addr
     RELEASE_ASSERT_NOT_REACHED();
 }
 
-const TargetType* SnapshotDebugInfo::classInCompileUnitOf(Address, const char*, const char*)
+const TargetType* SnapshotDebugInfo::classNamed(Address, const char*)
+{
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+std::optional<Address> SnapshotDebugInfo::staticMemberAddress(Address, const TargetType&, const char*)
+{
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+auto SnapshotDebugInfo::dataSymbolsEndingWith(Address, const char*) -> Vector<Symbol>
+{
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+std::optional<Address> SnapshotDebugInfo::symbolAddress(Address, const char*)
+{
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+String SnapshotDebugInfo::symbolAt(Address)
+{
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+auto SnapshotDebugInfo::globalVariables(const Function<bool(Address)>&, size_t&) -> Vector<GlobalVariable>
 {
     RELEASE_ASSERT_NOT_REACHED();
 }

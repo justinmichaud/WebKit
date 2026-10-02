@@ -349,7 +349,7 @@ Address createContainers()
         containers.nodes[index].value = 7 + index;
         containers.list.append(&containers.nodes[index]);
     }
-    // A deleted entry's value is destroyed but not cleared, so it still points at its node.
+    // A deleted entry's value is destroyed, and, in an ENABLE(MYA_HEAP) build, cleared.
     for (uint64_t key = 1; key <= 20; ++key)
         containers.map.add(key, &containers.nodes[key % containers.nodes.size()]);
     for (uint64_t key = 2; key <= 20; key += 2)
@@ -398,6 +398,21 @@ void analyzeContainers(Snapshot& snapshot, Address object)
     for (uint64_t key = 1; key <= 20; key += 2)
         expectedEntries.append({ key, (nodeArray + (key % 3) * sizeof(ContainerNode)).toTargetVMAddress() });
     TEST_ASSERT(readable && entries == expectedEntries, "a HashMap reads its entries, and skips its empty and deleted buckets");
+
+    // Every bucket, as the reach walk reads it: a deleted one holds its deleted key and zeros.
+    auto buckets = hashTableBuckets(value->properField("map").properField("m_impl"));
+    unsigned deleted = 0;
+    unsigned stale = 0;
+    for (unsigned index = 0; buckets && index < buckets->size; ++index) {
+        auto entry = Remote<Entry*>(TargetValue { buckets->table }).dereference().offsetBy(index).as<Entry>();
+        if (!entry || !HashTraits<uint64_t>::isDeletedValue(entry->key))
+            continue;
+        ++deleted;
+        if (entry->value)
+            ++stale;
+    }
+    TEST_ASSERT(deleted, "the HashMap has deleted buckets");
+    TEST_ASSERT_EQ(stale, 0u, "a deleted HashMap bucket's value reads as zero");
 
     Remote<ContainerNode*> nodePointer { value->properField("node") };
     Vector<uint64_t> nodes;

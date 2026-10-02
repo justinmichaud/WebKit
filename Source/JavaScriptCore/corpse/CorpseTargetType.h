@@ -56,7 +56,10 @@ public:
     ~TargetType();
 
     UTF8CString name() const;
-    size_t byteSize() const { return m_byteSize; }
+    // Read the first time it is asked for: liblldb completes a class to size
+    // it, which a pointee the walk never follows does not need.
+    size_t byteSize() const { return m_byteSize ? *m_byteSize : readByteSize(); }
+    size_t alignment() const; // alignof the type.
 
     SnapshotDebugInfo& debugInfo() const { return m_debugInfo; }
 
@@ -106,10 +109,11 @@ private:
     TargetType(SnapshotDebugInfo&, const lldb::SBType&);
 
     Layout readLayout() const;
+    size_t readByteSize() const;
 
     SnapshotDebugInfo& m_debugInfo;
     const std::unique_ptr<lldb::SBType> m_type;
-    const size_t m_byteSize;
+    mutable std::optional<size_t> m_byteSize;
     mutable std::optional<Layout> m_layout;
 
     friend class SnapshotDebugInfo;

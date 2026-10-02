@@ -280,67 +280,6 @@ inline std::optional<HashTableBuckets> hashTableBuckets(const TargetValue& hashT
     return HashTableBuckets { WTF::move(table), *tableSize };
 }
 
-// How a bucket of a HashTable read without its C++ type is told empty or
-// deleted: as WTF's default HashTraits for an integer, pointer, smart pointer
-// or String key tell it, an empty key is all zeros and a deleted one all ones.
-// Nullopt for any other table, whose keys say nothing of the kind.
-struct DefaultHashTraits {
-    size_t keyOffset; // In a bucket: a HashSet's bucket is its key, a HashMap's a KeyValuePair.
-    size_t keySize;
-};
-
-inline std::optional<DefaultHashTraits> defaultHashTraits(const TargetType& hashTable)
-{
-    // HashTable<Key, Value, Extractor, HashFunctions, Traits, KeyTraits, Malloc>.
-    const TargetType* key = hashTable.templateArgument(0);
-    const TargetType* value = hashTable.templateArgument(1);
-    const TargetType* keyTraits = hashTable.templateArgument(5);
-    if (!key || !value || !keyTraits || !key->byteSize() || key->byteSize() > sizeof(uint64_t))
-        return std::nullopt;
-    auto traitsName = keyTraits->name();
-    if (!std::string_view { traitsName.legacyCStringPointer() }.starts_with("WTF::HashTraits<") || keyTraits->templateArgument(0) != key)
-        return std::nullopt;
-
-    const TargetType::Layout& layout = key->layout();
-    if (std::holds_alternative<TargetType::Class>(layout)) {
-        auto keyName = key->name();
-        std::string_view name { keyName.legacyCStringPointer() };
-        bool isSmartPointerOrString = name.starts_with("WTF::RefPtr<") || name.starts_with("WTF::Ref<")
-            || name.starts_with("std::unique_ptr<") || name.starts_with("std::__1::unique_ptr<")
-            || name == "WTF::String" || name == "WTF::AtomString";
-        if (!isSmartPointerOrString || key->byteSize() != sizeof(uint64_t))
-            return std::nullopt;
-    } else if (auto* integer = std::get_if<TargetType::Integer>(&layout)) {
-        // An enumeration's default traits are not an integer's.
-        if (integer->isEnumeration)
-            return std::nullopt;
-    } else if (!std::holds_alternative<TargetType::Pointer>(layout))
-        return std::nullopt;
-
-    if (value == key)
-        return DefaultHashTraits { 0, key->byteSize() };
-    auto* pair = std::get_if<TargetType::Class>(&value->layout());
-    if (!pair)
-        return std::nullopt;
-    for (const TargetType::Field& field : pair->properFields) {
-        if (std::string_view { field.name.legacyCStringPointer() } == "key" && &field.type == key && !field.bitSize)
-            return DefaultHashTraits { field.offset, key->byteSize() };
-    }
-    return std::nullopt;
-}
-
-// Nullopt, and reported, if the bucket's key cannot be read.
-inline std::optional<bool> isEmptyOrDeletedBucket(Snapshot& snapshot, Address bucket, const DefaultHashTraits& traits)
-{
-    auto bytes = snapshot.memory().span<uint8_t>(bucket + traits.keyOffset, traits.keySize);
-    if (!bytes) {
-        CORPSE_REPORT("Could not read the key of the HashTable bucket at 0x%llx", static_cast<unsigned long long>(bucket.toTargetVMAddress()));
-        return std::nullopt;
-    }
-    std::span<const uint8_t> key { bytes };
-    return std::ranges::all_of(key, [](uint8_t byte) { return !byte; }) || std::ranges::all_of(key, [](uint8_t byte) { return byte == 0xff; });
-}
-
 // A Vector holds its elements, wherever its buffer is.
 template<typename T, size_t inlineCapacity, typename OverflowHandler, size_t minCapacity, typename Malloc>
 struct RemoteTraits<Vector<T, inlineCapacity, OverflowHandler, minCapacity, Malloc>> {

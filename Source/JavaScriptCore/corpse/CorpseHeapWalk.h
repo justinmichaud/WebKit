@@ -44,6 +44,7 @@
 #include <wtf/BitSet.h>
 #include <wtf/Function.h>
 #include <wtf/HashMap.h>
+#include <wtf/HashSet.h>
 #include <wtf/IterationStatus.h>
 #include <wtf/RefPtr.h>
 #include <wtf/Vector.h>
@@ -66,9 +67,11 @@ struct MarkedSpaceState;
 class ReachWalk;
 
 // The JS heap of a VM in a corpse, walked through the target's debug info.
-// The walk starts from a roots object, whose type comes from its vtable; every
-// other type it reads is the type of a field reached from there, so the
-// layouts are the target's whatever it was built for.
+// The walk starts from a roots object, whose type comes from its vtable. Every
+// other type it reads is the type of a field reached from there, of a global
+// variable, or of a class in mya's lists of JavaScriptCore's classes, found by
+// name in JavaScriptCore's image, so the layouts are the target's whatever it
+// was built for.
 class HeapWalk {
 public:
     struct Cell {
@@ -77,11 +80,10 @@ public:
         HeapCell::Kind kind;
     };
 
-    // `roots` is an object of a polymorphic class with the fields `JSC::VM* vm`,
-    // `JSC::MarkedBlock::Header* markedBlockHeader`,
-    // `JSC::LocalAllocator* localAllocator` and `bool atSafePoint`; only the
-    // types of the two in the middle are read. Invalid, and reported, if the
-    // roots name no VM or the snapshot has no debug info.
+    // `roots` is an object of a polymorphic class with the fields `JSC::VM* vm`
+    // and `bool atSafePoint`. Invalid, and reported, if the roots name no VM,
+    // the snapshot has no debug info, or JavaScriptCore's image lacks a class
+    // the walk needs by name.
     HeapWalk(Snapshot&, Address roots);
 
     bool isValid() const { return static_cast<bool>(m_vm); }
@@ -104,10 +106,17 @@ public:
     Remote<JSCell> jsCell(Address) const;
     Remote<Structure> structure(uint32_t structureIDBits) const;
 
-    // The C++ class of the JS cell at `address`: the class whose s_info is its
-    // Structure's ClassInfo, checked against that ClassInfo's size and parent.
-    // Null, having reported why once per ClassInfo, if there is none.
+    // The C++ class of the JS cell at `address`: the class in mya's list of
+    // cell classes (CorpseCellClasses.h) whose s_info is its Structure's
+    // ClassInfo, checked against that ClassInfo's size and parent. Null,
+    // having reported why once per ClassInfo, if there is none.
     const TargetType* cellClass(Address) const;
+
+    // The s_info symbols of JavaScriptCore's image whose class is not in
+    // mya's list of cell classes, by name: each needs a line in the list.
+    Vector<String> unlistedCellClasses() const;
+    // How many classes of the list JavaScriptCore's image has.
+    size_t listedCellClassCount() const;
 
     using AtomBits = WTF::BitSet<MarkedBlock::atomsPerBlock>;
 
@@ -122,9 +131,30 @@ public:
         NoDynamicType, // A pointer to a polymorphic class whose object has no dynamic type; followed as its static type.
         CellWithoutClass, // A JS cell whose ClassInfo names no class.
         TypeNotReached, // An encoded pointer whose pointee type the walk does not have.
-        HashTableNotRead, // A HashTable whose key traits are not WTF's default ones for its key.
     };
-    static constexpr size_t numberOfNotFollowedReasons = static_cast<size_t>(NotFollowed::HashTableNotRead) + 1;
+    static constexpr size_t numberOfNotFollowedReasons = static_cast<size_t>(NotFollowed::TypeNotReached) + 1;
+
+    // What holds an allocation the walk missed, as the walk finds it: the
+    // first of these that holds a word whose value lies inside the allocation.
+    enum class MissCause : uint8_t {
+        Reached, // A word of an allocation the walk reached: a field it does not read as a pointer, or bytes no type it read covers.
+        StaticData, // A word in an image's data, in a symbol the walk does not read.
+        OtherMemory, // A word anywhere else, such as libpas's metadata.
+        Missed, // Only words of other missed allocations: it is part of what they hold.
+        NoReferrer, // No word anywhere: it is leaked, or held only in a form that is not a pointer.
+    };
+    static constexpr size_t numberOfMissCauses = static_cast<size_t>(MissCause::NoReferrer) + 1;
+
+    struct Miss {
+        Allocation allocation;
+        MissCause cause;
+        String holder; // What holds it: a field, a symbol, a thread, a region or a missed allocation.
+        String content; // Its dynamic type, if it starts with a polymorphic object.
+        // Where the words that hold it are, the first few found, whatever their cause.
+        Vector<Address> referrers;
+        bool isExcluded;
+        uint64_t bytesHeld; // Its own and those of the misses that only it holds, through other misses.
+    };
 
     // An allocation with bytes the walk read as no type.
     struct Untyped {
@@ -144,7 +174,17 @@ public:
         double percent() const { return ratio(bytesReached, bytesAllocated - bytesExcluded); }
         double typedPercent() const { return ratio(bytesTyped, bytesAllocated - bytesExcluded - bytesFreeInBlocks); }
 
-        Vector<Allocation> largestMissed; // Largest first.
+        // Every missed allocation, with what holds it, the most bytes held first.
+        Vector<Miss> misses;
+        // The bytes of the missed allocations that are not excluded, by cause.
+        std::array<uint64_t, numberOfMissCauses> bytesMissedByCause { };
+        uint64_t bytesMissed() const
+        {
+            uint64_t total = 0;
+            for (uint64_t bytes : bytesMissedByCause)
+                total += bytes;
+            return total;
+        }
         Vector<Untyped> mostUntyped; // Of the allocations reached, most untyped bytes first.
         Vector<bool> isReached; // For each allocation, in the order given.
         Vector<uint64_t> bytesTypedIn; // Likewise.
@@ -153,6 +193,8 @@ public:
         std::array<uint64_t, numberOfNotFollowedReasons> notFollowed { };
         uint64_t cellsWithClass { 0 };
         uint64_t cellBytesBeyondClass { 0 }; // In cells bigger than their class, such as objects with inline storage.
+        uint64_t globalVariables { 0 }; // Walked as roots.
+        uint64_t untypedDataSymbols { 0 }; // Data symbols that are no variable the debug info describes, such as vtables.
 
     private:
         static double ratio(uint64_t part, uint64_t whole) { return whole ? 100.0 * part / whole : 0; }
@@ -160,22 +202,22 @@ public:
 
     // How much of `allocations`, sorted by address, the walk reaches and
     // types: every live cell, each JS cell as its C++ class, and every C++
-    // object reached from the roots or from a cell through a pointer whose
-    // pointee type is known and that lands inside an allocation. The
-    // allocations that overlap `excluded`, also sorted, are left out of the
-    // percentages. The `listCount` largest misses and most untyped allocations
-    // are listed.
-    Reach reach(const Vector<Allocation>&, const Vector<Allocation>& excluded, size_t listCount) const;
+    // object reached from the roots, a global variable, a block's header or a
+    // cell through a pointer whose pointee type is known and that lands inside
+    // an allocation. The allocations that overlap `excluded`, also sorted, are
+    // left out of the percentages. Every miss is explained, except that no
+    // word in `notReferrers`, also sorted, holds one: they are the caller's
+    // own records of the heap. The `listCount` most untyped allocations are listed.
+    Reach reach(const Vector<Allocation>&, const Vector<Allocation>& excluded, const Vector<Allocation>& notReferrers, size_t listCount) const;
 
 private:
     friend class ReachWalk;
     using BlockSet = UncheckedKeyHashSet<MarkedBlock*>;
 
-    const TargetType* classOfClassInfo(const Remote<ClassInfo>&, unsigned depth) const;
     Remote<ClassInfo> classInfoOf(Address cell) const;
-    // WTF::StringImpl, from the compile unit that defines the s_info of the
-    // JSString at `string`, which uses StringImpl whole.
-    const TargetType* stringImplClass(Address string) const;
+    // The classes of mya's list of cell classes, by the address of their s_info.
+    const HashMap<uint64_t, const TargetType*>& cellClasses() const;
+    bool isClassInfoOf(const Remote<ClassInfo>&, const TargetType&, const HashMap<uint64_t, const TargetType*>&) const;
 
     Remote<MarkedBlock::Header> header(Address block) const;
     bool forEachBlock(const Function<IterationStatus(Address block)>&) const;
@@ -189,11 +231,22 @@ private:
     bool m_isAtSafePoint { false };
     std::optional<TargetValue> m_structure; // Any Structure, to retype from.
     std::optional<TargetValue> m_jsCell; // Any JSCell, to retype from.
-    std::optional<TargetValue> m_blockHeaderPointer; // The roots' markedBlockHeader, for its type.
-    std::optional<TargetValue> m_localAllocatorPointer; // The roots' localAllocator, for its type.
+    Address m_javaScriptCoreImage; // An address in JavaScriptCore's image, where the classes it needs by name are looked up.
+    // Classes the walk computes an address for, rather than reading one.
+    const TargetType* m_blockHeaderClass { nullptr };
+    const TargetType* m_localAllocatorClass { nullptr };
+    const TargetType* m_stringImplClass { nullptr }; // For JSString::m_fiber, a uintptr_t.
+    // For CodeBlock::m_jitData, a void*. Null in a build without that tier.
+    const TargetType* m_baselineJITDataClass { nullptr };
+    const TargetType* m_dfgJITDataClass { nullptr };
+    const TargetType* m_fatEntryClass { nullptr }; // For SymbolTableEntry::m_bits, an intptr_t.
+    // WebConfig::g_config, words that WTF and JavaScriptCore read as their Config classes.
+    std::optional<Address> m_config;
+    const TargetType* m_wtfConfigClass { nullptr };
+    const TargetType* m_jscConfigClass { nullptr };
     uint64_t m_startOfStructureHeap { 0 };
-    mutable HashMap<uint64_t, const TargetType*> m_classesOfClassInfos;
-    mutable std::optional<const TargetType*> m_stringImplClass;
+    mutable std::optional<HashMap<uint64_t, const TargetType*>> m_cellClasses;
+    mutable HashSet<uint64_t> m_reportedClassInfos;
 };
 
 // A JSValue holds its cell, if it is one, as SlotVisitor::appendUnbarriered(JSValue) visits it.
