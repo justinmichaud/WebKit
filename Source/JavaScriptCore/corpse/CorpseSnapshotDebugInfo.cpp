@@ -359,13 +359,57 @@ static size_t unnamedLocalTypeLength(std::string_view name)
     return 0;
 }
 
+// The function an unnamed local type is local to, from the scope that
+// qualifies the type: its unqualified name, without template arguments, and
+// its parameters. "WebCore::Timer::Timer<A, B>(A&, void (A::*)())::" and
+// "Timer(A&, void (A::*)())::" both give "Timer(A&, void (A::*)())". Empty if
+// the type is local to no function.
+static std::string enclosingFunctionSignature(std::string_view scope)
+{
+    if (!scope.ends_with("::"))
+        return { };
+    scope.remove_suffix(2);
+    if (scope.ends_with(" const"))
+        scope.remove_suffix(6);
+    if (!scope.ends_with(')'))
+        return { };
+    size_t parametersStart = std::string_view::npos;
+    unsigned depth = 0;
+    for (size_t index = scope.size(); index--;) {
+        if (scope[index] == ')')
+            ++depth;
+        else if (scope[index] == '(' && !--depth) {
+            parametersStart = index;
+            break;
+        }
+    }
+    if (parametersStart == std::string_view::npos)
+        return { };
+    std::string name;
+    depth = 0;
+    for (char character : scope.substr(0, parametersStart)) {
+        if (character == '<')
+            ++depth;
+        else if (character == '>' && depth)
+            --depth;
+        else if (!depth)
+            name += character;
+    }
+    size_t lastScope = name.rfind("::");
+    if (lastScope != std::string::npos)
+        name.erase(0, lastScope + 2);
+    return name + std::string { scope.substr(parametersStart) };
+}
+
 // A demangled name with each template or function argument that is an
-// unnamed local type spelled '?'. The two spellings compared below disagree on
-// such a type: the symbol table's names it as the compiler numbered it, in its
-// enclosing function as declared, and liblldb's as it numbered it again in the
-// class it rebuilt, in that function as instantiated. Only another unnamed
-// local type in the same position matches one, and in a build that folds no
-// functions, rule 1 has no other class to confuse it with.
+// unnamed local type spelled as '?' and the function it is local to. The two
+// spellings compared below disagree on such a type: the symbol table's names
+// it as the compiler numbered it, in its enclosing function as declared, and
+// liblldb's as it numbered it again in the class it rebuilt, in that function
+// as instantiated. Both name the function's parameters. liblldb unifies
+// classes of one name and size, such as two CallableWrappers of lambdas local
+// to different functions, so the function tells their classes apart; two
+// unnamed local types of one function still match each other.
 static std::string withUnnamedLocalTypesErased(std::string_view name)
 {
     std::string result;
@@ -374,8 +418,11 @@ static std::string withUnnamedLocalTypesErased(std::string_view name)
     size_t index = 0;
     while (index < name.size()) {
         if (size_t length = unnamedLocalTypeLength(name.substr(index))) {
-            result.resize(argumentStarts.isEmpty() ? 0 : argumentStarts.last());
+            size_t argumentStart = argumentStarts.isEmpty() ? 0 : argumentStarts.last();
+            std::string function = enclosingFunctionSignature(std::string_view { result }.substr(argumentStart));
+            result.resize(argumentStart);
             result += '?';
+            result += function;
             index += length;
             continue;
         }
@@ -505,6 +552,32 @@ const TargetType* SnapshotDebugInfo::classNamedBeside(const TargetType& neighbor
     if (!isComplete(found))
         return nullptr;
     return &type(found);
+}
+
+const TargetType* SnapshotDebugInfo::definitionInItsImage(const TargetType& declaration)
+{
+    return m_definitions.ensure(&declaration, [&]() -> const TargetType* {
+        auto isDefinition = [](lldb::SBType& found) {
+            return found.IsValid() && found.IsTypeComplete() && found.GetByteSize();
+        };
+        const char* name = declaration.m_type->GetName();
+        lldb::SBModule module = declaration.m_type->GetModule();
+        if (module.IsValid()) {
+            lldb::SBType found = module.FindFirstType(name);
+            return isDefinition(found) ? &type(found) : nullptr;
+        }
+        // Images built with different options may define a class of one name differently.
+        std::optional<lldb::SBType> definition;
+        for (uint32_t index = 0; index < m_target->GetNumModules(); ++index) {
+            lldb::SBType found = m_target->GetModuleAtIndex(index).FindFirstType(name);
+            if (!isDefinition(found))
+                continue;
+            if (definition)
+                return nullptr;
+            definition = found;
+        }
+        return definition ? &type(*definition) : nullptr;
+    }).iterator->value;
 }
 
 struct SnapshotDebugInfo::CompileUnitClasses {
@@ -785,6 +858,11 @@ const TargetType* SnapshotDebugInfo::classNamed(Address, const char*)
 }
 
 const TargetType* SnapshotDebugInfo::classNamedBeside(const TargetType&, const char*)
+{
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+const TargetType* SnapshotDebugInfo::definitionInItsImage(const TargetType&)
 {
     RELEASE_ASSERT_NOT_REACHED();
 }

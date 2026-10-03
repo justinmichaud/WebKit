@@ -67,9 +67,17 @@ another reads complete. Across images it does not. So JavaScriptCore's
 description of `VM` has `m_jsonCache`'s `JSONCache` complete, and the test's,
 which only declares `JSONCache`, does not. The walk reads the test's `VM` only
 to find the heap; the cells lead to the VM again, as JavaScriptCore describes
-it. The pointers to declarations left are those to classes no compile unit of
-the image defines, such as CoreFoundation's opaque `__CFRunLoop` types on
-Darwin. The walk counts them.
+it. liblldb does not complete every declaration from the image's definition,
+though: in WebCore, a `UniqueRef<CSS::ColorMix>` in a `CSS::Color` variant
+points to a `ColorMix` liblldb leaves declared, while the same image defines it.
+So a pointer to a declaration is followed as the class the declaration's own
+image defines under its liblldb name (`SnapshotDebugInfo::definitionInItsImage`).
+liblldb knows no image for some declarations, `ColorMix` among them; one of
+those is followed only if exactly one image defines a class of its name, since
+images built with different options may define one class differently. On
+google.com this follows 100 more pointers, and reaches 0.06% more of the heap. The pointers to declarations left are those to
+classes no compile unit of the image defines, such as CoreFoundation's opaque
+`__CFRunLoop` types on Darwin. The walk counts them.
 
 **Rejected: completing a declaration from its destructor.** A class's
 destructor's linkage name can be resolved in the loaded images' symbol tables,
@@ -172,6 +180,14 @@ from the `debian-debug` archive. Without it, the system-library test fails.
 `--verbose` prints, for the HeapWalk suite, the walk's reach and typed coverage,
 in and out of process, with the largest misses and untyped allocations.
 
+On Darwin, mya and the tests link Xcode's `LLDB.framework`, which records an
+os_signpost and an os_log message for every SB API call. A process started with
+`OS_ACTIVITY_MODE=disable` skips them: the HeapWalk suite takes 9.8 s with it
+and 21 s without, and a web process's walk 27.4 s against 28.7 s.
+
+The TypeFields suite loads WebCore from beside JavaScriptCore into the test
+process (patch 11), and is skipped when WebCore is not built.
+
 **What `ENABLE_MYA_HEAP` changes.** Build flags, each for a stated reason, and
 one line of WTF:
 - `-fstandalone-debug`, so that each image describes the types it uses (in
@@ -195,7 +211,7 @@ one line of WTF:
   (`SUPPORTS_TEXT_BASED_API=NO`), whose export lists it no longer matches. On
   Linux every test passes with symbols hidden, because the walk reads the
   symbol table, which keeps them, so CMake hides them there as usual (see
-  Open);
+  Next steps);
 - `-O2` for `libJavaScriptCoreTools` in a Debug build: a walk reads every value
   of a heap through WTF's containers, which at `-O0` take twice as long.
   JavaScriptCore itself stays as the configuration says;
@@ -271,15 +287,27 @@ class ends. It is storage after the class, so it is not one of its fields.
    - *Not `abi::__cxa_demangle`.* Debian 12's cannot demangle a C++20
      constraint, which `RunLoop::Timer`'s constructors put in their lambdas'
      vtable names.
-   - *Unnamed local types are compared as wildcards.* liblldb computes a
-     member's linkage name with clang's mangler from the class it rebuilt, in
-     which a function's lambdas are numbered again (`$_15` becomes `$_0`) and
-     the enclosing function is spelled as instantiated, not as declared. So a
-     template or function argument that is an unnamed local type (`$_N`,
-     `'lambda'…`, `{lambda…#N}`, `'unnamed…'`), with the function that
-     qualifies it, matches only another one in the same position. In a build
-     that folds no functions, rule 1 has no sibling lambda's class to confuse
-     it with.
+   - *Unnamed local types are compared by their enclosing function.* liblldb
+     computes a member's linkage name with clang's mangler from the class it
+     rebuilt, in which a function's lambdas are numbered again (`$_15` becomes
+     `$_0`) and the enclosing function is spelled as instantiated, without its
+     scope: `Timer(WebCore::Document&, void (WebCore::Document::*)())::$_0`
+     against the symbol table's `WebCore::Timer::Timer<WebCore::Document,
+     WebCore::Document>(WebCore::Document&, void
+     (WebCore::Document::*)())::'lambda'()`. So a template or function argument
+     that is an unnamed local type (`$_N`, `'lambda'…`, `{lambda…#N}`,
+     `'unnamed…'`) is compared as its enclosing function's unqualified name and
+     parameters, which both spellings give, and its own number is a wildcard.
+   - *liblldb unifies classes of one name and size.* Every
+     `WTF::Detail::CallableWrapper<(unnamed class), void>` has that name in
+     liblldb, so two of one size share a type: the destructor of a
+     `Timer<NavigationScheduler>`'s closure gives the class of a
+     `Timer<Document>`'s, whose capture is a different type. Without the
+     enclosing function, rule 2 accepted it, and the walk read 38 captures of
+     a web process as the wrong type. With it, rule 2 refuses them and reports
+     each: 42 `Timer` closures on google.com, which have no dynamic type and are
+     read as their static type. Two lambdas of one function, of one size, are
+     still not told apart.
 
 Rule 1 alone can be wrong without saying so, because one function can be the
 destructor of two classes:
@@ -336,6 +364,7 @@ their static types (A10).
   (the suite fails on any report it did not ask for),
   including the 18 lambda wrappers of `Heap::addCoreConstraints` and
   `RunLoop::Timer`'s, whose vtable name has a C++20 constraint.
+- In a web process, no overrun comes through a closure's capture (patch 11).
 - A system-library object, which has no type on Darwin.
 - Null and unreadable addresses.
 - An image whose UUID does not match is refused.
@@ -827,17 +856,31 @@ and `HashTable` use patch 4's readers.
 | `WTF::LazyUniqueRef`, `WTF::LazyRef` | `m_pointer`, unless `lazyTag` or `initializingTag` is set, as the template argument's type. |
 | `WTF::CompactPtr` (so `CompactRefPtr`) | `m_ptr`, decoded as `CompactPtr::decode` does. An outsized pointer, on a 36-bit build, is counted. |
 | `WTF::PackedAlignedPtr` (so `Packed<T*>`) | The bytes of `m_storage`, shifted left by the alignment's log2 when `PackedAlignedPtr` stores it shifted. The alignment is the second template argument (`SBType::GetTemplateArgumentValue`). |
-| `WTF::CodePtr` | `m_value`, a pointer into JIT code: it reaches the allocation it is in, whose bytes stay untyped. |
+| `WTF::CodePtr` | `m_value`, a pointer into JIT code: it reaches the allocation it is in, whose bytes stay untyped. It is read whole, as `CodePtr`'s one member: liblldb describes some instances, such as `NativeExecutable`'s, as empty one-byte classes. |
+| `WTF::CompactPointerTuple` | The low 48 bits of `m_data` (`maxNumberOfBitsInPointer`), as the first template argument. |
 | `mpark::detail::base` (so `WTF::Variant`) | The alternative `index_` names, as that template argument, in the bytes of `data_`. A valueless variant's `index_` is all ones. |
 | `WTF::InlineMap` | With `m_capacity` at its `InlineCapacity` (`isInline()`), `m_size` entries in `m_storage.inlineEntries`; otherwise `m_capacity` entries at `m_storage.hashedData.entries`. |
 | `WTF::StringImpl` | Its members, then its characters: for `BufferInternal`, `m_length` of them at `tailOffset()`, as `m_data8`'s or `m_data16`'s pointee by `s_hashFlag8BitBuffer`; for `BufferSubstring`, the StringImpl in its tail. A `BufferOwned` buffer is reached through `m_data8`. |
-| `std::optional` | Its members, only when `_M_engaged` (libstdc++) or `__engaged_` (libc++, six bases down) is set. An empty optional's storage holds whatever was there before. |
+| `std::optional` | Its value member, `_M_value` (libstdc++) or `__val_` (libc++, six bases down), only when `_M_engaged` or `__engaged_` is set. An empty optional's storage holds whatever was there before. |
+| `JSC::JSValue` | `u`, as `JSValue::isCell` decodes it: a cell reaches its allocation. |
+| `WTF::StringImplShape` | `m_data8`, or `m_data16` without `s_hashFlag8BitBuffer`: a `BufferOwned` string's buffer, which is how it is reached. |
 | `JSC::JSString` | `m_fiber`: a resolved string's `StringImpl`, unless `isRopeInPointer` is set; a rope's fibers are cells. |
 | `JSC::PropertyTable` | `m_indexVector`, less `isCompactFlag`: the index buffer, `m_indexSize` indices of a byte or of 32 bits, then `(m_indexSize >> 1) + 1` `CompactPropertyTableEntry`s or `PropertyTableEntry`s (`PropertyTable::dataSize`, private). |
 | `JSC::InlineWatchpointSet` | `m_data`: a fat `WatchpointSet*`, unless `IsThinFlag` is set. |
+| `JSC::UnlinkedFunctionExecutable` | With `m_isCached`, `m_decoder`; otherwise `m_unlinkedCodeBlockForCall` and `m_unlinkedCodeBlockForConstruct`. |
+| `JSC::PropertyCondition` | The kind in `m_header`'s high bits: `u.prototype` for the kinds `hasPrototype()` names, `u.equivalence` for `Equivalence`, and the integers of `u.presence` otherwise. |
+| `JSC::HashTableValue` | The member of `m_values` its accessors read for its `m_attributes`. |
+| `JSC::InlineCacheHandler` | Its members but its union, whose cells and module slot the handler's `AccessCase` chose and which the GC does not trace through it. |
+| `JSC::JSCellButterfly` | Its members but `m_header`, whose `IndexingHeader` is always its lengths. |
+| `JSC::MarkedSpace` | Its members but `m_preciseAllocationsForThisCollectionBegin` and `End`, which `prepareForMarking` points into `m_preciseAllocations` for a collection and leaves after it: the buffer may have moved, and the end is no element. |
 | `JSC::SymbolTableEntry` | `m_bits`: a `FatEntry*`, unless `SlimFlag` is set. |
 | `JSC::CodeBlock` | `m_jitData`, a `void*`: a `BaselineJITData` or a `DFG::JITData` by the JIT code's type. |
-| `JSC::JSObjectWithButterfly` | `m_butterfly`: the auxiliary cell that holds the butterfly, found among the live auxiliary cells, as JSValues: out-of-line properties before the butterfly, and the indexing header and indexed properties from it. A double array's elements are doubles in JSValue-sized slots. |
+| `JSC::JSObjectWithButterfly` | `m_butterfly`: the auxiliary cell that holds the butterfly, found among the live auxiliary cells, as JSValues: out-of-line properties before the butterfly, and the indexing header and indexed properties from it. A double array's elements are doubles in JSValue-sized slots. The cell is the one that holds the byte before the IndexingHeader, `sizeof(IndexingHeader)` before the butterfly, unless `Structure::hasIndexingHeader` (indexed properties, or a wasteful typed array), when it holds the header: without one, the butterfly points past the end of its cell. |
+| `JSC::StructureID` | `StructureID::decode`: the cell it names. |
+| `JSC::JSFunction` | `m_executableOrRareData`, less `rareDataTag`: its executable or its `FunctionRareData`. |
+| `JSC::StructureChain` | `m_vector`'s `StructureID`s, up to the first zero (`head()`). |
+| `JSC::LazyProperty` | As `WTF::LazyRef`: `m_pointer`, unless `lazyTag` or `initializingTag` is set. |
+| `JSC::WriteBarrierBase<Unknown>` | `m_value`, as a `JSValue`. |
 | `JSC::StrongBlock` | Its header, then a JSValue slot per `Strong` handle, to the end of the block. |
 | `JSC::WeakBlock` | `weakImpls()`: `weakImplCount()` `WeakImpl`s after the block. |
 | `JSC::GCArraySegment<T>` | `data()`: the slots after the segment, to `blockSize`, read as `T` and not followed: only those below the `GCSegmentedArray`'s top are in use. |
@@ -845,8 +888,11 @@ and `HashTable` use patch 4's readers.
 | `JSC::HasOwnPropertyCache` | `HasOwnPropertyCache::size` (private) `Entry`s from its address; the class has no members. |
 | `JSC::JSArrayBufferView` | `m_vector`, a `CagedBarrierPtr`, which holds its full address: a `FastTypedArray`'s auxiliary cell, read as bytes. |
 | `JSC::ArrayBufferContents` | `m_data`, a `CagedPtr`: `m_sizeInBytes` bytes. |
-| `WebCore::StyleProperties` | It has no vtable: `m_isMutable` says whether it starts a `MutableStyleProperties` or an `ImmutableStyleProperties`, which is then read. |
-| `WebCore::ImmutableStyleProperties` | `metadataSpan()` and `valueSpan()`: `m_arraySize` `StylePropertyMetadata`s at `m_storage`, then as many `Packed<const CSSValue*>`s. |
+| `WebCore::ImmutableStyleProperties` | `metadataSpan()` and `valueSpan()`: `m_arraySize` `StylePropertyMetadata`s at `m_storage`, then as many `Packed<const CSSValue*>`s. `m_storage` only marks where they start, so an object with none is smaller than its class (`objectSize`), and fits an allocation that size. |
+| `WebCore::CSSSelector` | `m_data`: `rareData` with `m_hasRareData`, else `tagQName` for a `Match::Tag` selector, else `value` (`~CSSSelector`). |
+| `WebCore::CSSPrimitiveValue` | `m_value.calc` for a `CSSUnitType::Calc` value; otherwise a number. |
+| `WebCore::CSS::PrimitiveData` | `payload.calc` when the index's storage is `indexStorageForCalc`, `UnitTraits::count`, which WebCore asserts is one more than the last enumerator of the raw type's unit: a member, or a static one for a type of one unit. |
+| `WebCore::CSSValue`, `WebCore::StyleRuleBase`, `WebCore::NodeRareData`, `WebCore::StyleProperties` | The subclass the type field names (below). |
 
 More storage follows a cell or an allocation, and is read where the walk meets
 it:
@@ -886,11 +932,47 @@ JavaScriptCore's image for `WTF::StringImpl` and
 `JSC::SymbolTableEntry::FatEntry` by name (Rules). A reader of a WebCore class
 asks the image that describes that class (`classNamedBeside`).
 
-**A pointee that does not fit is no object.** A pointer whose pointee type is
-bigger than what is left of the allocation it points into, such as the member
-of a union that is not the one in use, is listed as an overrun and counted
-(`DoesNotFit`), and is neither followed nor reached. In a web process most are
-`CSSSelector::DataUnion`'s.
+**Unions are read only through a reader.** liblldb describes a union as a class
+whose members all start at its start (`TargetType::Class::isUnion`). A union
+member is live only when the class that holds the union says so, by a field of
+its own, and a walk that reads every member follows pointers that are not
+pointers. On google.com, before unions were left out, every overrun traced came
+from one: `UnlinkedFunctionExecutable`'s code block read as its `RefPtr<Decoder>`
+(864 "184-byte `SourceProvider`s in a 64-byte allocation"), and
+`CSSSelector::DataUnion`'s members not in use (3,143).
+
+So a plan leaves a union out and counts it where the walk meets it, unless a
+reader on the class that holds it, or on one of that class's bases, picks the
+live member (the readers above). `Reach::unreadUnions` lists the unions met
+without one, by type and holding field. Two kinds need no reader: a union whose
+members lead nowhere, and one whose members that lead somewhere are all pointers
+at its start to types without a size, such as `sigaction`'s handlers, which
+hold one word read the same way whichever member is live. On google.com the
+only union left is bison's `YYSTYPE`, a global variable whose live member
+nothing records after parsing.
+
+A pointer whose pointee type is bigger than what is left of the allocation it
+points into is listed as an overrun and counted (`DoesNotFit`), and is neither
+followed nor reached. The count is zero on google.com and in the tests, which
+require it.
+
+**Hierarchies with a type field.** `CSSValue` and `StyleRuleBase` have no
+vtable: `m_classType` (`CSSValue::ClassType`) and `m_type` (`StyleRuleType`)
+name each object's subclass, and the walk read them as their base, missing what
+their subclasses hold. `NodeRareData` (`m_isElementRareData`) and
+`StyleProperties` (`m_isMutable`) do the same with a bool. No rule from data
+ties an enumerator to its class, as a ClassInfo does a cell's, so
+`HeapWalk::typeFieldHierarchies()` holds a table from enumerator, or `false` and
+`true`, to subclass for each. The two enumerations' tables are generated from
+`CSSValue::visitDerived` and `StyleRuleBase::visitDerived`; entries compiled
+only under a feature flag are marked, and `StyleRuleType::Margin` names no
+subclass. The reader reads the object as the subclass its type field names,
+when it fits the allocation. The TypeFields suite loads WebCore and checks the
+tables against its debug info: every enumerator has an entry, so a new subclass
+fails it, and every entry's class exists and derives from the base. On
+google.com, reading `CSSValue` and `StyleRuleBase` raised the reach from 97.34%
+to 99.32%, and `NodeRareData` and the definitions of declarations (A2) to
+99.57%.
 
 **Test.** Ten objects are planted behind the last element of a `Vector`, a
 `HashSet`'s value, a `CompactPtr`, an initialized `LazyUniqueRef`, a
@@ -901,7 +983,8 @@ index vector, and a `JSString` built with `join` (so not an atom, and only the
 and each is reached; removing a reader fails its case. One more, held only as
 the stale value of a deleted `HashMap` entry, is missed, and so is one held only
 by the stale payload of a reset `std::optional<T*>`. No `JSFinalObject` has
-bytes beyond its class and inline storage.
+bytes beyond its class and inline storage. No pointer is followed to a type
+bigger than its pointee's allocation (`DoesNotFit` is zero).
 
 ### 12. How much of the heap the walk types
 
@@ -984,14 +1067,20 @@ at `startOffsetOfWTFConfig` and JavaScriptCore as its own at the WTF Config's
 the collector scans one: a word inside an allocation reaches it, and an
 allocation that starts with a polymorphic object is read as its dynamic type.
 
-**Arrays.** An array the debug info declares larger than the readable memory it
-starts in, such as a reservation, is read only as far as that memory goes. One
-global of a web process declares an array over memory that cannot be mapped,
-and was 130 million failed mappings, read element by element, before this.
+**Arrays have a size, and the walk never reads past it.** Every array the walk
+reads is a member of a value whose allocation or variable holds it whole, so an
+element in memory that cannot be read means the walk misread the value that
+holds the array. One web-process walk made 130 million failed mappings, element
+by element, until pointers that do not fit (patch 11) were left unfollowed. An
+array that runs past the readable memory it starts in is not read at all, and
+is listed in `Reach::unreadableArrays` with the field that led to it, the value
+that holds it and what reached that value. The tests require the list to be
+empty; it is on google.com too.
 
 **Test.** The walk reads over a thousand global variables, and misses no
 allocation the test does not exclude, but for what the thread at the safe point
-holds in its pthread specific data (patch 14).
+holds in its pthread specific data (patch 14). No array runs past readable
+memory.
 
 ### 14. Explaining every miss
 
@@ -1044,20 +1133,26 @@ under 10 s, in a Debug build.
 - **Dynamic types.** One liblldb lookup per distinct first word (patch 2).
 - **Readers.** A reader that finds a member by name, such as `StringImpl`'s and
   the butterfly's, finds it once per type.
-- **Mappings.** `Memory::keepRecentMappings(4096)`: a walk reads many small
-  values near each other, so `Memory` maps each read in an aligned 1 MB window,
-  keeps the last 4096 windows mapped, and serves any read that fits in one from
-  it. A window that runs into memory that cannot be mapped is remembered, and
-  reads in it map page by page; a page that cannot be mapped is remembered too.
-  Mapping each read's own pages took 46 s of a 107 s web-process walk.
+- **Mappings.** `Memory`, for every reader, maps each read that fits in an
+  aligned 1 MB window as that whole window, keeps the most recent Regions
+  mapped after their last reader, and serves later reads from them. It keeps
+  4,096 on Darwin, where a Region shares the snapshot's pages and costs address
+  space, and 256 on Linux, where it is a copy. A window that runs into memory
+  that cannot be mapped is remembered, and reads in it map page by page; a page
+  that cannot be mapped is remembered with its error. Mapping each read's own
+  pages took 46 s of a 107 s web-process walk. `CorpseMemoryTest` checks the
+  windows, what is kept and the bound, and, with `keepRecentMappings(0)`, the
+  page-by-page mappings in a window with a hole.
 - **Misses.** Each word of writable memory is looked up among the misses alone
   (patch 14).
 - **`-O2`** for `libJavaScriptCoreTools` in a Debug build.
 
 **Measured** (Debug, macOS 27 arm64, 10 cores; `mya heap` on a `jsc` process
-holding about a million cells, `large-heap.js`: 100,000 objects with strings,
-arrays, dates and functions, a 50,000-entry `Map` and 2,000 `Uint8Array`s,
-run with `--useConcurrentGC=0 --useConcurrentJIT=0`):
+holding about a million cells, `large-heap.js` below, run as a measured target
+always is: `--useConcurrentGC=0 --useConcurrentJIT=0 --useWarmUpMarkedBlocks=0`).
+Spare blocks are always off when measuring, in `jsc` and in a web process
+alike: they are free memory libpas holds for MarkedBlocks to come, and only
+lower the typed percentage.
 
 | Step | Before | After |
 |---|---|---|
@@ -1067,16 +1162,51 @@ run with `--useConcurrentGC=0 --useConcurrentJIT=0`):
 | Reach, type and explain | 186,197 ms | 2,938 ms |
 | In all | 188,478 ms | 3,653 ms (3.85 s of wall clock, with attaching and the corpse) |
 
-and 99.96% reached, 95.54% typed (96.70% with `--useWarmUpMarkedBlocks=0`, as A8
-asks of a measured target: the difference is the prefault supply's 26 spare
-blocks). Of the 186 s before, 140 s went to finding the compile units of 54
-class template instances (patch 10).
+and 99.96% reached, 96.70% typed. (With warm-up blocks left on, the prefault
+supply's 26 spare blocks are 426 KB of untyped memory, and 95.54% typed.) Of the
+186 s before, 140 s went to finding the compile units of 54 class template
+instances (patch 10).
+
+Those numbers are with Homebrew's liblldb 22. With Xcode's `LLDB.framework`, the
+same walk takes 5.7 s (724 ms to open the debug info, 5,002 ms to reach, type
+and explain), and 4.0 to 4.9 s with `OS_ACTIVITY_MODE=disable` (Build and
+test); the reach and the typed coverage are unchanged. The unions, readers and
+mapping policy of patches 11 and 15 cost nothing measurable: the same build
+without them took 4.1 to 5.0 s.
+
+```
+// large-heap.js: about a million live cells of the common kinds, then idle.
+globalThis.keep = [];
+for (let i = 0; i < 100000; ++i) {
+    keep.push({ index: i, label: "item-" + i, values: [i, i + 1, i + 2],
+        nested: { x: i * 1.5, y: String(i) }, date: (i % 100) ? null : new Date(i),
+        fn: (i % 50) ? null : function() { return i; } });
+}
+globalThis.map = new Map();
+for (let i = 0; i < 50000; ++i)
+    map.set("key" + i, [i]);
+globalThis.typed = [];
+for (let i = 0; i < 2000; ++i)
+    typed.push(new Uint8Array(256));
+gc();
+print("ready " + keep.length);
+sleepSeconds(100000);
+```
+
+```
+cp WebKitBuild/Debug/jsc /tmp/jsc-debuggable   # jsc is not signed get-task-allow
+codesign -f -s - --entitlements <allow-jit + get-task-allow plist> /tmp/jsc-debuggable
+DYLD_FRAMEWORK_PATH=WebKitBuild/Debug /tmp/jsc-debuggable --useConcurrentGC=0 \
+    --useConcurrentJIT=0 --useWarmUpMarkedBlocks=0 large-heap.js &
+printf 'snapshot --pid <pid>\nheap\n' | DYLD_FRAMEWORK_PATH=WebKitBuild/Debug WebKitBuild/Debug/mya
+```
 
 The HeapWalk suite's fixture, at mya's safe point: 5,249 live JS cells and 78
 auxiliary cells, 7,248 libpas allocations; 99.71% reached, all of the misses
 being what the safe-point thread keeps in its pthread specific data; 96.05%
-typed; 0.4 to 0.9 s for the reach. The whole testLibJSCTools run is 1,725
-assertions in 16 s.
+typed; 2.2 to 2.9 s for the reach. The whole testLibJSCTools run is 2,011
+assertions in 56 s; the HeapWalk suite takes 21 s of it, 9.8 s with
+`OS_ACTIVITY_MODE=disable`.
 
 ### 16. `mya heap`: walking any process
 
@@ -1104,65 +1234,167 @@ which is not, needs a copy signed with it.
 
 **Measured: google.com.** MiniBrowser from the same Debug build, on
 https://www.google.com, idle after loading; `mya heap` on its WebContent
-process, with Xcode's liblldb (Open):
+process, with Xcode's `LLDB.framework`. Spare blocks are turned off through
+XPC's environment prefix, which reaches the WebContent process:
+
+```
+JSC_useWarmUpMarkedBlocks=0 __XPC_JSC_useWarmUpMarkedBlocks=0 \
+    Tools/Scripts/run-minibrowser --debug https://www.google.com
+```
 
 | | |
 |---|---|
-| Live cells | 41,039, 3.5 MB; 36,782 JS cells, every one read as its class |
-| libpas allocations | 72,373, 14.2 MB |
-| Reached | 97.34% |
-| Typed | 84.36% (of the 12.9 MB that is not free memory in the JS heap) |
-| Global variables read | 24,764, and 8,974 data symbols that are no variable |
-| Time | 5,785 ms to open the debug info, 23 ms to walk the cells, 8 ms to enumerate libpas, 29,113 ms to reach, type and explain: 34.9 s in all, 36.1 s of wall clock |
+| Live cells | 40,990, 3.5 MB; 36,731 JS cells, every one read as its class |
+| libpas allocations | 72,497, 14.2 MB |
+| Reached | 99.57% |
+| Typed | 86.18% (of the 12.9 MB that is not free memory in the JS heap) |
+| Not followed | 0 pointers to types that do not fit; 991 to declarations no image defines once; 1 union read by no reader (`YYSTYPE`) |
+| Global variables read | 24,721, and 9,017 data symbols that are no variable, or whose type liblldb gives no size, such as Swift's |
+| Time | 5,707 ms to open the debug info, 8 ms to walk the cells, 7 ms to enumerate libpas, 30,180 ms to reach, type and explain: 35.9 s in all |
 
-Most of the 29 s is liblldb's: completing WebCore's types (about 6 s, in
-`IsPolymorphicClass` and `GetByteSize`), finding 24,764 global variables one
-symbol at a time (about 3.5 s), and resolving vtables (about 2 s).
+The time varies with how long the page has been idle: the same build took 28.5 s
+on a page left idle for minutes. Most of it is liblldb's: completing WebCore's
+types (about 8 s, in `IsPolymorphicClass`, `GetByteSize` and `IsTypeComplete`),
+opening the debug info (3.5 s), finding 24,763 global variables one symbol at a
+time (about 2.6 s in `FindGlobalVariables`), and resolving vtables (about 2.9 s).
+Listing every global variable at once is slower: one `SBTarget::FindGlobalVariables`
+with a regular expression that matches every name took 91 s on this process
+and returned 744,694 variables.
 
-## 17. Heap Dump
+## 17. Heap dump
 
-Using the heap dump, mya can export a heap dump that WebInspector can read. A test case should collect a heap dump of a complex subtest from SP3, and confirm:
+**Goal.** A heap dump Web Inspector reads, of every libpas allocation and every
+reference the walk reads, checked against JSC's own heap snapshot, reconciled
+with the target's footprint, and diffable.
 
-- All unreached / untyped allocations are accounted for.
-- The normal jsc heap dump is a strict subset of the mya heap dump.
-- the measured size (via sizeof) of the mya heap dump matches the rss, and the differences are precicely accounted for (i.e, system allocations). This must be done in an automated way.
-- A sanity check is that we should be able to diff two heap dumps and see only our new cpp allocations. In a controlled test, this should be the case.
+**`mya heapdump <file> [<vm>]`** writes a GCDebugging heap snapshot, version 3,
+the format `HeapSnapshotBuilder` writes for `generateHeapSnapshotForGCDebugging()`
+and Web Inspector's `HeapSnapshot.js` reads (`HeapWalk::heapDump`, `HeapDump::json`):
+- a node per live cell, named by its class; per other libpas allocation, named by
+  the type read at its start, `(untyped)`, or `(missed, <cause>)`; for a
+  MarkedBlock or a precise allocation, what is left of it less its cells; and
+  per root the references come from (`<a global variable>`, `<a thread's stack>`,
+  ...), each a child of JSC's `<root>` and listed in `roots` with its name;
+- an edge per reference the reach walk reads (`HeapWalk::Reference`), from the
+  slot, or the value a reader reads, to the address it holds, resolved to the
+  cell or allocation that holds each; references held in JSValue slots
+  (inline storage, butterflies, lexical environments, `WriteBarrier<Unknown>`)
+  are recorded from the object that owns them;
+- missed allocations and block leftovers are internal nodes (flag 1), which Web
+  Inspector routes no root path through; every other node is not, so a path to
+  a root may pass through C++ objects.
+
+**Test (HeapDump suite).**
+- In process, at mya's safe point, after JSC's own GCDebugging snapshot of the
+  same heap: every libpas allocation is exactly one node, and the nodes' bytes
+  are the allocations'; every cell JSC lists is a node; and every edge between
+  cells JSC lists is a path in the dump through C++ objects alone (a code
+  block's constants are cell, `FixedVector` storage, then string). 10,702 edges
+  between 5,245 cells, none missing. Removing the `StructureID` reader leaves
+  5,301 missing.
+- Out of process, two snapshots of a quiet target, which allocates eight
+  `ReachableObject`s between them: the second dump has a node for each, typed
+  as its class, and no other new node, and none is gone.
+  `withMyaSafePoint` is a template, since a `WTF::Function` allocates.
+- The same target's footprint: the dump's bytes are the objects in libpas's
+  pages in the footprint plus those elsewhere; libpas records what all but at
+  most 256 KB of its pages hold; and the footprint is libpas's pages, the other
+  private memory and the tagged ledgers, but for less than 2 MB of page tables.
+
+**Measured: SP3 in MiniBrowser.** One iteration of a subtest
+(`index.html?suites=<subtest>&startAutomatically&iterationCount=1`, served
+locally from Speedometer's `release/3.1` branch), idle after it; `heapdump`
+then `memory` on the WebContent process:
+
+| | TodoMVC-React-Complex-DOM | Editor-CodeMirror | NewsSite-Next |
+|---|---|---|---|
+| Nodes, edges | 255,504, 570,031 | 76,181, 187,706 | 169,618, 440,835 |
+| Dump bytes (libpas objects) | 29.4 MB | 13.3 MB | 22.6 MB |
+| Live cells | 1.3 MB | 1.9 MB | 3.6 MB |
+| Footprint | 48.5 MB | 30.4 MB | 43.6 MB |
+| libpas pages in it | 34.9 MB | 17.3 MB | 29.5 MB |
+| of them free payload | 6.4 MB | 5.4 MB | 8.8 MB |
+
+Web Inspector's own `HeapSnapshot` class loads the React dump in 3 s (in the
+`jsc` shell, with a `console` shim), and finds root paths through C++ objects:
+an `HTMLDivElement` is held by a `RenderBlockFlow`, held by the `LocalFrameView`
+of a `LocalFrame`, held by a global variable.
+
+**The footprint, measured.** `mya memory` on the React run, against `footprint`:
+
+| | mya | `footprint` |
+|---|---|---|
+| Footprint | 47,201 KB | 46 MB |
+| libpas (WebKit Malloc) | 34,976 KB: 27,524 objects, 6,456 free payload, 1,010 metadata, 48 unrecorded | 34 MB, 8.4 MB reclaimable |
+| system malloc small | 1,616 KB | 1,616 KB, 6.1 MB reclaimable |
+| graphics | 608 KB (ledger) | 608 KB |
+| left over | 785 KB | 929 KB of page tables |
+
+Three facts the numbers rest on:
+- **Reading a corpse changes it.** mya maps a snapshot's pages shared, and a
+  read of a page the target never touched makes it resident, and dirty, in the
+  corpse: a 128 MB libpas region with 26 resident pages had 1,309 after a walk.
+  Copy-on-write mappings are worse: the live target's page queries then report
+  270 MB of libpas pages dirty. So a snapshot records its regions, their page
+  dispositions (`mach_vm_page_range_query`) and its `phys_footprint` when it is
+  taken, before anything reads it.
+- **A page can be dirty and reusable.** libpas and system malloc mark freed
+  pages `MADV_FREE_REUSABLE`; a region's dirty count includes some of them,
+  and the footprint does not. A region's footprint is its pages dirty and not
+  reusable, and those compressed.
+- **No interface outside the kernel reports page tables**, so they are what is
+  left.
+
+**Options** for what "matches the rss" means:
+1. *`phys_footprint` (done).* What jetsam and Activity Monitor count. libpas's
+   share is split exactly; the rest is per VM tag, plus the tagged ledgers, and
+   the page tables are what is left. Resident size is not reconcilable: 1 GB of
+   it is clean, shared `__TEXT` and `__LINKEDIT`.
+2. *Add the footprint to the dump* as synthetic nodes (libpas free payload and
+   metadata, each VM tag, the page tables), so the dump's bytes are the
+   footprint, less the object bytes in pages outside it, which a node can list.
+3. *Split system malloc* (3.4 MB counted, 1.6 MB in the footprint) by
+   enumerating its zones from the snapshot with libmalloc's remote
+   introspection, which A3 leaves out.
+4. *Attribute images' dirty data* (`untagged`, 2.8 MB, mostly `__DATA` and
+   `__DATA_DIRTY`) to the global variables the walk already reads.
 
 ## What the walk misses
 
 As `mya heap` reports it for google.com, without reading anything by hand.
 
-**Not reached: 2.66%, 378 KB.**
-- 226 KB held by an allocation the walk reached, in bytes it read as no type.
-  Most of these holders are `WebCore::CSSValue`s and `WebCore::StyleRuleBase`s,
-  read at the start of a larger allocation: like `StyleProperties`, each is a
-  hierarchy with no vtable, whose subclass a type field names, so the walk reads
-  only the base and misses what a subclass's members hold. The rest are
-  allocations reached through an untyped pointer from the VM.
-- 137 KB held only by other misses, through those.
-- 8 KB held by other memory, such as libSystem's thread control blocks, and
-  6 KB held by nothing a word of memory points to.
+**Not reached: 0.43%, 61 KB.**
+- 40 KB held by an allocation the walk reached, in bytes it read as no type.
+  Most are held by allocations reached only through an untyped pointer: an
+  800-byte allocation the VM holds through a `void*`, and the objects a
+  `WeakPtrImpl` holds through its `void* m_ptr`, such as a 2,560-byte one that
+  holds a `PageInspectorController`. A `WeakPtr<T>` knows `T`, but its impl,
+  shared by every `WeakPtr` to the object, does not.
+- 18 KB held only by other misses, through those.
+- 3 KB held by other memory, such as libSystem's thread control blocks, and
+  128 bytes held by nothing a word of memory points to.
 
-**Reached but not typed: 15.64%, 2.0 MB.**
-- 281 KB of JIT code, reached through `CodePtr`s: machine code, with no C++ type.
+**Reached but not typed: 13.82%, 1.8 MB.**
+- 286 KB of JIT code, reached through `CodePtr`s: machine code, with no C++ type.
 - 258 KB of byte buffers read as `unsigned char` at their start; the largest are
   bytecode buffers that `CodeBlock::m_instructionsRawPointer` reaches, of which
   the walk types the part a pointer to their start or a reader covers.
-- 247 KB of 16-byte allocations that each hold a one-byte `WTF::Lock`, reached
+- 166 KB of `StringImpl`s, beyond their header and characters: size-class slack.
+- 138 KB of 16-byte allocations that each hold a one-byte `WTF::Lock`, reached
   through a Debug `HashTable`'s `std::unique_ptr<Lock>`: libpas's size-class
   slack.
-- 162 KB of `StringImpl`s, beyond their header and characters: size-class slack.
 - 105 KB of MarkedBlocks, in live cells beyond what their class and readers say.
-- 49 KB of live precise allocations, reached through the precise allocation
+- 47 KB of `CSS::BoxShadow`s and 34 KB of `MQ::MediaQuery`s, beyond their class.
+- 48 KB of live precise allocations, reached through the precise allocation
   list (`BasicRawSentinelNode<PreciseAllocation>`), whose cells the walk reads
   as no type.
-- 61 KB of `StyleRuleBase`s and `CSSValue`s, beyond the base.
-- The rest, in pieces under 21 KB: Vectors' unused capacity, and
+- The rest, in pieces under 26 KB: Vectors' unused capacity, and
   `EmbeddedFixedVector`s and `ExpressionInfo`s beyond their elements.
 
-**Read as something they are not.** 4,083 pointers point to an allocation too
-small for their type: 3,143 are the members of `CSSSelector::DataUnion` not in
-use, and 864 are `RefPtr<SourceProvider>`s.
+**Read as something they are not.** Nothing: no pointer runs past its
+pointee's allocation, and no array past readable memory. 42 `Timer` closures
+whose class liblldb unifies with another's are refused and read as their static
+type (patch 2).
 
 On the large JSC heap, the misses are 17 KB, held by anonymous memory outside
 any allocation, the holder the HeapWalk suite identifies as the thread's pthread
@@ -1171,13 +1403,23 @@ the prefault supply's spare blocks (426 KB, reached through a block of merged
 statics), and JIT code.
 
 Most of what is left is not memory a C++ type describes: slack, unused capacity,
-spare blocks and machine code. What is described but not read is the WebCore
-hierarchies with a type field instead of a vtable.
+spare blocks and machine code. What is described but not read is what untyped
+pointers hold.
 
 ## Build gotchas
 
 - **SB API headers.** Xcode's `LLDB.framework` has no SB headers. They come from
-  Homebrew's llvm (`/opt/homebrew/opt/llvm/include`, LLVM 22).
+  Homebrew's llvm (`/opt/homebrew/opt/llvm/include`, LLVM 22), and the Xcode
+  build links the framework (`WK_LLDB_LDFLAGS` in `Base.xcconfig`, and
+  `-framework LLDB` autolinked from `CorpseSnapshot.cpp`), with an rpath to
+  Xcode's `SharedFrameworks` and one to the Command Line Tools'. Homebrew's
+  liblldb 22.1.8 segfaults in `CXXRecordDecl::setBases` completing some WebCore
+  types during a walk. The SB API is binary compatible: the symbols mya and the
+  tests import are all exported by lldb-2103, every enumerator they use has the
+  same value, and an SB function only LLVM 22 has fails at link time. The
+  framework is not documented as public API, loads Python and Swift's compiler
+  libraries at launch, and records a signpost and a log message per SB call
+  (Build and test). The CMake build on macOS still links Homebrew's liblldb.
 - **Ninja.** The CMake JSCOnly port on macOS enables Swift, so it needs a real
   ninja (`/opt/homebrew/bin/ninja`).
 - **ARC.** JSCOnly on macOS compiles `wtf/darwin/OSLogPrintStream.mm` without ARC
@@ -1196,7 +1438,8 @@ hierarchies with a type field instead of a vtable.
   `JavaScriptCore.framework/Versions/A/JavaScriptCore.cstemp`. Delete that file.
 - **A rebuilt framework.** A running target whose JavaScriptCore was rebuilt
   under it no longer runs the file on disk, and liblldb refuses the file by its
-  UUID: "The image at … has no class 'JSC::VM'". Restart the target.
+  UUID: "The image at … has no class 'JSC::VM'". Restart the target. A
+  `build-jsc` that changes `libJavaScriptCoreTools` can relink JavaScriptCore.
 - **Attaching.** `task_for_pid` needs the target signed with
   `get-task-allow`; `jsc` is not (patch 16).
 - **Warnings.** Xcode builds the tests with `-Werror=exit-time-destructors`, so a
@@ -1233,32 +1476,42 @@ hierarchies with a type field instead of a vtable.
   "refers to type … which was unable to be parsed". These are opaque ICU
   handles, and the walk loses nothing.
 
-## Open
+## Next steps
 
-- **Homebrew's liblldb 22.1.8 crashes on WebCore.** Completing some WebCore
-  classes, liblldb fails to resolve a base class whose template argument is a
-  class value (`PrimitiveNumericWrapperBase<LengthPercentage<CSS::Range{0, INF,
-  0, 0}, float>>`, "DW_TAG_inheritance failed to resolve the base class"), then
-  crashes in `CXXRecordDecl::setBases`. It does not on its own: only in the order
-  a walk completes types. Xcode's `LLDB.framework` (lldb-2103) has every SB
-  symbol mya uses, passes every suite, and walks google.com. The Xcode build
-  links Homebrew's liblldb, by choice; whether to link Xcode's on Darwin is open.
-  The google.com numbers above are from a copy of `mya` whose liblldb was
-  pointed at Xcode's with `install_name_tool`.
-- **WebCore's hierarchies without vtables.** `CSSValue` (`classType()`),
-  `StyleRuleBase` (`type()`) and others name their subclass in a field. A reader
-  per hierarchy, as for `StyleProperties`, would read their subclasses' members:
-  most of the 226 KB held by reached allocations.
-- **A web process's walk takes 35 s**, most of it in liblldb. Global variables
-  might be listed once per image, rather than one symbol at a time.
-- Whether default symbol visibility under `ENABLE_MYA_HEAP` is needed on
-  Darwin. On Linux it is not: with every symbol hidden (8,644 exported from
-  libJavaScriptCore, against 252,098), all assertions pass and the reach is
-  unchanged.
-- Whether every heap is enumerated on Darwin from outside the target. In the
-  HeapWalk suite, libpas enumerates from the snapshot every allocation the
-  target enumerated itself, including one from each way WTF allocates from
-  libpas, but for those the target makes or frees after its own enumeration.
-- Linux is not measured since the walk's speed-ups. Draft 7 measured 240 µs a
-  cell there; the same changes apply, and `Memory`'s windows copy rather than
-  map there (`process_vm_readv`).
+For the next agent. Each task says what is known, how to see it, and what done
+looks like. The diagnostics they need are in the tree: an overrun names the
+word that held the pointer and the value being walked
+(`... through Class::field at 0x... in a 'Holder' at 0x...`), `mya heap` prints
+one example of each kind of overrun, the unions it read no member of and the
+arrays it could not read, and a miss names what holds it. To look at a live
+target, attach Xcode's lldb to it (`xcrun lldb -p <pid>`) and read the
+addresses a report names.
+
+1. **The heap dump's footprint options (patch 17).** Pick among options 2 to 4
+   there. The SP3 runs are scripted but not part of a test suite: a test that
+   drives MiniBrowser would need the harness to run a GUI.
+2. **Untyped pointers that a type could follow.** `WeakPtrImpl::m_ptr` is a
+   `void*`, but every `WeakPtr<T>` that shares the impl knows `T`; the VM holds
+   an 800-byte allocation through a `void*` whose misses are 8 KB. These are
+   most of the 40 KB of misses held by reached allocations.
+3. **Closures liblldb unifies.** 42 `Timer` closures on google.com have no
+   dynamic type, because liblldb gives every
+   `CallableWrapper<(unnamed class), void>` of one size one class (patch 2), and
+   their captures go unread. Done: their captures are read as their own
+   closures', perhaps found through the closure's own call operator.
+4. **A web process's walk takes 28 to 36 s**, most of it liblldb's (patch 16).
+   Listing global variables at once is slower, so what is left is fewer SB
+   calls per symbol and per type.
+5. **`OS_ACTIVITY_MODE` for the tests.** Xcode's `LLDB.framework` doubles the
+   HeapWalk suite unless the process starts with `OS_ACTIVITY_MODE=disable`,
+   which the harness does not set.
+6. **Linux.** Nothing here was built or run on Linux. `Memory` keeps 256
+   copied windows there, and the TypeFields suite is skipped.
+7. Still open from before:
+    - Whether default symbol visibility under `ENABLE_MYA_HEAP` is needed on
+      Darwin. On Linux it is not: with every symbol hidden (8,644 exported from
+      libJavaScriptCore, against 252,098), all assertions pass and the reach is
+      unchanged.
+    - Linux is not measured since the walk's speed-ups. Draft 7 measured
+      240 µs a cell there; the same changes apply, and `Memory`'s windows copy
+      rather than map there (`process_vm_readv`).

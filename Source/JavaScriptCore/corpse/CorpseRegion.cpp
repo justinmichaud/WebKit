@@ -76,6 +76,18 @@ static std::optional<std::pair<Region, vm_region_submap_info_data_64_t>> regionA
     return std::pair { Region::make(Address(regionAddress), static_cast<size_t>(regionSize), info.protection & VM_PROT_READ, info.protection & VM_PROT_WRITE, info.protection & VM_PROT_EXECUTE), info };
 }
 
+template<typename Info>
+void Region::setPageCounts(const Info& info)
+{
+    m_residentPageCount = info.pages_resident;
+    m_dirtyPageCount = info.pages_dirtied;
+    m_swappedPageCount = info.pages_swapped_out;
+    m_reusablePageCount = info.pages_reusable;
+    m_userTag = info.user_tag;
+    m_isPrivate = info.share_mode != SM_SHARED && info.share_mode != SM_TRUESHARED && info.share_mode != SM_SHARED_ALIASED;
+    m_isFileBacked = info.external_pager;
+}
+
 std::optional<Region> Region::findContaining(mach_port_t task, Address address)
 {
     // mach_vm_region_recurse reports the region at or above the address it is given,
@@ -84,8 +96,7 @@ std::optional<Region> Region::findContaining(mach_port_t task, Address address)
     if (!found || !found->first.contains(address))
         return std::nullopt;
     Region region = found->first;
-    region.m_residentPageCount = found->second.pages_resident;
-    region.m_dirtyPageCount = found->second.pages_dirtied;
+    region.setPageCounts(found->second);
     return region;
 }
 
@@ -101,11 +112,30 @@ Vector<Region> Region::all(mach_port_t task)
         if (found->first.end() <= address)
             break;
         Region region = found->first;
-        region.m_residentPageCount = found->second.pages_resident;
-        region.m_dirtyPageCount = found->second.pages_dirtied;
+        region.setPageCounts(found->second);
         result.append(region);
         address = region.end();
     }
+    return result;
+}
+
+Vector<uint16_t> Region::pageDispositions(mach_port_t task) const
+{
+    size_t count = static_cast<size_t>(pageCount());
+    Vector<int> dispositions;
+    dispositions.fill(0, count);
+    constexpr size_t pagesPerQuery = 4096;
+    for (size_t done = 0; done < count; done += pagesPerQuery) {
+        mach_vm_size_t pages = std::min(pagesPerQuery, count - done);
+        kern_return_t result = mach_vm_page_range_query(task, m_base.toTargetVMAddress() + done * vm_kernel_page_size, pages * vm_kernel_page_size,
+            reinterpret_cast<mach_vm_address_t>(dispositions.mutableSpan().subspan(done).data()), &pages);
+        if (result != KERN_SUCCESS)
+            break;
+    }
+    Vector<uint16_t> result;
+    result.reserveInitialCapacity(count);
+    for (int disposition : dispositions)
+        result.append(static_cast<uint16_t>(disposition));
     return result;
 }
 

@@ -165,6 +165,8 @@ Memory::Memory(TaskHandle corpsePort)
     // Placed here so we can assert this invariant only once on construction.
     size_t page = pageSize();
     RELEASE_ASSERT(page && !(page & (page - 1))); // The masking below needs a power of two.
+    RELEASE_ASSERT(!(mappingWindowSize % page));
+    keepRecentMappings(defaultKeptMappingCount);
 }
 
 Memory::~Memory()
@@ -200,30 +202,31 @@ Memory::MapResult Memory::map(Address objAddress, size_t objSizeInBytes)
     if (!regionBase)
         return MapResult { .error = Error::InvalidRequest };
 
-    // A walk that keeps recent mappings reads many objects near each other, so
-    // it maps an aligned window around them once, unless the window runs into
-    // memory that cannot be mapped.
-    if (!m_recentRegions.isEmpty()) {
-        target_address_t windowBase = objBase & ~(recentMappingWindowSize - 1);
-        if (windowBase && objEnd <= windowBase + recentMappingWindowSize && !m_unmappableWindows.contains(windowBase)) {
-            size_t windowPages = recentMappingWindowSize / page;
-            size_t windowOffset = static_cast<size_t>(objBase - windowBase);
-            auto window = m_regions.find(Address { windowBase });
-            if (window != m_regions.end()) {
-                for (auto& region : window->value) {
-                    if (region->pageCount() >= windowPages)
-                        return MapResult { region, region->localBase() + windowOffset };
-                }
+    auto keep = [&](const RefPtr<Region>& region) {
+        if (m_recentRegions.isEmpty())
+            return;
+        m_recentRegions[m_nextRecentRegion] = region;
+        m_nextRecentRegion = (m_nextRecentRegion + 1) % m_recentRegions.size();
+    };
+
+    target_address_t windowBase = objBase & ~(mappingWindowSize - 1);
+    if (windowBase && objEnd <= windowBase + mappingWindowSize && !m_unmappableWindows.contains(windowBase)) {
+        size_t windowPages = mappingWindowSize / page;
+        size_t windowOffset = static_cast<size_t>(objBase - windowBase);
+        auto window = m_regions.find(Address { windowBase });
+        if (window != m_regions.end()) {
+            for (auto& region : window->value) {
+                if (region->pageCount() >= windowPages)
+                    return MapResult { region, region->localBase() + windowOffset };
             }
-            auto result = Region::create(*this, Address { windowBase }, windowPages, windowOffset);
-            if (result.region) {
-                addRegion(result.region);
-                m_recentRegions[m_nextRecentRegion] = result.region;
-                m_nextRecentRegion = (m_nextRecentRegion + 1) % m_recentRegions.size();
-                return result;
-            }
-            m_unmappableWindows.add(windowBase);
         }
+        auto result = Region::create(*this, Address { windowBase }, windowPages, windowOffset);
+        if (result.region) {
+            addRegion(result.region);
+            keep(result.region);
+            return result;
+        }
+        m_unmappableWindows.add(windowBase);
     }
 
     // Find an existing page aligned Region that fits this request if possible.
@@ -240,22 +243,19 @@ Memory::MapResult Memory::map(Address objAddress, size_t objSizeInBytes)
         }
     }
 
-    // No existing Region fits, so map a new one.
-    if (!m_recentRegions.isEmpty() && m_unmappablePages.contains(regionBase))
-        return MapResult { .error = Error::UnmappedHole };
+    // No existing Region fits, so map a new one. A walk reads its way along
+    // arrays and tables, so an unmappable page is met many times.
+    if (auto unmappable = m_unmappablePages.find(regionBase); unmappable != m_unmappablePages.end())
+        return MapResult { .error = unmappable->value.first, .kernResult = unmappable->value.second };
     auto result = Region::create(*this, regionBaseAddress, pageCount, offset);
     if (!result.region) {
-        // A walk reads its way along arrays and tables, so an unmappable page is met many times.
-        if (!m_recentRegions.isEmpty() && pageCount == 1)
-            m_unmappablePages.add(regionBase);
+        if (pageCount == 1)
+            m_unmappablePages.add(regionBase, std::pair { result.error, result.kernResult });
         return result;
     }
 
     addRegion(result.region);
-    if (!m_recentRegions.isEmpty()) {
-        m_recentRegions[m_nextRecentRegion] = result.region;
-        m_nextRecentRegion = (m_nextRecentRegion + 1) % m_recentRegions.size();
-    }
+    keep(result.region);
     return result;
 }
 
@@ -265,8 +265,6 @@ void Memory::keepRecentMappings(size_t count)
     m_recentRegions.clear();
     m_recentRegions.resize(count);
     m_nextRecentRegion = 0;
-    m_unmappableWindows.clear();
-    m_unmappablePages.clear();
 }
 
 void Memory::addRegion(RefPtr<Region> region)

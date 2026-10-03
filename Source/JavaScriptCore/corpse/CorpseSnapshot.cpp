@@ -47,8 +47,8 @@
 #include <wtf/TZoneMallocInlines.h>
 
 #if HAVE(LLDB) && OS(DARWIN) && !defined(BUILDING_WITH_CMAKE)
-// Xcode has no optional dependencies, so liblldb is linked only when its headers are found.
-__asm__(".linker_option \"-llldb\"");
+// Xcode has no optional dependencies, so LLDB.framework is linked only when liblldb's headers are found.
+__asm__(".linker_option \"-framework\", \"LLDB\"");
 #endif
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
@@ -80,6 +80,21 @@ const Vector<Image>& Snapshot::images()
     }
     return *m_images;
 }
+
+#if OS(DARWIN)
+uint64_t Snapshot::footprintBytes(const Region& region) const
+{
+    const Vector<uint16_t>* dispositions = pageDispositions(region);
+    if (!dispositions)
+        return 0;
+    uint64_t pages = 0;
+    for (uint16_t disposition : *dispositions) {
+        bool isDirty = (disposition & VM_PAGE_QUERY_PAGE_DIRTY) && !(disposition & VM_PAGE_QUERY_PAGE_REUSABLE);
+        pages += isDirty || (disposition & VM_PAGE_QUERY_PAGE_PAGED_OUT);
+    }
+    return pages * vm_kernel_page_size;
+}
+#endif
 
 const Vector<Region>& Snapshot::regions()
 {
@@ -172,6 +187,23 @@ Snapshot::Snapshot(RefPtr<Process> process)
     , m_id(s_nextId++)
     , m_memory(corpsePort())
 {
+    if (!isValid())
+        return;
+    task_vm_info_data_t info { };
+    mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+    if (task_info(corpsePort(), TASK_VM_INFO, reinterpret_cast<task_info_t>(&info), &count) == KERN_SUCCESS) {
+        m_physicalFootprint = info.phys_footprint;
+        std::array ledgers { info.ledger_tag_graphics_footprint, info.ledger_tag_graphics_footprint_compressed, info.ledger_tag_media_footprint,
+            info.ledger_tag_media_footprint_compressed, info.ledger_tag_network_nonvolatile, info.ledger_tag_network_nonvolatile_compressed,
+            info.ledger_tag_neural_footprint, info.ledger_tag_neural_footprint_compressed };
+        for (int64_t bytes : ledgers)
+            m_taggedLedgerBytes += static_cast<uint64_t>(std::max<int64_t>(bytes, 0));
+    }
+    m_regions = Region::all(corpsePort());
+    for (const Region& region : *m_regions) {
+        if (region.isPrivate() && (region.dirtyPageCount() || region.swappedPageCount()))
+            m_pageDispositions.add(region.base(), region.pageDispositions(corpsePort()));
+    }
 }
 
 Snapshot::~Snapshot() = default;

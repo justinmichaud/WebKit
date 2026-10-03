@@ -47,7 +47,13 @@ namespace Corpse {
 // the remote memory into this process' address space as Regions (in multiples of
 // pages), and manage the life cycle of these Regions.
 //
-// When mapping a Region, Memory aims to map the smallest range possible. Hence, it is
+// A read that fits in an aligned window of mappingWindowSize maps the whole window,
+// since readers read many small values near each other, and Memory keeps the most
+// recently mapped Regions mapped after their last reader releases them, up to a bound.
+// A window that runs into memory that cannot be mapped is remembered, and reads in it
+// map only their own pages; a page that cannot be mapped is remembered too.
+//
+// Outside a window, Memory aims to map the smallest range possible. Hence, it is
 // possible that subsequest requests land in the same address range as an existing
 // Region but spans more pages beyond the end of the existing Region. In such a
 // scenario, we'll map a new Region that may overlap an existing Region. We do expect
@@ -101,13 +107,17 @@ public:
     size_t regionCount() const;
     size_t mappedPageCount() const;
 
-    // Keeps the `count` most recently used mappings mapped after their last
-    // reader releases them, and maps reads in aligned windows of
-    // recentMappingWindowSize, so that a walk reading many small values maps
-    // each window once rather than once per read. Zero, the default, releases
-    // a mapping with its last reader, and drops those kept.
+    static constexpr target_address_t mappingWindowSize = 1024 * 1024;
+    // On Linux a Region is a copy of the snapshot's memory, not a mapping of it.
+#if OS(DARWIN)
+    static constexpr size_t defaultKeptMappingCount = 4096;
+#else
+    static constexpr size_t defaultKeptMappingCount = 256;
+#endif
+    // Keeps the `count` most recently mapped Regions mapped after their last
+    // reader releases them, and drops those kept beyond it. Zero releases each
+    // Region with its last reader.
     void keepRecentMappings(size_t count);
-    static constexpr target_address_t recentMappingWindowSize = 1024 * 1024;
 
     void dump(const char* indent = "    ") const;
 
@@ -163,7 +173,7 @@ private:
     Vector<RefPtr<Region>> m_recentRegions;
     size_t m_nextRecentRegion { 0 };
     HashSet<target_address_t> m_unmappableWindows; // Windows with a hole, which reads map page by page.
-    HashSet<target_address_t> m_unmappablePages;
+    HashMap<target_address_t, std::pair<Error, KernelResult>> m_unmappablePages;
 };
 
 } // namespace Corpse

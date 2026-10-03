@@ -39,6 +39,7 @@
 #include <JavaScriptCore/MarkedBlock.h>
 #include <array>
 #include <optional>
+#include <span>
 #include <stdint.h>
 #include <utility>
 #include <wtf/BitSet.h>
@@ -132,6 +133,22 @@ public:
     // `count` it has.
     Vector<String> classInfosWithoutClass(size_t& count) const;
 
+    // A class hierarchy without a vtable whose base names each object's class
+    // with an enumerator in a field, as WebCore's CSSValue does. The walk reads
+    // such an object as the subclass its enumerator names.
+    struct TypeFieldSubclass {
+        const char* enumerator;
+        const char* name; // Null if no object has the enumerator.
+        bool isConditional; // Compiled only under a feature flag, so absent from some builds.
+    };
+    struct TypeFieldHierarchy {
+        const char* base;
+        const char* typeField;
+        const char* enumeration; // Null for a bool, whose subclasses are those of "false" and "true".
+        std::span<const TypeFieldSubclass> subclasses;
+    };
+    static std::span<const TypeFieldHierarchy> typeFieldHierarchies();
+
     using AtomBits = WTF::BitSet<MarkedBlock::atomsPerBlock>;
 
     struct Allocation {
@@ -143,6 +160,32 @@ public:
     // target keeps for libmalloc's enumeration, read from the snapshot.
     // Nullopt, having reported why, if it cannot be read.
     std::optional<Vector<Allocation>> libpasAllocations() const;
+    // Every range libpas's enumerator records, each kind sorted: its metadata,
+    // the pages that hold objects, live or not, and the live objects.
+    struct LibpasRecords {
+        Vector<Allocation> meta;
+        Vector<Allocation> payload;
+        Vector<Allocation> objects;
+    };
+    std::optional<LibpasRecords> libpasRecords() const;
+#if OS(DARWIN)
+    // libpas's pages in its regions (VM_MEMORY_TCMALLOC) as they were when the
+    // snapshot was taken, byte by byte by what its enumerator records in them.
+    // The pages in the footprint, dirty or compressed, hold exactly
+    // objectBytes + freePayloadBytes + metaBytes + unrecordedBytes.
+    struct LibpasPages {
+        uint64_t footprintBytes { 0 }; // Dirty or compressed, not reusable.
+        uint64_t compressedBytes { 0 };
+        uint64_t objectBytes { 0 };
+        uint64_t freePayloadBytes { 0 }; // Payload no live object holds.
+        uint64_t metaBytes { 0 };
+        uint64_t unrecordedBytes { 0 }; // In no range libpas records.
+        uint64_t reusableBytes { 0 }; // Dirty, but marked reusable: free memory the kernel may take back.
+        uint64_t objectBytesElsewhere { 0 }; // Of objects in pages outside the footprint: reusable, clean or never touched.
+        Vector<Address> unrecordedPages; // The pages in the footprint that hold bytes in no range libpas records.
+    };
+    std::optional<LibpasPages> libpasPages(const LibpasRecords&) const;
+#endif
     // Why the walk did not follow a value that may point somewhere.
     enum class NotFollowed : uint8_t {
         Declaration, // A pointer to a class that is only declared.
@@ -212,11 +255,16 @@ public:
         Vector<std::pair<String, uint64_t>> untypedByKind;
         Vector<bool> isReached; // For each allocation, in the order given.
         Vector<uint64_t> bytesTypedIn; // Likewise.
+        Vector<const TargetType*> typeAtStart; // Likewise: the first type the walk read where it starts, if any.
         // Each value whose type runs past the end of its allocation, with the field that led to it: a
         // pointee is then not followed, and storage a reader reads is cut at the end.
         Vector<String> overruns;
-        // Each array whose declared count runs past the readable memory it starts in.
-        Vector<String> clippedArrays;
+        // Each array whose declared count runs past the readable memory it starts in, with what holds
+        // it: the walk misread its holder, and reads none of it.
+        Vector<String> unreadableArrays;
+        // Each union whose members lead somewhere and whose live member no reader picks, by the field
+        // that holds it, and how many times the walk met it there, most first. Its members are not read.
+        Vector<std::pair<String, uint64_t>> unreadUnions;
         std::array<uint64_t, numberOfNotFollowedReasons> notFollowed { };
         uint64_t cellsWithClass { 0 };
         uint64_t cellBytesBeyondClass { 0 }; // In cells bigger than their class and the storage after it the walk reads.
@@ -236,7 +284,34 @@ public:
     // left out of the percentages. Every miss is explained, except that no
     // word in `notReferrers`, also sorted, holds one: they are the caller's
     // own records of the heap. The `listCount` most untyped allocations are listed.
-    Reach reach(const Vector<Allocation>&, const Vector<Allocation>& excluded, const Vector<Allocation>& notReferrers, size_t listCount) const;
+    // A reference the walk reads, for a heap dump: from the word, or the value,
+    // that holds it, to the address it holds. `root` is what the walk was
+    // reading from, which names the holder when it is in no allocation.
+    struct Reference {
+        Address from;
+        Address to;
+        const char* root;
+    };
+    Reach reach(const Vector<Allocation>&, const Vector<Allocation>& excluded, const Vector<Allocation>& notReferrers, size_t listCount, Vector<Reference>* references = nullptr) const;
+
+    // A heap dump in the format of JSC's GCDebugging heap snapshots, version 3,
+    // which Web Inspector reads: a node per live cell, per other libpas
+    // allocation, reached or missed, and per root the references come from;
+    // an edge per reference between them.
+    struct HeapDump {
+        enum class Kind : uint8_t { Root, Cell, Allocation, Missed };
+        struct Node {
+            Address address;
+            uint64_t size;
+            String className;
+            Kind kind;
+            bool isBlock { false }; // A MarkedBlock or a precise allocation, less its cells.
+        };
+        Vector<Node> nodes; // The first is JSC's <root>.
+        Vector<std::pair<uint32_t, uint32_t>> edges; // Node indices, each pair once, by the first.
+        String json() const;
+    };
+    HeapDump heapDump(const Vector<Allocation>&, const Reach&, const Vector<Reference>&) const;
 
 private:
     friend class ReachWalk;
@@ -268,6 +343,7 @@ private:
     const TargetType* m_localAllocatorClass { nullptr };
     const TargetType* m_stringImplClass { nullptr }; // For JSString::m_fiber, a uintptr_t.
     const TargetType* m_jsValueClass { nullptr }; // For butterflies, inline storage and Strong handles.
+    const TargetType* m_structureIDClass { nullptr }; // For a StructureChain's vector.
     const TargetType* m_finalObjectClass { nullptr };
     const TargetType* m_preciseAllocationClass { nullptr }; // For the header before a precise allocation's cell.
     const TargetType* m_ropeStringClass { nullptr }; // A rope shares JSString's ClassInfo.

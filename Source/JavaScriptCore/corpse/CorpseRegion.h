@@ -64,6 +64,22 @@ public:
     uint64_t pageCount() const;
     uint64_t residentPageCount() const { return m_residentPageCount; }
     uint64_t dirtyPageCount() const { return m_dirtyPageCount; }
+    // Pages compressed or swapped out, which were dirty.
+    uint64_t swappedPageCount() const { return m_swappedPageCount; }
+    // Dirty pages the task marked reusable (MADV_FREE_REUSABLE): free memory the kernel may take back.
+    uint64_t reusablePageCount() const { return m_reusablePageCount; }
+    // On Darwin, the VM tag the region was allocated with, such as VM_MEMORY_TCMALLOC for libpas; zero elsewhere.
+    unsigned userTag() const { return m_userTag; }
+    // Whether its dirty and swapped pages are the task's own, as a footprint counts them:
+    // anonymous memory, or a file's copy-on-write pages, but not memory shared with another task.
+    bool isPrivate() const { return m_isPrivate; }
+    // Whether it maps a file.
+    bool isFileBacked() const { return m_isFileBacked; }
+
+#if OS(DARWIN)
+    // The VM_PAGE_QUERY_PAGE_* disposition of each of its pages in `task`.
+    Vector<uint16_t> pageDispositions(TaskHandle) const;
+#endif
 
     // The parts of the region whose pages are in memory or swapped out, which
     // are all that can hold anything but zeros: a large reservation is mostly
@@ -91,10 +107,17 @@ public:
     }
 
 private:
+    template<typename Info> void setPageCounts(const Info&);
+
     Address m_base;
     size_t m_size { 0 };
     uint64_t m_residentPageCount { 0 };
     uint64_t m_dirtyPageCount { 0 };
+    uint64_t m_swappedPageCount { 0 };
+    uint64_t m_reusablePageCount { 0 };
+    unsigned m_userTag { 0 };
+    bool m_isPrivate { true };
+    bool m_isFileBacked { false };
     bool m_isReadable { false };
     bool m_isWritable { false };
     bool m_isExecutable { false };

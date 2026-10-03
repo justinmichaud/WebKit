@@ -77,6 +77,8 @@ void testDebugInfo();
 void testDiagnostics();
 void testExportsTrie();
 void testHeapWalk();
+void testTypeFieldHierarchies();
+void testHeapDump();
 void testProcess();
 void testSymbol();
 void testRegion();
@@ -244,6 +246,14 @@ void analyzeInAndOutOfProcess(JSC::Corpse::Address (*create)(), NOESCAPE const F
 // create() an object in a separate process only, then analyze() it there. For
 // an object create() reports itself, from a state it never returns from.
 void analyzeInSeparateProcess(JSC::Corpse::Address (*create)(), NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address object)>& analyze);
+
+#if OS(DARWIN)
+// create() an object in a separate process, which reports it twice with
+// reportTargetObject, calling waitForAnalysis after each: the analysis takes a
+// snapshot at each report, then lets the target run on.
+void analyzeBeforeAndAfter(JSC::Corpse::Address (*create)(), NOESCAPE const Function<void(JSC::Corpse::Snapshot& before, JSC::Corpse::Snapshot& after, JSC::Corpse::Address object)>& analyze);
+void waitForAnalysis();
+#endif
 
 #if OS(LINUX)
 // create() an object in a separate process, analyze() its snapshot, release the

@@ -102,7 +102,31 @@ public:
     // The threads and images captured in this corpse, read and cached on the first call.
     const Vector<Thread>& threads();
     const Vector<Image>& images();
-    const Vector<Region>& regions(); // Without their page counts.
+    // On Darwin, with their page counts, as they were when the snapshot was
+    // taken: reading a snapshot's untouched pages makes them resident in it.
+    const Vector<Region>& regions();
+#if OS(DARWIN)
+    // The VM_PAGE_QUERY_PAGE_* disposition of each page of a private region
+    // with dirty or compressed pages, as it was when the snapshot was taken.
+    // Null for any other region.
+    const Vector<uint16_t>* pageDispositions(const Region& region) const
+    {
+        auto found = m_pageDispositions.find(region.base());
+        return found == m_pageDispositions.end() ? nullptr : &found->value;
+    }
+    // The task's physical footprint (task_vm_info's phys_footprint) when the
+    // snapshot was taken: its dirty and compressed private pages, its page
+    // tables, and the memory the kernel charges it for.
+    std::optional<uint64_t> physicalFootprint() const { return m_physicalFootprint; }
+    // The memory the kernel charges the task through its tagged ledgers, which
+    // no private region shows, when the snapshot was taken: the graphics,
+    // media, network and neural memory it owns, resident and compressed.
+    uint64_t taggedLedgerBytes() const { return m_taggedLedgerBytes; }
+    // What a region adds to the footprint: its pages that are dirty and not
+    // reusable, and those compressed, by their dispositions. A page can be
+    // dirty and reusable, which the region's own dirty count includes.
+    uint64_t footprintBytes(const Region&) const;
+#endif
 
 #if OS(DARWIN)
     // dyld's record of the loaded images. Invalid, having reported why, if it cannot be read.
@@ -125,6 +149,11 @@ private:
     std::optional<Vector<Thread>> m_threads;
     std::optional<Vector<Image>> m_images;
     std::optional<Vector<Region>> m_regions;
+#if OS(DARWIN)
+    HashMap<Address, Vector<uint16_t>> m_pageDispositions;
+    std::optional<uint64_t> m_physicalFootprint;
+    uint64_t m_taggedLedgerBytes { 0 };
+#endif
     HashMap<String, std::unique_ptr<Symbol>> m_symbols;
     Memory m_memory;
 

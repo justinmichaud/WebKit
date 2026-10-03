@@ -156,15 +156,18 @@ WK_PROCESSED_XCENT_FILE=$(TEMP_FILE_DIR)/$(FULL_PRODUCT_NAME).entitlements
 WK_USE_RESTRICTED_ENTITLEMENTS = $(USE_INTERNAL_SDK);
 WK_USE_FATAL_EXCEPTIONS = $(OVERRIDE_WK_USE_FATAL_EXCEPTIONS:default=YES);
 
-// We support HomeBrew installs of liblldb, since the version in the system sdk is not public API.
+// Xcode's LLDB.framework ships without the SB API headers, so they come from a HomeBrew llvm.
+// The SB API is binary compatible across versions.
 WK_BREW_PREFIX = /opt/homebrew/opt;
 WK_BREW_PREFIX[arch=x86_64] = /usr/local/opt;
 
 WK_LLDB_SYSTEM_HEADER_SEARCH_PATHS = $(WK_LLDB_SYSTEM_HEADER_SEARCH_PATHS_$(WK_MYA_HEAP));
 WK_LLDB_SYSTEM_HEADER_SEARCH_PATHS_YES = $(WK_BREW_PREFIX)/llvm/include;
 
+WK_LLDB_FRAMEWORK_DIR = $(DEVELOPER_DIR)/../SharedFrameworks;
+WK_LLDB_COMMAND_LINE_TOOLS_FRAMEWORK_DIR = /Library/Developer/CommandLineTools/Library/PrivateFrameworks;
 WK_LLDB_LDFLAGS = $(WK_LLDB_LDFLAGS_$(WK_MYA_HEAP));
-WK_LLDB_LDFLAGS_YES = -L$(WK_BREW_PREFIX)/llvm/lib;
+WK_LLDB_LDFLAGS_YES = -F$(WK_LLDB_FRAMEWORK_DIR) -Wl,-rpath,$(WK_LLDB_FRAMEWORK_DIR) -Wl,-rpath,$(WK_LLDB_COMMAND_LINE_TOOLS_FRAMEWORK_DIR);
 
 // Shared variables used for dynamic or static linking of JavaScriptCore and jsc.
 

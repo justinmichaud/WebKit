@@ -36,9 +36,13 @@
 #include <JavaScriptCore/CollectionScope.h>
 #include <JavaScriptCore/FreeList.h>
 #include <JavaScriptCore/GCSegmentedArray.h>
+#include <JavaScriptCore/IndexingHeader.h>
+#include <JavaScriptCore/IndexingType.h>
 #include <JavaScriptCore/JITCode.h>
+#include <JavaScriptCore/JSArrayBufferView.h>
 #include <JavaScriptCore/JSCellButterfly.h>
 #include <JavaScriptCore/JSString.h>
+#include <JavaScriptCore/JSType.h>
 #include <JavaScriptCore/MarkedBlock.h>
 #include <JavaScriptCore/MarkedSpace.h>
 #include <JavaScriptCore/PreciseAllocation.h>
@@ -55,10 +59,16 @@
 #include <wtf/HashSet.h>
 #include <wtf/SegmentedVector.h>
 #include <wtf/HexNumber.h>
+#include <wtf/SetForScope.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/WTFConfig.h>
 #include <wtf/Vector.h>
 #include <wtf/text/MakeString.h>
+#include <wtf/text/StringBuilder.h>
+
+#if OS(DARWIN)
+#include <mach/mach.h>
+#endif
 #include <wtf/text/WTFString.h>
 
 #if ENABLE(MYA_HEAP)
@@ -157,6 +167,7 @@ void HeapWalk::initialize(Snapshot&, Remote<VM>&& vm, std::optional<int64_t> atS
     m_fatEntryClass = classNamed("JSC::SymbolTableEntry::FatEntry");
     m_wtfConfigClass = classNamed("WTF::Config");
     m_jsValueClass = classNamed("JSC::JSValue");
+    m_structureIDClass = classNamed("JSC::StructureID");
     m_finalObjectClass = classNamed("JSC::JSFinalObject");
     m_preciseAllocationClass = classNamed("JSC::PreciseAllocation");
     m_ropeStringClass = classNamed("JSC::JSRopeString");
@@ -209,6 +220,139 @@ struct MarkedSpaceState {
 namespace {
 
 using AtomBits = HeapWalk::AtomBits;
+
+// CSSValue::visitDerived.
+static constexpr std::array cssValueSubclasses {
+    HeapWalk::TypeFieldSubclass { "AppleColorFilter", "WebCore::CSSAppleColorFilterValue", false },
+    HeapWalk::TypeFieldSubclass { "Attr", "WebCore::CSSAttrValue", false },
+    HeapWalk::TypeFieldSubclass { "BackgroundRepeat", "WebCore::CSSBackgroundRepeatValue", false },
+    HeapWalk::TypeFieldSubclass { "BasicShape", "WebCore::CSSBasicShapeValue", false },
+    HeapWalk::TypeFieldSubclass { "BorderImageOutset", "WebCore::CSSBorderImageOutsetValue", false },
+    HeapWalk::TypeFieldSubclass { "BorderImageRepeat", "WebCore::CSSBorderImageRepeatValue", false },
+    HeapWalk::TypeFieldSubclass { "BorderImageSlice", "WebCore::CSSBorderImageSliceValue", false },
+    HeapWalk::TypeFieldSubclass { "BorderImageSource", "WebCore::CSSBorderImageSourceValue", false },
+    HeapWalk::TypeFieldSubclass { "BorderImageWidth", "WebCore::CSSBorderImageWidthValue", false },
+    HeapWalk::TypeFieldSubclass { "BoxShadowProperty", "WebCore::CSSBoxShadowPropertyValue", false },
+    HeapWalk::TypeFieldSubclass { "Canvas", "WebCore::CSSCanvasValue", false },
+    HeapWalk::TypeFieldSubclass { "CalcSize", "WebCore::CSSCalcSizeValue", false },
+    HeapWalk::TypeFieldSubclass { "Clip", "WebCore::CSSClipValue", false },
+    HeapWalk::TypeFieldSubclass { "Color", "WebCore::CSSColorValue", false },
+    HeapWalk::TypeFieldSubclass { "ColorScheme", "WebCore::CSSColorSchemeValue", true },
+    HeapWalk::TypeFieldSubclass { "Content", "WebCore::CSSContentValue", false },
+    HeapWalk::TypeFieldSubclass { "Crossfade", "WebCore::CSSCrossfadeValue", false },
+    HeapWalk::TypeFieldSubclass { "CursorImage", "WebCore::CSSCursorImageValue", false },
+    HeapWalk::TypeFieldSubclass { "CustomIdent", "WebCore::CSSCustomIdentValue", false },
+    HeapWalk::TypeFieldSubclass { "CustomProperty", "WebCore::CSSCustomPropertyValue", false },
+    HeapWalk::TypeFieldSubclass { "DynamicRangeLimit", "WebCore::CSSDynamicRangeLimitValue", false },
+    HeapWalk::TypeFieldSubclass { "EasingFunction", "WebCore::CSSEasingFunctionValue", false },
+    HeapWalk::TypeFieldSubclass { "FilterImage", "WebCore::CSSFilterImageValue", false },
+    HeapWalk::TypeFieldSubclass { "Filter", "WebCore::CSSFilterValue", false },
+    HeapWalk::TypeFieldSubclass { "FlexWrap", "WebCore::CSSFlexWrapValue", false },
+    HeapWalk::TypeFieldSubclass { "Font", "WebCore::CSSFontValue", false },
+    HeapWalk::TypeFieldSubclass { "FontFaceSrcLocal", "WebCore::CSSFontFaceSrcLocalValue", false },
+    HeapWalk::TypeFieldSubclass { "FontFaceSrcResource", "WebCore::CSSFontFaceSrcResourceValue", false },
+    HeapWalk::TypeFieldSubclass { "FontFamilyName", "WebCore::CSSFontFamilyNameValue", false },
+    HeapWalk::TypeFieldSubclass { "FontFeature", "WebCore::CSSFontFeatureValue", false },
+    HeapWalk::TypeFieldSubclass { "FontPalette", "WebCore::CSSFontPaletteValue", false },
+    HeapWalk::TypeFieldSubclass { "FontStyleWithAngle", "WebCore::CSSFontStyleWithAngleValue", false },
+    HeapWalk::TypeFieldSubclass { "FontStyleRange", "WebCore::CSSFontStyleRangeValue", false },
+    HeapWalk::TypeFieldSubclass { "FontVariation", "WebCore::CSSFontVariationValue", false },
+    HeapWalk::TypeFieldSubclass { "Function", "WebCore::CSSFunctionValue", false },
+    HeapWalk::TypeFieldSubclass { "Gradient", "WebCore::CSSGradientValue", false },
+    HeapWalk::TypeFieldSubclass { "GridAutoFlow", "WebCore::CSSGridAutoFlowValue", false },
+    HeapWalk::TypeFieldSubclass { "GridLineValue", "WebCore::CSSGridLineValue", false },
+    HeapWalk::TypeFieldSubclass { "GridTemplateAreas", "WebCore::CSSGridTemplateAreasValue", false },
+    HeapWalk::TypeFieldSubclass { "GridTemplateList", "WebCore::CSSGridTemplateListValue", false },
+    HeapWalk::TypeFieldSubclass { "GridTrackSizes", "WebCore::CSSGridTrackSizesValue", false },
+    HeapWalk::TypeFieldSubclass { "Keyword", "WebCore::CSSKeywordValue", false },
+    HeapWalk::TypeFieldSubclass { "Image", "WebCore::CSSImageValue", false },
+    HeapWalk::TypeFieldSubclass { "ImageSetOption", "WebCore::CSSImageSetOptionValue", false },
+    HeapWalk::TypeFieldSubclass { "ImageSet", "WebCore::CSSImageSetValue", false },
+    HeapWalk::TypeFieldSubclass { "MaskBorderOutset", "WebCore::CSSMaskBorderOutsetValue", false },
+    HeapWalk::TypeFieldSubclass { "MaskBorderRepeat", "WebCore::CSSMaskBorderRepeatValue", false },
+    HeapWalk::TypeFieldSubclass { "MaskBorderSlice", "WebCore::CSSMaskBorderSliceValue", false },
+    HeapWalk::TypeFieldSubclass { "MaskBorderSource", "WebCore::CSSMaskBorderSourceValue", false },
+    HeapWalk::TypeFieldSubclass { "MaskBorderWidth", "WebCore::CSSMaskBorderWidthValue", false },
+    HeapWalk::TypeFieldSubclass { "ColorImage", "WebCore::CSSColorImageValue", false },
+    HeapWalk::TypeFieldSubclass { "LightDarkImage", "WebCore::CSSLightDarkImageValue", false },
+    HeapWalk::TypeFieldSubclass { "NamedImage", "WebCore::CSSNamedImageValue", false },
+    HeapWalk::TypeFieldSubclass { "OffsetRotate", "WebCore::CSSOffsetRotateValue", false },
+    HeapWalk::TypeFieldSubclass { "PaintImage", "WebCore::CSSPaintImageValue", false },
+    HeapWalk::TypeFieldSubclass { "Param", "WebCore::CSSParamValue", false },
+    HeapWalk::TypeFieldSubclass { "Path", "WebCore::CSSPathValue", false },
+    HeapWalk::TypeFieldSubclass { "ShorthandSubstitution", "WebCore::CSSShorthandSubstitutionValue", false },
+    HeapWalk::TypeFieldSubclass { "PinnedAnchorName", "WebCore::CSSPinnedAnchorNameValue", true },
+    HeapWalk::TypeFieldSubclass { "Position", "WebCore::CSSPositionValue", false },
+    HeapWalk::TypeFieldSubclass { "PositionX", "WebCore::CSSPositionXValue", false },
+    HeapWalk::TypeFieldSubclass { "PositionY", "WebCore::CSSPositionYValue", false },
+    HeapWalk::TypeFieldSubclass { "Primitive", "WebCore::CSSPrimitiveValue", false },
+    HeapWalk::TypeFieldSubclass { "Quotes", "WebCore::CSSQuotesValue", false },
+    HeapWalk::TypeFieldSubclass { "Ratio", "WebCore::CSSRatioValue", false },
+    HeapWalk::TypeFieldSubclass { "Ray", "WebCore::CSSRayValue", false },
+    HeapWalk::TypeFieldSubclass { "Scroll", "WebCore::CSSScrollValue", false },
+    HeapWalk::TypeFieldSubclass { "String", "WebCore::CSSStringValue", false },
+    HeapWalk::TypeFieldSubclass { "TextShadowProperty", "WebCore::CSSTextShadowPropertyValue", false },
+    HeapWalk::TypeFieldSubclass { "TransformList", "WebCore::CSSTransformListValue", false },
+    HeapWalk::TypeFieldSubclass { "URL", "WebCore::CSSURLValue", false },
+    HeapWalk::TypeFieldSubclass { "UnicodeRange", "WebCore::CSSUnicodeRangeValue", false },
+    HeapWalk::TypeFieldSubclass { "ValueList", "WebCore::CSSValueList", false },
+    HeapWalk::TypeFieldSubclass { "ValuePair", "WebCore::CSSValuePair", false },
+    HeapWalk::TypeFieldSubclass { "Substitution", "WebCore::CSSSubstitutionValue", false },
+    HeapWalk::TypeFieldSubclass { "SymbolsFunction", "WebCore::CSSSymbolsFunctionValue", false },
+    HeapWalk::TypeFieldSubclass { "View", "WebCore::CSSViewValue", false },
+    HeapWalk::TypeFieldSubclass { "WebkitBoxReflect", "WebCore::CSSWebkitBoxReflectValue", false },
+};
+
+// StyleRuleBase::visitDerived.
+static constexpr std::array styleRuleSubclasses {
+    HeapWalk::TypeFieldSubclass { "Style", "WebCore::StyleRule", false },
+    HeapWalk::TypeFieldSubclass { "StyleWithNesting", "WebCore::StyleRuleWithNesting", false },
+    HeapWalk::TypeFieldSubclass { "NestedDeclarations", "WebCore::StyleRuleNestedDeclarations", false },
+    HeapWalk::TypeFieldSubclass { "Page", "WebCore::StyleRulePage", false },
+    HeapWalk::TypeFieldSubclass { "FontFace", "WebCore::StyleRuleFontFace", false },
+    HeapWalk::TypeFieldSubclass { "FontFeatureValues", "WebCore::StyleRuleFontFeatureValues", false },
+    HeapWalk::TypeFieldSubclass { "FontFeatureValuesBlock", "WebCore::StyleRuleFontFeatureValuesBlock", false },
+    HeapWalk::TypeFieldSubclass { "FontPaletteValues", "WebCore::StyleRuleFontPaletteValues", false },
+    HeapWalk::TypeFieldSubclass { "Media", "WebCore::StyleRuleMedia", false },
+    HeapWalk::TypeFieldSubclass { "Supports", "WebCore::StyleRuleSupports", false },
+    HeapWalk::TypeFieldSubclass { "Import", "WebCore::StyleRuleImport", false },
+    HeapWalk::TypeFieldSubclass { "Keyframes", "WebCore::StyleRuleKeyframes", false },
+    HeapWalk::TypeFieldSubclass { "Namespace", "WebCore::StyleRuleNamespace", false },
+    HeapWalk::TypeFieldSubclass { "Keyframe", "WebCore::StyleRuleKeyframe", false },
+    HeapWalk::TypeFieldSubclass { "Charset", "WebCore::StyleRuleCharset", false },
+    HeapWalk::TypeFieldSubclass { "CounterStyle", "WebCore::StyleRuleCounterStyle", false },
+    HeapWalk::TypeFieldSubclass { "LayerBlock", "WebCore::StyleRuleLayer", false },
+    HeapWalk::TypeFieldSubclass { "LayerStatement", "WebCore::StyleRuleLayer", false },
+    HeapWalk::TypeFieldSubclass { "Container", "WebCore::StyleRuleContainer", false },
+    HeapWalk::TypeFieldSubclass { "Property", "WebCore::StyleRuleProperty", false },
+    HeapWalk::TypeFieldSubclass { "Scope", "WebCore::StyleRuleScope", false },
+    HeapWalk::TypeFieldSubclass { "StartingStyle", "WebCore::StyleRuleStartingStyle", false },
+    HeapWalk::TypeFieldSubclass { "ViewTransition", "WebCore::StyleRuleViewTransition", false },
+    HeapWalk::TypeFieldSubclass { "PositionTry", "WebCore::StyleRulePositionTry", false },
+    HeapWalk::TypeFieldSubclass { "Function", "WebCore::StyleRuleFunction", false },
+    HeapWalk::TypeFieldSubclass { "FunctionDeclarations", "WebCore::StyleRuleFunctionDeclarations", false },
+    HeapWalk::TypeFieldSubclass { "EnvironmentMap", "WebCore::StyleRuleEnvironmentMap", true },
+    HeapWalk::TypeFieldSubclass { "Margin", nullptr, false },
+};
+
+// NodeRareData::isElementRareData.
+static constexpr std::array nodeRareDataSubclasses {
+    HeapWalk::TypeFieldSubclass { "false", "WebCore::NodeRareData", false },
+    HeapWalk::TypeFieldSubclass { "true", "WebCore::ElementRareData", false },
+};
+
+// StyleProperties::isMutable.
+static constexpr std::array stylePropertiesSubclasses {
+    HeapWalk::TypeFieldSubclass { "false", "WebCore::ImmutableStyleProperties", false },
+    HeapWalk::TypeFieldSubclass { "true", "WebCore::MutableStyleProperties", false },
+};
+
+static constexpr std::array typeFieldHierarchyTable {
+    HeapWalk::TypeFieldHierarchy { "WebCore::CSSValue", "m_classType", "WebCore::CSSValue::ClassType", cssValueSubclasses },
+    HeapWalk::TypeFieldHierarchy { "WebCore::StyleRuleBase", "m_type", "WebCore::StyleRuleType", styleRuleSubclasses },
+    HeapWalk::TypeFieldHierarchy { "WebCore::NodeRareData", "m_isElementRareData", nullptr, nodeRareDataSubclasses },
+    HeapWalk::TypeFieldHierarchy { "WebCore::StyleProperties", "m_isMutable", nullptr, stylePropertiesSubclasses },
+};
 
 // What MarkedBlock::Handle::isLive reads from a block and its header.
 struct BlockState {
@@ -548,8 +692,9 @@ IterationStatus HeapWalk::walkPreciseAllocations(const Remote<MarkedSpace>& spac
 // object reached from the roots or from a cell.
 class ReachWalk {
 public:
-    ReachWalk(const HeapWalk& heap, const Vector<HeapWalk::Allocation>& allocations)
-        : m_heap(heap)
+    ReachWalk(const HeapWalk& heap, const Vector<HeapWalk::Allocation>& allocations, Vector<HeapWalk::Reference>* references)
+        : m_references(references)
+        , m_heap(heap)
         , m_snapshot(heap.snapshot())
         , m_allocations(allocations)
     {
@@ -574,13 +719,27 @@ private:
 
     void notFollowed(NotFollowed reason) { ++m_notFollowed[static_cast<size_t>(reason)]; }
     // Records what reached an allocation first, which the untyped report names.
-    void markReached(size_t index)
+    enum class IsReference : bool { No, Yes };
+    // `target`, the address that led to it, is its start if not given. A block
+    // or a live cell that the heap itself lists is reached by no reference.
+    void markReached(size_t index, Address target = { }, IsReference isReference = IsReference::Yes)
     {
+        if (m_references && isReference == IsReference::Yes)
+            recordReference(target ? target : m_allocations[index].address);
         if (m_reached[index])
             return;
         m_reached[index] = true;
         m_reachedBy[index] = { m_contextClass, m_contextField, m_rootKind };
     }
+    void recordReference(Address to)
+    {
+        Address from = m_referrer ? m_referrer : m_contextSlot ? m_contextSlot : m_contextObject.first;
+        m_references->append({ from, to, m_rootKind });
+    }
+    // The cells the JSValues from `start`, `bytes` long, hold, as references of `owner`.
+    void referenceJSValues(Address owner, Address start, uint64_t bytes);
+    Vector<HeapWalk::Reference>* m_references { nullptr };
+    Address m_referrer; // What holds the references being read, when it is not the slot or value being read.
     String reachedBy(size_t allocationIndex) const;
     std::optional<uint32_t> lexicalEnvironmentScopeSize(Address, const TargetType& environmentClass);
     std::optional<std::pair<uint64_t, uint64_t>> m_scopeOffsets; // Of the SymbolTable in an environment, and of its maxScopeOffset.
@@ -591,26 +750,55 @@ private:
     // roots, a JS cell, a block's header, or a value reached through a pointer
     // or as a container's element. Its bytes are what the walk types.
     void enqueue(const TargetValue&, IsObject = IsObject::No);
+    // The fewest bytes an object of `type` takes: its size, but for a class
+    // whose last member only marks where its trailing storage starts.
+    uint64_t minimumObjectSize(const TargetType&);
     void typed(Address, uint64_t size, const TargetType&);
     void walk(const TargetValue&);
     void walkClass(const TargetValue&);
     enum class IsComplete : bool { No, Yes };
-    // Every member but `except`, which a reader reads its own way.
-    void walkMembers(const TargetValue&, IsComplete, const char* except = nullptr);
+    enum class ReadsOwnUnions : bool { No, Yes };
+    // Every member but those in `except`, which a reader reads its own way. A
+    // plan is kept per first member left out, so each list must start with its
+    // own literal. A reader that picks the live member of the unions its class
+    // and that class's bases declare passes ReadsOwnUnions::Yes.
+    using Except = std::span<const char* const>;
+    void walkMembers(const TargetValue&, IsComplete, Except, ReadsOwnUnions = ReadsOwnUnions::No);
+    void walkMembers(const TargetValue& value, IsComplete isComplete, const char* except = nullptr, ReadsOwnUnions readsOwnUnions = ReadsOwnUnions::No)
+    {
+        walkMembers(value, isComplete, except ? Except { &except, 1 } : Except { }, readsOwnUnions);
+    }
     void walkInPlace(Address, const TargetType&, const TargetType* owner, const TargetType::Field*);
 
     struct Slot {
         uint64_t offset;
-        enum class Kind : uint8_t { Pointer, Reader, Array } kind;
-        const TargetType* type; // The pointee, or the value a reader or the array walk reads.
+        enum class Kind : uint8_t { Pointer, Reader, Array, Union } kind;
+        const TargetType* type; // The pointee, or the value a reader, the array walk or a union's holder reads.
         const TargetType* owner; // The class whose field it is, which an overrun names.
         const TargetType::Field* field;
     };
     using Plan = Vector<Slot>;
-    const Plan& planFor(const TargetType&, IsComplete, const char* except);
-    void buildPlan(Plan&, const TargetType&, uint64_t offset, IsComplete, const char* except, unsigned depth);
+    const Plan& planFor(const TargetType&, IsComplete, Except);
+    void buildPlan(Plan&, const TargetType&, uint64_t offset, IsComplete, Except, unsigned depth);
     void addToPlan(Plan&, const TargetType&, uint64_t offset, const TargetType& owner, const TargetType::Field*, unsigned depth);
-    void walkPlan(Address, const Plan&);
+    // Union slots whose owner is `unionsReadBy` or one of its bases are left to the caller.
+    void walkPlan(Address, const Plan&, const TargetType* unionsReadBy = nullptr);
+    // Whether any member of a union holds something the walk follows.
+    bool unionLeadsSomewhere(const TargetType&);
+    // A union no reader picks the live member of, met in `owner`'s `field`, or as a value of its own.
+    void unreadUnion(const Slot&);
+    struct UnreadUnion {
+        const TargetType* type;
+        const TargetType* owner;
+        const TargetType::Field* field;
+        uint64_t count;
+    };
+    HashMap<std::pair<const TargetType*, const void*>, UnreadUnion> m_unreadUnions;
+    // The member `member` of the union in `holder`'s field `unionField`, or of
+    // an anonymous union `holder` or one of its bases declares, walked in place.
+    void walkUnionMember(const TargetValue& holder, const char* unionField, const char* member);
+    // The integer, or bitfield, `name` that `value` or one of its bases declares.
+    std::optional<int64_t> integerField(const TargetValue&, const char* name);
     void walkGlobalVariables();
     void walkStacks();
     void scanConservatively(Address start, Address end);
@@ -627,7 +815,7 @@ private:
     // by the qualified name of a class the walk has reached. True if `value` was
     // one, and has been read.
     bool walkByName(const TargetValue&);
-    enum class Reader : uint8_t { None, Vector, HashTable, RobinHoodHashTable, TrailingArray, ButterflyArray, SegmentedVector, ConcurrentBufferArray, SymbolTableEntry, CodeBlock, AlignedStorage, CodePointer, LazyPointer, CompactPointer, PackedPointer, JSString, PropertyTable, Optional, StringImpl, ObjectButterfly, StrongBlock, InlineWatchpointSet, ArraySegment, WeakBlock, ExpressionInfo, ArrayBufferView, ArrayBufferContents, Variant, HasOwnPropertyCache, ImmutableStyleProperties, StyleProperties, InlineMap };
+    enum class Reader : uint8_t { None, Vector, HashTable, RobinHoodHashTable, TrailingArray, ButterflyArray, SegmentedVector, ConcurrentBufferArray, SymbolTableEntry, CodeBlock, AlignedStorage, CodePointer, LazyPointer, CompactPointer, PackedPointer, JSString, PropertyTable, Optional, StringImpl, ObjectButterfly, StrongBlock, InlineWatchpointSet, ArraySegment, WeakBlock, ExpressionInfo, ArrayBufferView, ArrayBufferContents, Variant, HasOwnPropertyCache, ImmutableStyleProperties, InlineMap, UnlinkedFunctionExecutable, CSSSelector, JSValue, StringImplShape, HashTableValue, PropertyCondition, InlineCacheHandler, CellButterfly, CSSPrimitiveValue, CSSPrimitiveData, MarkedSpace, TypeField, CompactPointerTuple, StructureID, Function, StructureChain };
     Reader readerFor(const TargetType&);
     static Reader readerNamed(std::string_view qualifiedName);
     void walkVector(const TargetValue&);
@@ -670,8 +858,24 @@ private:
     HashMap<std::pair<const TargetType*, const char*>, const TargetType*> m_classesBeside;
     void walkHasOwnPropertyCache(const TargetValue&);
     void walkImmutableStyleProperties(const TargetValue&);
-    void walkStyleProperties(const TargetValue&);
     void walkInlineMap(const TargetValue&);
+    void walkUnlinkedFunctionExecutable(const TargetValue&);
+    void walkCSSSelector(const TargetValue&);
+    void walkJSValue(const TargetValue&);
+    void walkStringImplShape(const TargetValue&);
+    void walkHashTableValue(const TargetValue&);
+    void walkPropertyCondition(const TargetValue&);
+    void walkCSSPrimitiveValue(const TargetValue&);
+    void walkCSSPrimitiveData(const TargetValue&);
+    void walkTypeField(const TargetValue&);
+    void walkCompactPointerTuple(const TargetValue&);
+    void walkStructureID(const TargetValue&);
+    void walkFunction(const TargetValue&);
+    void walkStructureChain(const TargetValue&);
+    // The cell at `address`, which the walk reads as a live cell of its own, is referred to.
+    void referenceCell(Address);
+    // By the base class and the value of its type field; null if it names no subclass.
+    HashMap<std::pair<const TargetType*, int64_t>, const TargetType*> m_typeFieldSubclasses;
     // The pointer at `field`'s address in `value`, read whole: a CagedPtr holds its full address.
     std::optional<Address> rawPointer(const TargetValue&, const char* field);
 
@@ -721,6 +925,7 @@ private:
         const TargetType* utf16; // The pointee of m_data16.
     };
     HashMap<const TargetType*, std::optional<StringImplLayout>> m_stringImplLayouts;
+    const StringImplLayout* stringImplLayout(const TargetType&);
     HashMap<const TargetType*, std::optional<uint64_t>> m_butterflyOffsets; // Of AuxiliaryBarrier::m_value, by the object's type.
     // A MarkedBlock or a precise allocation is one allocation, whose memory outside its live cells is the JS heap's free memory.
     Vector<bool> m_isBlock;
@@ -735,7 +940,7 @@ private:
     const TargetType::Field* m_contextField { nullptr };
     Address m_contextSlot; // The word that holds the pointer being followed, when the walk knows it.
     std::pair<Address, const TargetType*> m_contextObject { }; // The value whose members are being walked.
-    Vector<String> m_clippedArrays;
+    Vector<String> m_unreadableArrays;
 };
 
 String ReachWalk::context() const
@@ -784,7 +989,7 @@ void ReachWalk::enqueue(const TargetValue& value, IsObject isObject)
         return;
     m_worklist.append(value);
     if (isObject == IsObject::Yes)
-        typed(value.address(), value.type().byteSize(), value.type());
+        typed(value.address(), minimumObjectSize(value.type()), value.type());
 }
 
 // The field named `name` of `type` or of a non-virtual base, looking into
@@ -820,12 +1025,32 @@ static const TargetType::Field* findField(const TargetType& type, std::string_vi
     return nullptr;
 }
 
+// ImmutableStyleProperties::objectSize: its m_storage is the first of its
+// trailing StylePropertyMetadatas, of which it may have none.
+uint64_t ReachWalk::minimumObjectSize(const TargetType& type)
+{
+    if (readerFor(type) != Reader::ImmutableStyleProperties)
+        return type.byteSize();
+    uint64_t offset = 0;
+    auto* storage = findField(type, "m_storage", offset);
+    return storage ? offset + storage->offset : type.byteSize();
+}
+
 void ReachWalk::run()
 {
     auto drain = [&] {
         while (!m_worklist.isEmpty())
             walk(m_worklist.takeLast());
     };
+    // An object's butterfly is found among the auxiliary cells, whichever root reaches the object first.
+    Vector<HeapWalk::Cell> cells;
+    m_heap.forEachLiveCell([&](const HeapWalk::Cell& cell) {
+        cells.append(cell);
+        if (!isJSCellKind(cell.kind))
+            m_auxiliaryCells.append(cell);
+        return IterationStatus::Continue;
+    });
+    std::ranges::sort(m_auxiliaryCells, { }, &HeapWalk::Cell::address);
     // The roots' VM is the test's description of it. The cells reach the VM as
     // JavaScriptCore describes it, with every type it owns complete.
     m_rootKind = m_heap.m_roots ? "the roots" : "the VM";
@@ -846,7 +1071,7 @@ void ReachWalk::run()
         auto index = allocationOf(precise.header, 1);
         if (!index)
             continue;
-        markReached(*index);
+        markReached(*index, { }, IsReference::No);
         m_isBlock[*index] = true;
         m_liveBytesInBlock[*index] += (precise.cell - precise.header) + (precise.isLive ? precise.cellSize : 0);
         m_contextClass = nullptr;
@@ -860,14 +1085,6 @@ void ReachWalk::run()
         drain();
         return IterationStatus::Continue;
     });
-    Vector<HeapWalk::Cell> cells;
-    m_heap.forEachLiveCell([&](const HeapWalk::Cell& cell) {
-        cells.append(cell);
-        if (!isJSCellKind(cell.kind))
-            m_auxiliaryCells.append(cell);
-        return IterationStatus::Continue;
-    });
-    std::ranges::sort(m_auxiliaryCells, { }, &HeapWalk::Cell::address);
     m_rootKind = "a live cell";
     for (const HeapWalk::Cell& cell : cells) {
         walkCell(cell);
@@ -939,6 +1156,11 @@ void ReachWalk::walkGlobalVariables()
     }, untyped, merged);
     m_rootKind = "a global variable";
     for (const SnapshotDebugInfo::GlobalVariable& variable : variables) {
+        // A variable of a type liblldb gives no size, such as a Swift one, is data the walk cannot read as a type.
+        if (!variable.type.byteSize()) {
+            ++untyped;
+            continue;
+        }
         ++m_globalVariables;
         m_contextClass = nullptr;
         m_contextField = nullptr;
@@ -1011,11 +1233,26 @@ void ReachWalk::walkBlock(Address block)
     if (!index || !header.typed())
         return;
     m_isBlock[*index] = true;
-    markReached(*index);
+    markReached(*index, { }, IsReference::No);
     m_liveBytesInBlock[*index] += header.type()->byteSize();
     m_contextClass = nullptr;
     m_contextField = nullptr;
     enqueue(*header.typed(), IsObject::Yes);
+}
+
+void ReachWalk::referenceJSValues(Address owner, Address start, uint64_t bytes)
+{
+    if (!m_references || !bytes)
+        return;
+    auto words = m_snapshot.memory().span<EncodedJSValue>(start, static_cast<size_t>(bytes / sizeof(EncodedJSValue)));
+    if (!words)
+        return;
+    SetForScope referrer { m_referrer, owner ? owner : start };
+    for (EncodedJSValue word : std::span<const EncodedJSValue> { words }) {
+        JSValue value = JSValue::decode(word);
+        if (word && value.isCell())
+            recordReference(Address { static_cast<uint64_t>(word) });
+    }
 }
 
 void ReachWalk::walkCell(const HeapWalk::Cell& cell)
@@ -1024,7 +1261,7 @@ void ReachWalk::walkCell(const HeapWalk::Cell& cell)
     m_contextField = nullptr;
     auto index = allocationOf(cell.address, cell.size);
     if (index) {
-        markReached(*index);
+        markReached(*index, { }, IsReference::No);
         // A precise allocation's live bytes were counted with its header.
         if (m_isBlock[*index] && !cell.preciseAllocation)
             m_liveBytesInBlock[*index] += cell.size;
@@ -1045,6 +1282,7 @@ void ReachWalk::walkCell(const HeapWalk::Cell& cell)
         if (inlineCapacity && *inlineCapacity) {
             uint64_t inlineBytes = std::min<uint64_t>(static_cast<uint64_t>(*inlineCapacity) * sizeof(EncodedJSValue), cell.size - std::min(cell.size, classSize));
             typed(cell.address + classSize, inlineBytes, *m_heap.m_jsValueClass);
+            referenceJSValues(cell.address, cell.address + classSize, inlineBytes);
             classSize += inlineBytes;
         }
     }
@@ -1055,6 +1293,7 @@ void ReachWalk::walkCell(const HeapWalk::Cell& cell)
         if (vectorLength && data <= cell.size) {
             uint64_t bytes = std::min<uint64_t>(static_cast<uint64_t>(*vectorLength) * sizeof(EncodedJSValue), cell.size - data);
             typed(cell.address + data, bytes, *m_heap.m_jsValueClass);
+            referenceJSValues(cell.address, cell.address + data, bytes);
             classSize = std::max(classSize, data + bytes);
         }
     }
@@ -1064,6 +1303,7 @@ void ReachWalk::walkCell(const HeapWalk::Cell& cell)
             uint64_t variables = roundUpToMultipleOf<sizeof(EncodedJSValue)>(klass->byteSize());
             uint64_t bytes = std::min<uint64_t>(static_cast<uint64_t>(*scopeSize) * sizeof(EncodedJSValue), cell.size - std::min(cell.size, variables));
             typed(cell.address + variables, bytes, *m_heap.m_jsValueClass);
+            referenceJSValues(cell.address, cell.address + variables, bytes);
             classSize = std::max(classSize, variables + bytes);
         }
     }
@@ -1109,7 +1349,7 @@ void ReachWalk::walkInPlace(Address address, const TargetType& type, const Targe
             return;
         }
         auto saved = std::exchange(m_contextObject, std::pair<Address, const TargetType*> { address, &type });
-        walkPlan(address, planFor(type, IsComplete::Yes, nullptr));
+        walkPlan(address, planFor(type, IsComplete::Yes, { }));
         m_contextObject = saved;
         return;
     }
@@ -1128,15 +1368,20 @@ void ReachWalk::walkInPlace(Address address, const TargetType& type, const Targe
         // An integer leads nowhere, and a large table of them is common in static data.
         if (!array->count || !array->element.byteSize() || leadsNowhere(array->element))
             return;
-        // An array the debug info declares larger than the readable memory it starts in, such as a
-        // reservation, is read only as far as that memory goes.
+        // An array is a member of a value its allocation or variable holds whole, so one that runs
+        // past readable memory means the walk misread that value. None of it is read.
         auto region = Region::findContaining(m_snapshot.regions(), address);
-        if (!region || !region->isReadable())
+        uint64_t count = array->count;
+        if (!region || !region->isReadable() || count > (region->end() - address) / array->element.byteSize()) {
+            String holder;
+            if (auto [holderAddress, holderType] = m_contextObject; holderType) {
+                auto holderAllocation = allocationOf(holderAddress, 1);
+                holder = makeString(" in the '"_s, holderType->name(), "' at 0x"_s, hex(holderAddress.toTargetVMAddress()),
+                    holderAllocation ? makeString(", reached by "_s, reachedBy(*holderAllocation)) : makeString(", reached by "_s, String::fromLatin1(m_rootKind)));
+            }
+            m_unreadableArrays.append(makeString("the "_s, array->count, "-element '"_s, type.name(), "' at 0x"_s, hex(address.toTargetVMAddress()),
+                ", reached through "_s, context(), holder, ", runs past the readable memory it starts in"_s));
             return;
-        uint64_t count = std::min<uint64_t>(array->count, (region->end() - address) / array->element.byteSize());
-        if (count < array->count) {
-            m_clippedArrays.append(makeString("the "_s, array->count, "-element '"_s, type.name(), "' at 0x"_s, hex(address.toTargetVMAddress()),
-                ", reached through "_s, context(), ", of which "_s, count, " are in readable memory"_s));
         }
         for (uint64_t index = 0; index < count; ++index)
             walkInPlace(address + index * array->element.byteSize(), array->element, owner, field);
@@ -1145,20 +1390,55 @@ void ReachWalk::walkInPlace(Address address, const TargetType& type, const Targe
 
 // TargetValue::forEachField, but with each base as a value of its own, which a
 // reader may recognise, as a Packed<T*> is a PackedAlignedPtr.
-void ReachWalk::walkMembers(const TargetValue& value, IsComplete isComplete, const char* except)
+// The context is restored, so what a reader reads after its members is named as read through its own value.
+void ReachWalk::walkMembers(const TargetValue& value, IsComplete isComplete, Except except, ReadsOwnUnions readsOwnUnions)
 {
-    auto saved = std::exchange(m_contextObject, std::pair<Address, const TargetType*> { value.address(), &value.type() });
-    walkPlan(value.address(), planFor(value.type(), isComplete, except));
-    m_contextObject = saved;
+    SetForScope contextObject { m_contextObject, std::pair<Address, const TargetType*> { value.address(), &value.type() } };
+    SetForScope contextClass { m_contextClass };
+    SetForScope contextField { m_contextField };
+    walkPlan(value.address(), planFor(value.type(), isComplete, except), readsOwnUnions == ReadsOwnUnions::Yes ? &value.type() : nullptr);
+}
+
+// Where `base` is in an object of class `derived`, among its non-virtual bases.
+static std::optional<size_t> baseOffset(const TargetType& derived, const TargetType& base, unsigned depth = 0)
+{
+    if (&derived == &base)
+        return 0;
+    auto* klass = std::get_if<TargetType::Class>(&derived.layout());
+    if (!klass || depth > 32)
+        return std::nullopt;
+    for (const TargetType::Base& candidate : klass->bases) {
+        if (auto offset = baseOffset(candidate.type, base, depth + 1))
+            return candidate.offset + *offset;
+    }
+    return std::nullopt;
+}
+
+// A union whose members that lead somewhere are all pointers at its start to
+// types without a size, such as function pointers, holds one word that the walk
+// reads the same way whichever member is live.
+static const TargetType::Field* untypedPointerOfUnion(const TargetType& type, const Function<bool(const TargetType&)>& leadsNowhere)
+{
+    auto* klass = std::get_if<TargetType::Class>(&type.layout());
+    const TargetType::Field* result = nullptr;
+    for (const TargetType::Field& field : klass ? klass->properFields : Vector<TargetType::Field> { }) {
+        if (field.bitSize || !field.type.byteSize() || leadsNowhere(field.type))
+            continue;
+        auto* pointer = std::get_if<TargetType::Pointer>(&field.type.layout());
+        if (field.offset || !pointer || pointer->pointee.byteSize())
+            return nullptr;
+        result = &field;
+    }
+    return result;
 }
 
 // The members of a class, flattened once per class into the values that may
 // lead somewhere: pointers, values a reader reads, and arrays of either.
 // Members that are integers, or classes of integers, lead nowhere.
-auto ReachWalk::planFor(const TargetType& type, IsComplete isComplete, const char* except) -> const Plan&
+auto ReachWalk::planFor(const TargetType& type, IsComplete isComplete, Except except) -> const Plan&
 {
     auto& plans = m_plans[isComplete == IsComplete::Yes];
-    std::pair<const TargetType*, const char*> key { &type, except };
+    std::pair<const TargetType*, const char*> key { &type, except.empty() ? nullptr : except.front() };
     if (auto* plan = plans.get(key))
         return *plan;
     auto plan = makeUnique<Plan>();
@@ -1166,15 +1446,24 @@ auto ReachWalk::planFor(const TargetType& type, IsComplete isComplete, const cha
     return *plans.add(key, WTF::move(plan)).iterator->value;
 }
 
-void ReachWalk::buildPlan(Plan& plan, const TargetType& type, uint64_t offset, IsComplete isComplete, const char* except, unsigned depth)
+void ReachWalk::buildPlan(Plan& plan, const TargetType& type, uint64_t offset, IsComplete isComplete, Except except, unsigned depth)
 {
     auto* klass = std::get_if<TargetType::Class>(&type.layout());
     // A class nests its members a few deep; a cycle would be a liblldb bug.
     if (!klass || depth > 64)
         return;
+    // Reading every member of a union follows pointers that are not pointers.
+    if (klass->isUnion) {
+        if (auto* pointer = untypedPointerOfUnion(type, [&](const TargetType& member) { return leadsNowhere(member); }))
+            plan.append({ offset, Slot::Kind::Pointer, &std::get<TargetType::Pointer>(pointer->type.layout()).pointee, &type, pointer });
+        else if (unionLeadsSomewhere(type))
+            plan.append({ offset, Slot::Kind::Union, &type, &type, nullptr });
+        return;
+    }
     for (const TargetType::Field& field : klass->properFields) {
         // A field whose type liblldb could not parse has no size.
-        if (field.bitSize || !field.type.byteSize() || (except && std::string_view { field.name.legacyCStringPointer() } == except))
+        std::string_view name { field.name.legacyCStringPointer() };
+        if (field.bitSize || !field.type.byteSize() || std::ranges::any_of(except, [&](const char* excepted) { return name == excepted; }))
             continue;
         addToPlan(plan, field.type, offset + field.offset, type, &field, depth);
     }
@@ -1182,7 +1471,7 @@ void ReachWalk::buildPlan(Plan& plan, const TargetType& type, uint64_t offset, I
         if (readerFor(base.type) != Reader::None)
             plan.append({ offset + base.offset, Slot::Kind::Reader, &base.type, &base.type, nullptr });
         else
-            buildPlan(plan, base.type, offset + base.offset, IsComplete::No, nullptr, depth + 1);
+            buildPlan(plan, base.type, offset + base.offset, IsComplete::No, { }, depth + 1);
     };
     for (const TargetType::Base& base : klass->bases)
         addBase(base);
@@ -1196,11 +1485,16 @@ void ReachWalk::buildPlan(Plan& plan, const TargetType& type, uint64_t offset, I
 void ReachWalk::addToPlan(Plan& plan, const TargetType& type, uint64_t offset, const TargetType& owner, const TargetType::Field* field, unsigned depth)
 {
     const TargetType::Layout& layout = type.layout();
-    if (std::holds_alternative<TargetType::Class>(layout)) {
+    if (auto* klass = std::get_if<TargetType::Class>(&layout)) {
         if (readerFor(type) != Reader::None)
             plan.append({ offset, Slot::Kind::Reader, &type, &owner, field });
-        else
-            buildPlan(plan, type, offset, IsComplete::Yes, nullptr, depth + 1);
+        else if (klass->isUnion) {
+            if (auto* pointer = untypedPointerOfUnion(type, [&](const TargetType& member) { return leadsNowhere(member); }))
+                plan.append({ offset, Slot::Kind::Pointer, &std::get<TargetType::Pointer>(pointer->type.layout()).pointee, &type, pointer });
+            else if (unionLeadsSomewhere(type))
+                plan.append({ offset, Slot::Kind::Union, &type, &owner, field });
+        } else
+            buildPlan(plan, type, offset, IsComplete::Yes, { }, depth + 1);
         return;
     }
     if (auto* pointer = std::get_if<TargetType::Pointer>(&layout)) {
@@ -1214,7 +1508,28 @@ void ReachWalk::addToPlan(Plan& plan, const TargetType& type, uint64_t offset, c
     }
 }
 
-void ReachWalk::walkPlan(Address address, const Plan& plan)
+bool ReachWalk::unionLeadsSomewhere(const TargetType& type)
+{
+    auto* klass = std::get_if<TargetType::Class>(&type.layout());
+    if (!klass)
+        return false;
+    for (const TargetType::Field& field : klass->properFields) {
+        if (!field.bitSize && field.type.byteSize() && !leadsNowhere(field.type))
+            return true;
+    }
+    return false;
+}
+
+void ReachWalk::unreadUnion(const Slot& slot)
+{
+    const void* where = slot.field ? static_cast<const void*>(slot.field) : static_cast<const void*>(m_contextClass);
+    const TargetType* owner = slot.field ? slot.owner : m_contextClass;
+    m_unreadUnions.ensure({ slot.type, where }, [&] {
+        return UnreadUnion { slot.type, owner, slot.field, 0 };
+    }).iterator->value.count++;
+}
+
+void ReachWalk::walkPlan(Address address, const Plan& plan, const TargetType* unionsReadBy)
 {
     if (plan.isEmpty())
         return;
@@ -1251,18 +1566,28 @@ void ReachWalk::walkPlan(Address address, const Plan& plan)
         case Slot::Kind::Array:
             walkInPlace(slotAddress, *slot.type, slot.owner, slot.field);
             break;
+        case Slot::Kind::Union:
+            if (!unionsReadBy || !baseOffset(*unionsReadBy, *slot.owner))
+                unreadUnion(slot);
+            break;
         }
     }
 }
 
-void ReachWalk::followPointer(Address address, const TargetType& pointee)
+void ReachWalk::followPointer(Address address, const TargetType& declaredPointee)
 {
-    auto* klass = std::get_if<TargetType::Class>(&pointee.layout());
-    if (klass && !pointee.byteSize()) {
-        // A class no compile unit of the image defines.
-        notFollowed(NotFollowed::Declaration);
-        return;
+    const TargetType* definition = &declaredPointee;
+    auto* klass = std::get_if<TargetType::Class>(&declaredPointee.layout());
+    if (klass && !declaredPointee.byteSize()) {
+        definition = declaredPointee.debugInfo().definitionInItsImage(declaredPointee);
+        if (!definition) {
+            // A class no compile unit of the image defines.
+            notFollowed(NotFollowed::Declaration);
+            return;
+        }
+        klass = std::get_if<TargetType::Class>(&definition->layout());
     }
+    const TargetType& pointee = *definition;
     if (klass && klass->isPolymorphic) {
         Address completeObject;
         if (auto* dynamicType = pointee.debugInfo().dynamicTypeIfAnyAt(m_snapshot, address, completeObject)) {
@@ -1285,9 +1610,14 @@ void ReachWalk::followPointer(Address address, const TargetType& pointee)
 void ReachWalk::followUntyped(Address address)
 {
     auto index = allocationOf(address, 1);
-    if (!index || m_reached[*index])
+    if (!index)
         return;
-    markReached(*index);
+    if (m_reached[*index]) {
+        if (m_references)
+            recordReference(address);
+        return;
+    }
+    markReached(*index, address);
     Address allocation = m_allocations[*index].address;
     Address completeObject;
     const TargetType* dynamicType = m_heap.m_debugInfo->dynamicTypeIfAnyAt(m_snapshot, allocation, completeObject);
@@ -1305,7 +1635,7 @@ void ReachWalk::follow(Address address, const TargetType& type)
     // its type, such as the other member of a union: it is listed as an
     // overrun, and neither reached nor read.
     const HeapWalk::Allocation& allocation = m_allocations[*index];
-    if (type.byteSize() > (allocation.address + allocation.size) - address) {
+    if (minimumObjectSize(type) > (allocation.address + allocation.size) - address) {
         notFollowed(NotFollowed::DoesNotFit);
         m_overruns.append(makeString("the "_s, type.byteSize(), "-byte '"_s, type.name(), "' at 0x"_s, hex(address.toTargetVMAddress()),
             ", reached through "_s, context(), m_contextSlot ? makeString(" at 0x"_s, hex(m_contextSlot.toTargetVMAddress())) : String(),
@@ -1313,7 +1643,7 @@ void ReachWalk::follow(Address address, const TargetType& type)
             ", runs past the end of its "_s, allocation.size, "-byte allocation at 0x"_s, hex(allocation.address.toTargetVMAddress())));
         return;
     }
-    markReached(*index);
+    markReached(*index, address);
     // A pointer to an integer at the start of an allocation is a buffer of them, such as a malloc'ed string's characters.
     if (allocation.address == address && type.byteSize() && std::holds_alternative<TargetType::Integer>(type.layout())) {
         if (m_visited.add({ address.toTargetVMAddress(), std::bit_cast<uint64_t>(&type) }).isNewEntry)
@@ -1357,7 +1687,8 @@ auto ReachWalk::readerNamed(std::string_view name) -> Reader
         return Reader::AlignedStorage;
     if (name.starts_with("WTF::CodePtr<"))
         return Reader::CodePointer;
-    if (name.starts_with("WTF::LazyUniqueRef<") || name.starts_with("WTF::LazyRef<"))
+    // JSC::LazyProperty has LazyRef's tags: lazyTag and initializingTag.
+    if (name.starts_with("WTF::LazyUniqueRef<") || name.starts_with("WTF::LazyRef<") || name.starts_with("JSC::LazyProperty<"))
         return Reader::LazyPointer;
     if (name.starts_with("WTF::CompactPtr<"))
         return Reader::CompactPointer;
@@ -1393,15 +1724,49 @@ auto ReachWalk::readerNamed(std::string_view name) -> Reader
         return Reader::HasOwnPropertyCache;
     if (name == "WebCore::ImmutableStyleProperties")
         return Reader::ImmutableStyleProperties;
-    if (name == "WebCore::StyleProperties")
-        return Reader::StyleProperties;
     if (name.starts_with("WTF::InlineMap<"))
         return Reader::InlineMap;
+    if (name == "JSC::UnlinkedFunctionExecutable")
+        return Reader::UnlinkedFunctionExecutable;
+    if (name == "WebCore::CSSSelector")
+        return Reader::CSSSelector;
+    // WriteBarrierBase<Unknown>::m_value is its one member, an EncodedJSValue.
+    if (name == "JSC::JSValue" || name.starts_with("JSC::WriteBarrierBase<JSC::Unknown,"))
+        return Reader::JSValue;
+    if (name == "WTF::StringImplShape")
+        return Reader::StringImplShape;
+    if (name == "JSC::HashTableValue")
+        return Reader::HashTableValue;
+    if (name == "JSC::PropertyCondition")
+        return Reader::PropertyCondition;
+    if (name == "JSC::InlineCacheHandler")
+        return Reader::InlineCacheHandler;
+    if (name == "JSC::JSCellButterfly")
+        return Reader::CellButterfly;
+    if (name == "WebCore::CSSPrimitiveValue")
+        return Reader::CSSPrimitiveValue;
+    if (name == "JSC::MarkedSpace")
+        return Reader::MarkedSpace;
+    if (name.starts_with("WTF::CompactPointerTuple<"))
+        return Reader::CompactPointerTuple;
+    if (name == "JSC::StructureID")
+        return Reader::StructureID;
+    if (name == "JSC::JSFunction")
+        return Reader::Function;
+    if (name == "JSC::StructureChain")
+        return Reader::StructureChain;
+    for (const HeapWalk::TypeFieldHierarchy& hierarchy : typeFieldHierarchyTable) {
+        if (name == hierarchy.base)
+            return Reader::TypeField;
+    }
+    if (name.starts_with("WebCore::CSS::PrimitiveData<"))
+        return Reader::CSSPrimitiveData;
     return Reader::None;
 }
 
 bool ReachWalk::walkByName(const TargetValue& value)
 {
+    SetForScope contextObject { m_contextObject, std::pair<Address, const TargetType*> { value.address(), &value.type() } };
     switch (readerFor(value.type())) {
     case Reader::None:
         return false;
@@ -1493,14 +1858,99 @@ bool ReachWalk::walkByName(const TargetValue& value)
     case Reader::ImmutableStyleProperties:
         walkImmutableStyleProperties(value);
         return true;
-    case Reader::StyleProperties:
-        walkStyleProperties(value);
-        return true;
     case Reader::InlineMap:
         walkInlineMap(value);
         return true;
+    case Reader::UnlinkedFunctionExecutable:
+        walkUnlinkedFunctionExecutable(value);
+        return true;
+    case Reader::CSSSelector:
+        walkCSSSelector(value);
+        return true;
+    case Reader::JSValue:
+        walkJSValue(value);
+        return true;
+    case Reader::StringImplShape:
+        walkStringImplShape(value);
+        return true;
+    case Reader::HashTableValue:
+        walkHashTableValue(value);
+        return true;
+    case Reader::PropertyCondition:
+        walkPropertyCondition(value);
+        return true;
+    case Reader::InlineCacheHandler:
+        // Its union holds the cells and the module environment slot the
+        // handler's AccessCase chose (InlineCacheHandler::createPreCompiled),
+        // which the handler does not record. The GC does not trace them through
+        // the handler, and the walk reads every live cell.
+        walkMembers(value, IsComplete::Yes, nullptr, ReadsOwnUnions::Yes);
+        return true;
+    case Reader::CSSPrimitiveValue:
+        walkCSSPrimitiveValue(value);
+        return true;
+    case Reader::CSSPrimitiveData:
+        walkCSSPrimitiveData(value);
+        return true;
+    case Reader::TypeField:
+        walkTypeField(value);
+        return true;
+    case Reader::CompactPointerTuple:
+        walkCompactPointerTuple(value);
+        return true;
+    case Reader::StructureID:
+        walkStructureID(value);
+        return true;
+    case Reader::Function:
+        walkFunction(value);
+        return true;
+    case Reader::StructureChain:
+        walkStructureChain(value);
+        return true;
+    case Reader::MarkedSpace: {
+        // MarkedSpace::prepareForMarking points these into m_preciseAllocations for a collection,
+        // and leaves them as they were after it: the buffer may have moved, and the end is no element.
+        static constexpr std::array<const char*, 2> collectionPointers { "m_preciseAllocationsForThisCollectionBegin", "m_preciseAllocationsForThisCollectionEnd" };
+        walkMembers(value, IsComplete::Yes, collectionPointers);
+        return true;
+    }
+    case Reader::CellButterfly:
+        // A JSCellButterfly's IndexingHeader is always its lengths (JSCellButterfly::length).
+        walkMembers(value, IsComplete::Yes, "m_header");
+        return true;
     }
     RELEASE_ASSERT_NOT_REACHED();
+}
+
+// The value of a std::optional, in the union of libstdc++'s _Optional_payload_base
+// (_M_value) or libc++'s __optional_destruct_base (__val_), up to six bases and members down.
+static const TargetType::Field* optionalValue(const TargetType& type, uint64_t& offset, unsigned depth = 0)
+{
+    auto* klass = std::get_if<TargetType::Class>(&type.layout());
+    if (!klass || depth > 8)
+        return nullptr;
+    for (const TargetType::Field& field : klass->properFields) {
+        std::string_view name { field.name.legacyCStringPointer() };
+        if (name == "_M_value" || name == "__val_") {
+            offset += field.offset;
+            return &field;
+        }
+    }
+    for (const TargetType::Field& field : klass->properFields) {
+        uint64_t inner = 0;
+        if (auto* found = optionalValue(field.type, inner, depth + 1)) {
+            offset += field.offset + inner;
+            return found;
+        }
+    }
+    for (const TargetType::Base& base : klass->bases) {
+        uint64_t inner = 0;
+        if (auto* found = optionalValue(base.type, inner, depth + 1)) {
+            offset += base.offset + inner;
+            return found;
+        }
+    }
+    return nullptr;
 }
 
 // Whether a std::optional holds a value: libstdc++'s
@@ -1540,8 +1990,15 @@ void ReachWalk::walkOptional(const TargetValue& optional)
         CORPSE_REPORT("The '%s' at 0x%llx has no engaged flag this walk knows", optional.type().name().legacyCStringPointer(), forReport(optional.address()));
         return;
     }
-    if (*engaged)
-        walkMembers(optional, IsComplete::Yes);
+    if (!*engaged)
+        return;
+    uint64_t offset = 0;
+    auto* value = optionalValue(optional.type(), offset);
+    if (!value) {
+        CORPSE_REPORT("The '%s' at 0x%llx has no value member this walk knows", optional.type().name().legacyCStringPointer(), forReport(optional.address()));
+        return;
+    }
+    walkInPlace(optional.address() + offset, value->type, &optional.type(), value);
 }
 
 // Every element, not only the first.
@@ -1615,23 +2072,8 @@ bool ReachWalk::leadsNowhere(const TargetType& type)
     if (auto* array = std::get_if<TargetType::Array>(&layout))
         return leadsNowhere(array->element);
     if (std::holds_alternative<TargetType::Class>(layout))
-        return readerFor(type) == Reader::None && planFor(type, IsComplete::Yes, nullptr).isEmpty();
+        return readerFor(type) == Reader::None && planFor(type, IsComplete::Yes, { }).isEmpty();
     return false;
-}
-
-// Where `base` is in an object of class `derived`, among its non-virtual bases.
-static std::optional<size_t> baseOffset(const TargetType& derived, const TargetType& base, unsigned depth = 0)
-{
-    if (&derived == &base)
-        return 0;
-    auto* klass = std::get_if<TargetType::Class>(&derived.layout());
-    if (!klass || depth > 32)
-        return std::nullopt;
-    for (const TargetType::Base& candidate : klass->bases) {
-        if (auto offset = baseOffset(candidate.type, base, depth + 1))
-            return candidate.offset + *offset;
-    }
-    return std::nullopt;
 }
 
 // SegmentedVector::addressAt: the first InlineCapacity elements in
@@ -1813,13 +2255,15 @@ void ReachWalk::walkAlignedStorage(const TargetValue& storage)
 }
 
 // CodePtr::m_value: a tagged pointer into JIT code, which has no type. It
-// reaches the allocation it is in, whose bytes stay untyped.
+// reaches the allocation it is in, whose bytes stay untyped. It is CodePtr's
+// one member, read whole: liblldb describes some instances of CodePtr as empty
+// classes.
 void ReachWalk::walkCodePointer(const TargetValue& codePointer)
 {
-    auto value = codePointer.properField("m_value").pointerValue();
+    auto value = m_snapshot.memory().ptr<uint64_t>(codePointer.address());
     if (!value || !*value)
         return;
-    if (auto index = allocationOf(*value, 1))
+    if (auto index = allocationOf(Address { *value }.stripped(), 1))
         markReached(*index);
 }
 
@@ -1979,40 +2423,59 @@ void ReachWalk::walkJSString(const TargetValue& string)
 // BufferInternal one whose m_data8 points there; in a buffer of their own, or a
 // literal, which m_data8 points to, for the others; and in another StringImpl,
 // which the tail points to, for BufferSubstring.
-void ReachWalk::walkStringImpl(const TargetValue& string)
+// StringImpl's s_hashMaskBufferOwnership and s_hashFlag8BitBuffer, which are private.
+static constexpr uint32_t stringImplBufferOwnershipMask = 3;
+static constexpr uint32_t stringImplIs8BitFlag = 1u << 2;
+
+auto ReachWalk::stringImplLayout(const TargetType& type) -> const StringImplLayout*
 {
-    walkMembers(string, IsComplete::Yes);
-    // StringImpl's s_hashMaskBufferOwnership and s_hashFlag8BitBuffer, which are private.
-    constexpr uint32_t bufferOwnershipMask = 3;
-    constexpr uint32_t is8BitFlag = 1u << 2;
-    const auto& layout = m_stringImplLayouts.ensure(&string.type(), [&]() -> std::optional<StringImplLayout> {
+    const auto& layout = m_stringImplLayouts.ensure(&type, [&]() -> std::optional<StringImplLayout> {
         uint64_t lengthOffset = 0;
         uint64_t flagsOffset = 0;
         uint64_t data8Offset = 0;
         uint64_t data16Offset = 0;
-        auto* length = findField(string.type(), "m_length", lengthOffset);
-        auto* flags = findField(string.type(), "m_hashAndFlags", flagsOffset);
-        auto* data8 = findField(string.type(), "m_data8", data8Offset);
-        auto* data16 = findField(string.type(), "m_data16", data16Offset);
+        auto* length = findField(type, "m_length", lengthOffset);
+        auto* flags = findField(type, "m_hashAndFlags", flagsOffset);
+        auto* data8 = findField(type, "m_data8", data8Offset);
+        auto* data16 = findField(type, "m_data16", data16Offset);
         auto* latin1 = data8 ? std::get_if<TargetType::Pointer>(&data8->type.layout()) : nullptr;
         auto* utf16 = data16 ? std::get_if<TargetType::Pointer>(&data16->type.layout()) : nullptr;
         if (!length || !flags || !latin1 || !utf16 || !latin1->pointee.byteSize() || !utf16->pointee.byteSize())
             return std::nullopt;
         return StringImplLayout { lengthOffset + length->offset, flagsOffset + flags->offset, data8Offset + data8->offset, &latin1->pointee, &utf16->pointee };
     }).iterator->value;
+    return layout ? &*layout : nullptr;
+}
+
+// StringImplShape's characters: m_data8 or, without s_hashFlag8BitBuffer, m_data16 (StringImpl::is8Bit).
+void ReachWalk::walkStringImplShape(const TargetValue& shape)
+{
+    walkMembers(shape, IsComplete::Yes, nullptr, ReadsOwnUnions::Yes);
+    const StringImplLayout* layout = stringImplLayout(shape.type());
+    auto flags = layout ? m_snapshot.memory().ptr<uint32_t>(shape.address() + layout->flagsOffset) : Memory::Ptr<uint32_t> { };
+    auto data = layout ? m_snapshot.memory().ptr<uint64_t>(shape.address() + layout->dataOffset) : Memory::Ptr<uint64_t> { };
+    if (!flags || !data || !*data)
+        return;
+    m_contextClass = &shape.type();
+    m_contextField = nullptr;
+    followPointer(Address { *data }.stripped(), (*flags & stringImplIs8BitFlag) ? *layout->latin1 : *layout->utf16);
+}
+
+void ReachWalk::walkStringImpl(const TargetValue& string)
+{
+    walkMembers(string, IsComplete::Yes);
+    const StringImplLayout* layout = stringImplLayout(string.type());
     if (!layout)
         return;
-    uint64_t lengthOffset = layout->lengthOffset;
-    uint64_t flagsOffset = layout->flagsOffset;
-    auto lengthValue = m_snapshot.memory().ptr<uint32_t>(string.address() + lengthOffset);
-    auto flagsValue = m_snapshot.memory().ptr<uint32_t>(string.address() + flagsOffset);
+    auto lengthValue = m_snapshot.memory().ptr<uint32_t>(string.address() + layout->lengthOffset);
+    auto flagsValue = m_snapshot.memory().ptr<uint32_t>(string.address() + layout->flagsOffset);
     if (!lengthValue || !flagsValue)
         return;
     // StringImpl::tailOffset.
-    uint64_t tail = flagsOffset + sizeof(uint32_t);
-    switch (*flagsValue & bufferOwnershipMask) {
+    uint64_t tail = layout->flagsOffset + sizeof(uint32_t);
+    switch (*flagsValue & stringImplBufferOwnershipMask) {
     case WTF::StringImpl::BufferInternal: {
-        const TargetType& character = (*flagsValue & is8BitFlag) ? *layout->latin1 : *layout->utf16;
+        const TargetType& character = (*flagsValue & stringImplIs8BitFlag) ? *layout->latin1 : *layout->utf16;
         tail = roundUpToMultipleOf(character.alignment(), tail);
         auto data = m_snapshot.memory().ptr<uint64_t>(string.address() + layout->dataOffset);
         if (data && Address { *data }.stripped() == string.address() + tail)
@@ -2044,13 +2507,26 @@ void ReachWalk::walkObjectButterfly(const TargetValue& object)
     if (!word || !*word)
         return;
     std::optional<Address> butterfly = Address { *word }.stripped();
-    // A butterfly without indexed properties points just past its last out-of-line property.
-    const HeapWalk::Cell* cell = auxiliaryCellContaining(*butterfly - 1);
+    // Butterfly::base: the out-of-line properties end where the IndexingHeader
+    // starts, sizeof(IndexingHeader) before the butterfly, which is in the
+    // allocation only if Structure::hasIndexingHeader.
+    auto indexingType = integerField(object, "m_indexingTypeAndMisc");
+    auto cellType = integerField(object, "m_type");
+    if (!indexingType || !cellType)
+        return;
+    bool hasIndexingHeader = hasIndexedProperties(static_cast<IndexingType>(*indexingType));
+    if (!hasIndexingHeader && isTypedView(static_cast<JSType>(*cellType))) {
+        const TargetType* view = m_heap.cellClass(object.address());
+        auto mode = view ? integerField(TargetValue::at(m_snapshot, object.address(), *view), "m_mode") : std::nullopt;
+        hasIndexingHeader = mode && isWastefulTypedArray(static_cast<TypedArrayMode>(*mode));
+    }
+    const HeapWalk::Cell* cell = auxiliaryCellContaining(*butterfly - sizeof(IndexingHeader) - (hasIndexingHeader ? 0 : 1));
     if (!cell)
         return;
     if (auto index = allocationOf(cell->address, 1))
         markReached(*index);
     typed(cell->address, cell->size - cell->size % sizeof(EncodedJSValue), *m_heap.m_jsValueClass);
+    referenceJSValues(object.address(), cell->address, cell->size - cell->size % sizeof(EncodedJSValue));
 }
 
 // StrongBlock: its header, then a JSValue slot for each Strong handle, to the end of the block.
@@ -2060,6 +2536,8 @@ void ReachWalk::walkStrongBlock(const TargetValue& block)
     uint64_t headerSize = block.type().byteSize();
     if (headerSize < StrongBlock::blockSize)
         typed(block.address() + headerSize, StrongBlock::blockSize - headerSize, *m_heap.m_jsValueClass);
+    // Strong handles are roots of their own.
+    referenceJSValues({ }, block.address() + headerSize, StrongBlock::blockSize - headerSize);
 }
 
 // InlineWatchpointSet::m_data: a fat WatchpointSet*, unless IsThinFlag is set (InlineWatchpointSet::isFat).
@@ -2150,7 +2628,7 @@ void ReachWalk::walkHasOwnPropertyCache(const TargetValue& cache)
 // StylePropertyMetadatas at m_storage, then as many PackedPtr<const CSSValue>s.
 void ReachWalk::walkImmutableStyleProperties(const TargetValue& properties)
 {
-    walkMembers(properties, IsComplete::Yes);
+    walkMembers(properties, IsComplete::Yes, "m_storage");
     uint64_t sizeOffset = 0;
     const TargetType* declaringClass = nullptr;
     auto* arraySize = findField(properties.type(), "m_arraySize", sizeOffset, &declaringClass);
@@ -2164,23 +2642,6 @@ void ReachWalk::walkImmutableStyleProperties(const TargetValue& properties)
         return;
     walkElements(storage.address(), *metadata, static_cast<uint64_t>(*count));
     walkElements(storage.address() + static_cast<uint64_t>(*count) * metadata->byteSize(), *value, static_cast<uint64_t>(*count));
-}
-
-// StyleProperties has no vtable: m_isMutable says whether it is a
-// MutableStyleProperties or an ImmutableStyleProperties, which it starts.
-void ReachWalk::walkStyleProperties(const TargetValue& properties)
-{
-    walkMembers(properties, IsComplete::No);
-    uint64_t offset = 0;
-    const TargetType* declaringClass = nullptr;
-    auto* isMutableField = findField(properties.type(), "m_isMutable", offset, &declaringClass);
-    if (!isMutableField)
-        return;
-    auto isMutable = TargetValue::at(m_snapshot, properties.address() + offset, *declaringClass).field(*isMutableField).integer();
-    if (!isMutable)
-        return;
-    if (auto* subclass = classBeside(properties.type(), *isMutable ? "WebCore::MutableStyleProperties" : "WebCore::ImmutableStyleProperties"))
-        enqueue(TargetValue::at(m_snapshot, properties.address(), *subclass), IsObject::Yes);
 }
 
 // InlineMap::isInline(): with m_capacity at its InlineCapacity, m_size entries
@@ -2211,6 +2672,321 @@ void ReachWalk::walkInlineMap(const TargetValue& map)
     walkElements(*address, entry->pointee, static_cast<uint64_t>(*capacity));
 }
 
+void ReachWalk::walkUnionMember(const TargetValue& holder, const char* unionField, const char* member)
+{
+    uint64_t offset = 0;
+    const TargetType* within = &holder.type();
+    if (unionField) {
+        auto* field = findField(*within, unionField, offset);
+        if (!field) {
+            CORPSE_REPORT("The '%s' at 0x%llx has no union '%s'", holder.type().name().legacyCStringPointer(), forReport(holder.address()), unionField);
+            return;
+        }
+        offset += field->offset;
+        within = &field->type;
+    }
+    uint64_t memberOffset = 0;
+    const TargetType* declaringClass = nullptr;
+    auto* field = findField(*within, member, memberOffset, &declaringClass);
+    if (!field) {
+        CORPSE_REPORT("The '%s' at 0x%llx has no union member '%s'", holder.type().name().legacyCStringPointer(), forReport(holder.address()), member);
+        return;
+    }
+    walkInPlace(holder.address() + offset + memberOffset + field->offset, field->type, declaringClass, field);
+}
+
+std::optional<int64_t> ReachWalk::integerField(const TargetValue& value, const char* name)
+{
+    uint64_t offset = 0;
+    const TargetType* declaringClass = nullptr;
+    auto* field = findField(value.type(), name, offset, &declaringClass);
+    if (!field)
+        return std::nullopt;
+    return TargetValue::at(m_snapshot, value.address() + offset, *declaringClass).field(*field).integer();
+}
+
+// UnlinkedFunctionExecutable's unions: m_decoder, and the cached code blocks'
+// offsets, with m_isCached set; m_unlinkedCodeBlockForCall and
+// m_unlinkedCodeBlockForConstruct otherwise (UnlinkedFunctionExecutable::visitChildrenImpl).
+void ReachWalk::walkUnlinkedFunctionExecutable(const TargetValue& executable)
+{
+    walkMembers(executable, IsComplete::Yes, nullptr, ReadsOwnUnions::Yes);
+    auto isCached = integerField(executable, "m_isCached");
+    if (!isCached) {
+        notFollowed(NotFollowed::TypeNotReached);
+        return;
+    }
+    if (*isCached) {
+        walkUnionMember(executable, nullptr, "m_decoder");
+        return;
+    }
+    walkUnionMember(executable, nullptr, "m_unlinkedCodeBlockForCall");
+    walkUnionMember(executable, nullptr, "m_unlinkedCodeBlockForConstruct");
+}
+
+// CSSSelector::m_data: rareData with m_hasRareData set, else tagQName for a
+// Match::Tag selector, else value (CSSSelector::~CSSSelector).
+void ReachWalk::walkCSSSelector(const TargetValue& selector)
+{
+    walkMembers(selector, IsComplete::Yes, nullptr, ReadsOwnUnions::Yes);
+    auto hasRareData = integerField(selector, "m_hasRareData");
+    auto match = integerField(selector, "m_match");
+    auto* matchType = classBeside(selector.type(), "WebCore::CSSSelector::Match");
+    auto tag = matchType ? matchType->enumeratorValue("Tag") : std::nullopt;
+    if (!hasRareData || !match || !tag) {
+        notFollowed(NotFollowed::TypeNotReached);
+        return;
+    }
+    walkUnionMember(selector, "m_data", *hasRareData ? "rareData" : *match == *tag ? "tagQName" : "value");
+}
+
+// JSValue::u: a cell, as JSValue::isCell decodes it, reaches its allocation.
+// The walk reads every live cell, as its class, of its own.
+void ReachWalk::walkJSValue(const TargetValue& value)
+{
+    auto bits = m_snapshot.memory().ptr<EncodedJSValue>(value.address());
+    if (!bits || !*bits)
+        return;
+    JSValue decoded = JSValue::decode(*bits);
+    if (!decoded.isCell())
+        return;
+    Address cell { static_cast<uint64_t>(*bits) };
+    if (auto index = allocationOf(cell, 1))
+        markReached(*index, cell);
+}
+
+// HashTableValue::m_values: the member its accessors read for its m_attributes
+// (HashTableValue::builtinGenerator, function, accessorGetter, and so on).
+void ReachWalk::walkHashTableValue(const TargetValue& entry)
+{
+    walkMembers(entry, IsComplete::Yes, nullptr, ReadsOwnUnions::Yes);
+    auto attributes = integerField(entry, "m_attributes");
+    auto* attribute = classBeside(entry.type(), "JSC::PropertyAttribute");
+    if (!attributes || !attribute) {
+        notFollowed(NotFollowed::TypeNotReached);
+        return;
+    }
+    auto has = [&](std::string_view name) {
+        auto bit = attribute->enumeratorValue(name);
+        return bit && (*attributes & *bit);
+    };
+    const char* member = "getterSetter";
+    if (has("Builtin"))
+        member = has("Accessor") ? "builtinAccessor" : "builtinGenerator";
+    else if (has("Function"))
+        member = has("DOMJITFunction") ? "domJITFunction" : "nativeFunction";
+    else if (has("Accessor"))
+        member = "accessor";
+    else if (has("DOMJITAttribute"))
+        member = "domJITAttribute";
+    else if (has("ConstantInteger"))
+        member = "constant";
+    else if (has("CellProperty"))
+        member = "lazyCellProperty";
+    else if (has("ClassStructure"))
+        member = "lazyClassStructure";
+    else if (has("PropertyCallback"))
+        member = "lazyProperty";
+    walkUnionMember(entry, "m_values", member);
+}
+
+void ReachWalk::referenceCell(Address cell)
+{
+    if (auto index = allocationOf(cell, 1))
+        markReached(*index, cell);
+}
+
+// StructureID::decode: the start of the structure heap, plus the bits less StructureID::nukedStructureIDBit.
+void ReachWalk::walkStructureID(const TargetValue& structureID)
+{
+    auto bits = m_snapshot.memory().ptr<uint32_t>(structureID.address());
+    if (bits && (*bits & ~StructureID::nukedStructureIDBit))
+        referenceCell(Address { m_heap.m_startOfStructureHeap + (*bits & ~StructureID::nukedStructureIDBit) });
+}
+
+// JSFunction::m_executableOrRareData: its FunctionRareData, with JSFunction::rareDataTag, or else its executable.
+void ReachWalk::walkFunction(const TargetValue& function)
+{
+    walkMembers(function, IsComplete::No, "m_executableOrRareData");
+    constexpr uint64_t rareDataTag = 1; // JSFunction::rareDataTag.
+    auto bits = function.properField("m_executableOrRareData").integer();
+    if (bits && *bits)
+        referenceCell(Address { static_cast<uint64_t>(*bits) & ~rareDataTag });
+}
+
+// StructureChain::head(): m_vector's StructureIDs, in an auxiliary cell, up to the first zero.
+void ReachWalk::walkStructureChain(const TargetValue& chain)
+{
+    walkMembers(chain, IsComplete::Yes, "m_vector");
+    auto vector = rawPointer(chain.properField("m_vector"), "m_value");
+    const HeapWalk::Cell* cell = vector ? auxiliaryCellContaining(*vector) : nullptr;
+    if (!cell)
+        return;
+    if (auto index = allocationOf(cell->address, 1))
+        markReached(*index, *vector);
+    auto ids = m_snapshot.memory().span<uint32_t>(*vector, static_cast<size_t>(((cell->address + cell->size) - *vector) / sizeof(uint32_t)));
+    if (!ids)
+        return;
+    uint64_t count = 0;
+    for (uint32_t bits : std::span<const uint32_t> { ids }) {
+        if (!bits)
+            break;
+        ++count;
+        referenceCell(Address { m_heap.m_startOfStructureHeap + (bits & ~StructureID::nukedStructureIDBit) });
+    }
+    if (m_heap.m_structureIDClass)
+        typed(*vector, (count + 1) * sizeof(uint32_t), *m_heap.m_structureIDClass);
+}
+
+static constexpr unsigned compactPointerTupleBitsInPointer = 48; // CompactPointerTuple::maxNumberOfBitsInPointer.
+
+// CompactPointerTuple::pointer: the low bits of m_data, as the first template argument, a pointer type.
+void ReachWalk::walkCompactPointerTuple(const TargetValue& tuple)
+{
+    auto data = tuple.properField("m_data").integer();
+    const TargetType* pointerType = tuple.type().templateArgument(0);
+    auto* pointer = pointerType ? std::get_if<TargetType::Pointer>(&pointerType->layout()) : nullptr;
+    if (!data || !pointer) {
+        notFollowed(NotFollowed::TypeNotReached);
+        return;
+    }
+    uint64_t address = static_cast<uint64_t>(*data) & ((1ull << compactPointerTupleBitsInPointer) - 1);
+    if (address)
+        followPointer(Address { address }, pointer->pointee);
+}
+
+// PropertyCondition::u: prototype for the kinds hasPrototype() names, presence
+// for those hasOffset() names, and equivalence, a JSValue, for Equivalence.
+void ReachWalk::walkPropertyCondition(const TargetValue& condition)
+{
+    walkMembers(condition, IsComplete::Yes, nullptr, ReadsOwnUnions::Yes);
+    // PropertyCondition::Header is a CompactPointerTuple, whose type is in the bits above the pointer.
+    auto header = condition.properField("m_header").properField("m_data").integer();
+    auto* kindType = classBeside(condition.type(), "JSC::PropertyCondition::Kind");
+    if (!header || !kindType) {
+        notFollowed(NotFollowed::TypeNotReached);
+        return;
+    }
+    int64_t kind = static_cast<uint8_t>(static_cast<uint64_t>(*header) >> compactPointerTupleBitsInPointer);
+    auto is = [&](std::string_view name) {
+        auto value = kindType->enumeratorValue(name);
+        return value && *value == kind;
+    };
+    if (is("Absence") || is("AbsenceOfSetEffect") || is("AbsenceOfIndexedProperties") || is("HasPrototype"))
+        walkUnionMember(condition, "u", "prototype");
+    else if (is("Equivalence"))
+        walkUnionMember(condition, "u", "equivalence");
+}
+
+// CSSPrimitiveValue::m_value: calc for a CSSUnitType::Calc value (CSSPrimitiveValue::isCalculated), number otherwise.
+void ReachWalk::walkCSSPrimitiveValue(const TargetValue& value)
+{
+    walkMembers(value, IsComplete::Yes, nullptr, ReadsOwnUnions::Yes);
+    auto unitType = integerField(value, "m_primitiveUnitType");
+    auto* unitTypes = classBeside(value.type(), "WebCore::CSSUnitType");
+    auto calc = unitTypes ? unitTypes->enumeratorValue("Calc") : std::nullopt;
+    if (!unitType || !calc) {
+        notFollowed(NotFollowed::TypeNotReached);
+        return;
+    }
+    if (*unitType == *calc)
+        walkUnionMember(value, "m_value", "calc");
+}
+
+// The type of `name`, a data member or a static one, that `type` or one of its non-virtual bases declares.
+static const TargetType* memberType(const TargetType& type, const char* name, unsigned depth = 0)
+{
+    auto* klass = std::get_if<TargetType::Class>(&type.layout());
+    if (!klass || depth > 32)
+        return nullptr;
+    for (const TargetType::Field& field : klass->properFields) {
+        if (std::string_view { field.name.legacyCStringPointer() } == name)
+            return &field.type;
+    }
+    if (auto* staticType = type.staticFieldType(name))
+        return staticType;
+    for (const TargetType::Base& base : klass->bases) {
+        if (auto* found = memberType(base.type, name, depth + 1))
+            return found;
+    }
+    return nullptr;
+}
+
+// CSS::PrimitiveData::payload: calc when its index's storage is
+// indexStorageForCalc (PrimitiveDataIndex::isCalc), a number otherwise. That is
+// UnitTraits::count, which WebCore asserts is one more than the last enumerator
+// of its Raw's unit type: a member, or a static one for a type of one unit.
+void ReachWalk::walkCSSPrimitiveData(const TargetValue& data)
+{
+    walkMembers(data, IsComplete::Yes, nullptr, ReadsOwnUnions::Yes);
+    auto storage = data.properField("index").properField("storage").integer();
+    const TargetType* numeric = data.type().templateArgument(0);
+    const TargetType* raw = numeric ? numeric->templateArgument(0) : nullptr;
+    const TargetType* unit = raw ? memberType(*raw, "unit") : nullptr;
+    auto enumerators = unit ? unit->enumerators() : Vector<TargetType::Enumerator> { };
+    if (!storage || enumerators.isEmpty()) {
+        CORPSE_REPORT("The '%s' at 0x%llx has no index storage or unit type this walk knows", data.type().name().legacyCStringPointer(), forReport(data.address()));
+        notFollowed(NotFollowed::TypeNotReached);
+        return;
+    }
+    int64_t calc = std::ranges::max(enumerators, { }, &TargetType::Enumerator::value).value + 1;
+    if (*storage == calc)
+        walkUnionMember(data, "payload", "calc");
+}
+
+// The subclass a TypeFieldHierarchy's type field names, as its visitDerived
+// dispatches on it. The object's members, those of its base included, are read
+// as that subclass's.
+void ReachWalk::walkTypeField(const TargetValue& value)
+{
+    walkMembers(value, IsComplete::No);
+    auto typeName = value.type().name();
+    std::string_view name { typeName.legacyCStringPointer() };
+    auto hierarchy = std::ranges::find_if(typeFieldHierarchyTable, [&](const HeapWalk::TypeFieldHierarchy& candidate) { return name == candidate.base; });
+    auto typeField = integerField(value, hierarchy->typeField);
+    if (!typeField) {
+        notFollowed(NotFollowed::TypeNotReached);
+        return;
+    }
+    const TargetType* subclass = m_typeFieldSubclasses.ensure({ &value.type(), *typeField }, [&]() -> const TargetType* {
+        UTF8CString enumeratorName { *typeField ? "true"_s : "false"_s };
+        if (hierarchy->enumeration) {
+            auto* enumeration = classBeside(value.type(), hierarchy->enumeration);
+            auto enumerators = enumeration ? enumeration->enumerators() : Vector<TargetType::Enumerator> { };
+            auto enumerator = std::ranges::find(enumerators, *typeField, &TargetType::Enumerator::value);
+            if (enumerator == enumerators.end()) {
+                CORPSE_REPORT("No enumerator of '%s' has the value %lld", hierarchy->enumeration, static_cast<long long>(*typeField));
+                return nullptr;
+            }
+            enumeratorName = enumerator->name;
+        }
+        std::string_view name { enumeratorName.legacyCStringPointer() };
+        auto entry = std::ranges::find_if(hierarchy->subclasses, [&](const HeapWalk::TypeFieldSubclass& candidate) { return name == candidate.enumerator; });
+        if (entry == hierarchy->subclasses.end() || !entry->name) {
+            CORPSE_REPORT("'%s' of '%s' names no subclass this walk knows", enumeratorName.legacyCStringPointer(), hierarchy->base);
+            return nullptr;
+        }
+        auto* found = classBeside(value.type(), entry->name);
+        if (!found)
+            CORPSE_REPORT("'%s', the subclass of '%s' for '%s', is in no image", entry->name, hierarchy->base, enumeratorName.legacyCStringPointer());
+        return found;
+    }).iterator->value;
+    if (!subclass) {
+        notFollowed(NotFollowed::TypeNotReached);
+        return;
+    }
+    if (auto index = allocationOf(value.address(), 1)) {
+        const HeapWalk::Allocation& allocation = m_allocations[*index];
+        if (minimumObjectSize(*subclass) > (allocation.address + allocation.size) - value.address()) {
+            notFollowed(NotFollowed::DoesNotFit);
+            m_overruns.append(makeString("the "_s, subclass->byteSize(), "-byte '"_s, subclass->name(), "' its type field names at 0x"_s, hex(value.address().toTargetVMAddress()),
+                ", reached through "_s, context(), ", runs past the end of its "_s, allocation.size, "-byte allocation"_s));
+            return;
+        }
+    }
+    enqueue(TargetValue::at(m_snapshot, value.address(), *subclass), IsObject::Yes);
+}
+
 void ReachWalk::summarize(const Vector<HeapWalk::Allocation>& excluded, size_t listCount, HeapWalk::Reach& result)
 {
     result.notFollowed = m_notFollowed;
@@ -2219,12 +2995,19 @@ void ReachWalk::summarize(const Vector<HeapWalk::Allocation>& excluded, size_t l
     result.globalVariables = m_globalVariables;
     result.untypedDataSymbols = m_untypedDataSymbols;
     result.overruns = WTF::move(m_overruns);
-    result.clippedArrays = WTF::move(m_clippedArrays);
+    result.unreadableArrays = WTF::move(m_unreadableArrays);
+    for (auto& unread : m_unreadUnions.values()) {
+        String holder = unread.field ? makeString(unread.owner->name(), "::"_s, unread.field->name)
+            : unread.owner ? makeString("a value of its own, in a '"_s, unread.owner->name(), '\'') : "a value of its own"_s;
+        result.unreadUnions.append({ makeString('\'', unread.type->name(), "' in "_s, holder), unread.count });
+    }
+    std::ranges::sort(result.unreadUnions, std::ranges::greater { }, &std::pair<String, uint64_t>::second);
     for (auto& [klass, bytes] : m_bytesBeyondClass)
         result.cellBytesBeyondClassByClass.append({ makeString(klass->name()), bytes });
     std::ranges::sort(result.cellBytesBeyondClassByClass, std::ranges::greater { }, &std::pair<String, uint64_t>::second);
     result.cellBytesBeyondClassByClass.shrink(std::min<size_t>(result.cellBytesBeyondClassByClass.size(), listCount));
     result.isReached = m_reached;
+    result.typeAtStart = m_typeAtStart;
 
     // The typed bytes, each once: an object read as two types, or a field read inside its object, counts once.
     std::ranges::sort(m_typed, { }, &Range::begin);
@@ -2402,7 +3185,9 @@ void ReachWalk::explainMisses(const Vector<HeapWalk::Allocation>& excluded, cons
     // word is first looked up among the misses alone.
     auto missedAllocations = missed.span();
     auto missedIndexOf = [&](uint64_t value) -> std::optional<size_t> {
-        auto after = std::ranges::upper_bound(missedAllocations, value, { }, [&](size_t index) { return m_allocations[index].address.toTargetVMAddress(); });
+        auto after = std::ranges::upper_bound(missedAllocations, value, { }, [&](size_t index) {
+            return m_allocations[index].address.toTargetVMAddress();
+        });
         if (after == missedAllocations.begin())
             return std::nullopt;
         const HeapWalk::Allocation& allocation = m_allocations[*(after - 1)];
@@ -2487,20 +3272,223 @@ void ReachWalk::explainMisses(const Vector<HeapWalk::Allocation>& excluded, cons
     std::ranges::sort(result.misses, std::ranges::greater { }, &HeapWalk::Miss::bytesHeld);
 }
 
-HeapWalk::Reach HeapWalk::reach(const Vector<Allocation>& allocations, const Vector<Allocation>& excluded, const Vector<Allocation>& notReferrers, size_t listCount) const
+#if OS(DARWIN)
+auto HeapWalk::libpasPages(const LibpasRecords& records) const -> std::optional<LibpasPages>
+{
+    if (!isValid())
+        return std::nullopt;
+    // Each page's share of ranges sorted by address, for pages visited in address order.
+    struct Cursor {
+        const Vector<Allocation>& ranges;
+        size_t index { 0 };
+        uint64_t overlap(uint64_t begin, uint64_t end)
+        {
+            while (index < ranges.size() && (ranges[index].address + ranges[index].size).toTargetVMAddress() <= begin)
+                ++index;
+            uint64_t bytes = 0;
+            for (size_t i = index; i < ranges.size() && ranges[i].address.toTargetVMAddress() < end; ++i) {
+                uint64_t start = std::max(begin, ranges[i].address.toTargetVMAddress());
+                uint64_t stop = std::min(end, (ranges[i].address + ranges[i].size).toTargetVMAddress());
+                if (stop > start)
+                    bytes += stop - start;
+            }
+            return bytes;
+        }
+    };
+    Cursor objects { records.objects };
+    Cursor payload { records.payload };
+    Cursor meta { records.meta };
+    LibpasPages result;
+    uint64_t pageSize = vm_kernel_page_size;
+    uint64_t objectBytesInPages = 0;
+    uint64_t payloadBytes = 0;
+    for (const Region& region : snapshot().regions()) {
+        if (region.userTag() != VM_MEMORY_TCMALLOC)
+            continue;
+        const Vector<uint16_t>* dispositions = snapshot().pageDispositions(region);
+        if (!dispositions)
+            continue;
+        for (size_t index = 0; index < dispositions->size(); ++index) {
+            uint16_t disposition = (*dispositions)[index];
+            bool isCompressed = disposition & VM_PAGE_QUERY_PAGE_PAGED_OUT;
+            if (!(disposition & VM_PAGE_QUERY_PAGE_DIRTY) && !isCompressed)
+                continue;
+            uint64_t begin = region.base().toTargetVMAddress() + index * pageSize;
+            uint64_t pageObjectBytes = objects.overlap(begin, begin + pageSize);
+            uint64_t pagePayloadBytes = payload.overlap(begin, begin + pageSize);
+            uint64_t pageMetaBytes = meta.overlap(begin, begin + pageSize);
+            if (disposition & VM_PAGE_QUERY_PAGE_REUSABLE) {
+                result.reusableBytes += pageSize;
+                continue;
+            }
+            result.footprintBytes += pageSize;
+            result.compressedBytes += isCompressed ? pageSize : 0;
+            if (pagePayloadBytes + pageMetaBytes < pageSize)
+                result.unrecordedPages.append(Address { begin });
+            objectBytesInPages += pageObjectBytes;
+            payloadBytes += pagePayloadBytes;
+            result.metaBytes += pageMetaBytes;
+        }
+    }
+    uint64_t allObjectBytes = 0;
+    for (const Allocation& object : records.objects)
+        allObjectBytes += object.size;
+    result.objectBytes = objectBytesInPages;
+    result.objectBytesElsewhere = allObjectBytes - std::min(allObjectBytes, objectBytesInPages);
+    result.freePayloadBytes = payloadBytes - std::min(payloadBytes, objectBytesInPages);
+    result.unrecordedBytes = result.footprintBytes - std::min(result.footprintBytes, payloadBytes + result.metaBytes);
+    return result;
+}
+#endif
+
+auto HeapWalk::heapDump(const Vector<Allocation>& allocations, const Reach& reach, const Vector<Reference>& references) const -> HeapDump
+{
+    HeapDump dump;
+    if (!isValid())
+        return dump;
+    dump.nodes.append({ { }, 0, "<root>"_s, HeapDump::Kind::Root });
+    struct Range {
+        uint64_t begin;
+        uint64_t end;
+        uint32_t node;
+    };
+    Vector<Range> cells;
+    Vector<uint64_t> liveBytes;
+    liveBytes.fill(0, allocations.size());
+    auto allocationIndex = [&](Address address) -> std::optional<size_t> {
+        auto span = allocations.span();
+        auto after = std::ranges::upper_bound(span, address, { }, &Allocation::address);
+        if (after == span.begin() || address - (after - 1)->address >= (after - 1)->size)
+            return std::nullopt;
+        return (after - 1) - span.begin();
+    };
+    forEachLiveCell([&](const Cell& cell) {
+        const TargetType* klass = isJSCellKind(cell.kind) ? cellClass(cell.address) : nullptr;
+        String name = klass ? makeString(klass->name()) : isJSCellKind(cell.kind) ? "(JS cell)"_s : "(auxiliary cell)"_s;
+        cells.append({ cell.address.toTargetVMAddress(), (cell.address + cell.size).toTargetVMAddress(), static_cast<uint32_t>(dump.nodes.size()) });
+        dump.nodes.append({ cell.address, cell.size, WTF::move(name), HeapDump::Kind::Cell });
+        if (auto index = allocationIndex(cell.address))
+            liveBytes[*index] += cell.size;
+        return IterationStatus::Continue;
+    });
+    std::ranges::sort(cells, { }, &Range::begin);
+
+    HashMap<uint64_t, size_t> missIndex;
+    for (size_t index = 0; index < reach.misses.size(); ++index)
+        missIndex.add(reach.misses[index].allocation.address.toTargetVMAddress(), index);
+    constexpr std::array<ASCIILiteral, numberOfMissCauses> causes {
+        "held by a reached allocation"_s, "held by static data"_s, "held by other memory"_s, "held by other misses"_s, "held by nothing"_s,
+    };
+    Vector<uint32_t> allocationNodes;
+    allocationNodes.fill(0, allocations.size());
+    for (size_t index = 0; index < allocations.size(); ++index) {
+        const Allocation& allocation = allocations[index];
+        bool isReached = index < reach.isReached.size() && reach.isReached[index];
+        const TargetType* type = index < reach.typeAtStart.size() ? reach.typeAtStart[index] : nullptr;
+        // A MarkedBlock or a precise allocation is its cells, which are nodes of their own, and the rest.
+        String name;
+        if (liveBytes[index])
+            name = makeString(type ? makeString(type->name()) : "(cells)"_s, " less its cells"_s);
+        else if (!isReached) {
+            auto miss = missIndex.find(allocation.address.toTargetVMAddress());
+            name = makeString("(missed, "_s, miss == missIndex.end() ? "unexplained"_s : causes[static_cast<size_t>(reach.misses[miss->value].cause)], ')');
+        } else
+            name = type ? makeString(type->name()) : "(untyped)"_s;
+        allocationNodes[index] = dump.nodes.size();
+        dump.nodes.append({ allocation.address, allocation.size - std::min(allocation.size, liveBytes[index]), WTF::move(name),
+            isReached || liveBytes[index] ? HeapDump::Kind::Allocation : HeapDump::Kind::Missed, !!liveBytes[index] });
+    }
+
+    HashMap<const char*, uint32_t> rootNodes;
+    auto nodeOf = [&](Address address, const char* root) -> std::optional<uint32_t> {
+        uint64_t value = address.toTargetVMAddress();
+        auto cellSpan = cells.span();
+        auto after = std::ranges::upper_bound(cellSpan, value, { }, &Range::begin);
+        if (after != cellSpan.begin() && value < (after - 1)->end)
+            return (after - 1)->node;
+        if (auto index = allocationIndex(address))
+            return allocationNodes[*index];
+        if (!root)
+            return std::nullopt;
+        return rootNodes.ensure(root, [&] {
+            dump.nodes.append({ { }, 0, makeString('<', String::fromLatin1(root), '>'), HeapDump::Kind::Root });
+            dump.edges.append({ 0, static_cast<uint32_t>(dump.nodes.size() - 1) });
+            return static_cast<uint32_t>(dump.nodes.size() - 1);
+        }).iterator->value;
+    };
+    HashSet<uint64_t, IntHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>> seen;
+    for (const Reference& reference : references) {
+        auto to = nodeOf(reference.to, nullptr);
+        if (!to)
+            continue;
+        auto from = reference.from ? nodeOf(reference.from, reference.root) : nodeOf({ }, reference.root);
+        if (!from || *from == *to)
+            continue;
+        if (seen.add((static_cast<uint64_t>(*from) << 32) | *to).isNewEntry)
+            dump.edges.append({ *from, *to });
+    }
+    std::ranges::stable_sort(dump.edges, { }, &std::pair<uint32_t, uint32_t>::first);
+    return dump;
+}
+
+// The JSON of a GCDebugging heap snapshot, as HeapSnapshotBuilder::json writes it.
+String HeapWalk::HeapDump::json() const
+{
+    StringBuilder out;
+    HashMap<String, unsigned> classNames;
+    Vector<String> orderedClassNames;
+    auto classNameIndex = [&](const String& name) {
+        return classNames.ensure(name, [&] {
+            orderedClassNames.append(name);
+            return static_cast<unsigned>(orderedClassNames.size() - 1);
+        }).iterator->value;
+    };
+    out.append("{\"version\":3,\"type\":\"GCDebugging\",\"nodes\":["_s);
+    for (size_t index = 0; index < nodes.size(); ++index) {
+        const Node& node = nodes[index];
+        // <nodeId>, <sizeInBytes>, <nodeClassNameIndex>, <flags>, <labelIndex>, <cellAddress>, <wrappedAddress>.
+        // Web Inspector finds no path to a root through an internal node (flag 1).
+        unsigned flags = node.kind == Kind::Missed || (node.kind == Kind::Allocation && node.isBlock) ? 1 : 0;
+        out.append(index ? ","_s : ""_s, index, ',', node.size, ',', classNameIndex(node.className), ',', flags, ",0,\"0x"_s,
+            hex(node.address.toTargetVMAddress(), Lowercase), "\",\"0x0\""_s);
+    }
+    out.append("],\"nodeClassNames\":["_s);
+    for (size_t index = 0; index < orderedClassNames.size(); ++index)
+        out.append(index ? ","_s : ""_s, '"', orderedClassNames[index], '"');
+    out.append("],\"edges\":["_s);
+    for (size_t index = 0; index < edges.size(); ++index)
+        out.append(index ? ","_s : ""_s, edges[index].first, ',', edges[index].second, ",0,0"_s);
+    out.append("],\"edgeTypes\":[\"Internal\",\"Property\",\"Index\",\"Variable\"],\"edgeNames\":[],\"roots\":["_s);
+    // <nodeId>, <rootReasonIndex>, <reachabilityReasonIndex>; each root's reason is its name, a label.
+    Vector<String> labels { ""_s };
+    for (size_t index = 1; index < nodes.size(); ++index) {
+        if (nodes[index].kind != Kind::Root)
+            continue;
+        out.append(labels.size() > 1 ? ","_s : ""_s, index, ',', labels.size(), ",0"_s);
+        labels.append(nodes[index].className);
+    }
+    out.append("],\"labels\":["_s);
+    for (size_t index = 0; index < labels.size(); ++index)
+        out.append(index ? ","_s : ""_s, '"', labels[index], '"');
+    out.append("]}"_s);
+    return out.toString();
+}
+
+auto HeapWalk::typeFieldHierarchies() -> std::span<const TypeFieldHierarchy>
+{
+    return typeFieldHierarchyTable;
+}
+
+HeapWalk::Reach HeapWalk::reach(const Vector<Allocation>& allocations, const Vector<Allocation>& excluded, const Vector<Allocation>& notReferrers, size_t listCount, Vector<Reference>* references) const
 {
     Reach result;
     if (!isValid())
         return result;
     CORPSE_DIAGNOSTICS(diagnostics, "measuring the reach of the walk of the heap at 0x%llx", forReport(m_vm.address()));
-    // The walk reads many small values, many to a page.
-    Memory& memory = snapshot().memory();
-    memory.keepRecentMappings(4096);
-    ReachWalk walk(*this, allocations);
+    ReachWalk walk(*this, allocations, references);
     walk.run();
     walk.summarize(excluded, listCount, result);
     walk.explainMisses(excluded, notReferrers, result);
-    memory.keepRecentMappings(0);
     return result;
 }
 
@@ -2513,7 +3501,7 @@ namespace {
 struct LibpasEnumeration {
     Memory& memory;
     Vector<uint8_t> copy;
-    Vector<HeapWalk::Allocation> objects;
+    HeapWalk::LibpasRecords records;
     bool failed { false };
 };
 
@@ -2529,10 +3517,54 @@ void* readSnapshotMemory(pas_enumerator*, void* address, size_t size, void* argu
     return enumeration.copy.mutableSpan().data();
 }
 
-void recordLibpasObject(pas_enumerator*, void* address, size_t size, pas_enumerator_record_kind kind, void* argument)
+void recordLibpasRange(pas_enumerator*, void* address, size_t size, pas_enumerator_record_kind kind, void* argument)
 {
-    if (kind == pas_enumerator_object_record)
-        static_cast<LibpasEnumeration*>(argument)->objects.append({ Address { address }, size });
+    auto& records = static_cast<LibpasEnumeration*>(argument)->records;
+    HeapWalk::Allocation range { Address { address }, size };
+    switch (kind) {
+    case pas_enumerator_meta_record:
+        records.meta.append(range);
+        return;
+    case pas_enumerator_payload_record:
+        records.payload.append(range);
+        return;
+    case pas_enumerator_object_record:
+        records.objects.append(range);
+        return;
+    }
+}
+
+std::optional<HeapWalk::LibpasRecords> enumerateLibpas(Snapshot& snapshot, SnapshotDebugInfo& debugInfo, Address javaScriptCoreImage, bool allKinds)
+{
+    CORPSE_DIAGNOSTICS(diagnostics, "enumerating libpas's heap from its root for libmalloc's enumeration");
+    // libpas is linked into JavaScriptCore, so this process's libpas is the
+    // target's, with the root's layout its enumerator reads.
+    auto rootSymbol = debugInfo.symbolAddress(javaScriptCoreImage, "pas_root_for_libmalloc_enumeration");
+    auto root = rootSymbol ? snapshot.memory().ptr<uint64_t>(*rootSymbol) : Memory::Ptr<uint64_t> { };
+    if (!root || !*root) {
+        CORPSE_REPORT("JavaScriptCore's image has no root for libmalloc's enumeration of libpas");
+        return std::nullopt;
+    }
+    auto magic = snapshot.memory().ptr<uint64_t>(Address { *root });
+    if (!magic || *magic != PAS_ROOT_MAGIC) {
+        CORPSE_REPORT("The libpas root at 0x%llx is not one", static_cast<unsigned long long>(*root));
+        return std::nullopt;
+    }
+    LibpasEnumeration enumeration { snapshot.memory(), { }, { } };
+    pas_enumerator* enumerator = pas_enumerator_create(std::bit_cast<pas_root*>(static_cast<uintptr_t>(*root)), readSnapshotMemory, &enumeration, recordLibpasRange, &enumeration,
+        allKinds ? pas_enumerator_record_meta_records : pas_enumerator_do_not_record_meta_records,
+        allKinds ? pas_enumerator_record_payload_records : pas_enumerator_do_not_record_payload_records,
+        pas_enumerator_record_object_records);
+    bool enumerated = enumerator && pas_enumerator_enumerate_all(enumerator);
+    if (enumerator)
+        pas_enumerator_destroy(enumerator);
+    if (!enumerated || enumeration.failed) {
+        CORPSE_REPORT("libpas could not enumerate the heap of the root at 0x%llx", static_cast<unsigned long long>(*root));
+        return std::nullopt;
+    }
+    for (auto* ranges : { &enumeration.records.meta, &enumeration.records.payload, &enumeration.records.objects })
+        std::ranges::sort(*ranges, { }, &HeapWalk::Allocation::address);
+    return WTF::move(enumeration.records);
 }
 
 } // anonymous namespace
@@ -2541,37 +3573,28 @@ auto HeapWalk::libpasAllocations() const -> std::optional<Vector<Allocation>>
 {
     if (!isValid())
         return std::nullopt;
-    CORPSE_DIAGNOSTICS(diagnostics, "enumerating libpas's heap from its root for libmalloc's enumeration");
-    // libpas is linked into JavaScriptCore, so this process's libpas is the
-    // target's, with the root's layout its enumerator reads.
-    auto rootSymbol = m_debugInfo->symbolAddress(m_javaScriptCoreImage, "pas_root_for_libmalloc_enumeration");
-    auto root = rootSymbol ? snapshot().memory().ptr<uint64_t>(*rootSymbol) : Memory::Ptr<uint64_t> { };
-    if (!root || !*root) {
-        CORPSE_REPORT("JavaScriptCore's image has no root for libmalloc's enumeration of libpas");
+    auto records = enumerateLibpas(snapshot(), *m_debugInfo, m_javaScriptCoreImage, false);
+    if (!records)
         return std::nullopt;
-    }
-    auto magic = snapshot().memory().ptr<uint64_t>(Address { *root });
-    if (!magic || *magic != PAS_ROOT_MAGIC) {
-        CORPSE_REPORT("The libpas root at 0x%llx is not one", static_cast<unsigned long long>(*root));
+    return WTF::move(records->objects);
+}
+
+auto HeapWalk::libpasRecords() const -> std::optional<LibpasRecords>
+{
+    if (!isValid())
         return std::nullopt;
-    }
-    LibpasEnumeration enumeration { snapshot().memory(), { }, { } };
-    pas_enumerator* enumerator = pas_enumerator_create(std::bit_cast<pas_root*>(static_cast<uintptr_t>(*root)), readSnapshotMemory, &enumeration, recordLibpasObject, &enumeration,
-        pas_enumerator_do_not_record_meta_records, pas_enumerator_do_not_record_payload_records, pas_enumerator_record_object_records);
-    bool enumerated = enumerator && pas_enumerator_enumerate_all(enumerator);
-    if (enumerator)
-        pas_enumerator_destroy(enumerator);
-    if (!enumerated || enumeration.failed) {
-        CORPSE_REPORT("libpas could not enumerate the heap of the root at 0x%llx", static_cast<unsigned long long>(*root));
-        return std::nullopt;
-    }
-    std::ranges::sort(enumeration.objects, { }, &Allocation::address);
-    return WTF::move(enumeration.objects);
+    return enumerateLibpas(snapshot(), *m_debugInfo, m_javaScriptCoreImage, true);
 }
 
 #else // ENABLE(MYA_HEAP)
 
 auto HeapWalk::libpasAllocations() const -> std::optional<Vector<Allocation>>
+{
+    CORPSE_REPORT("This build does not export libpas's enumerator: it is not an ENABLE(MYA_HEAP) build");
+    return std::nullopt;
+}
+
+auto HeapWalk::libpasRecords() const -> std::optional<LibpasRecords>
 {
     CORPSE_REPORT("This build does not export libpas's enumerator: it is not an ENABLE(MYA_HEAP) build");
     return std::nullopt;

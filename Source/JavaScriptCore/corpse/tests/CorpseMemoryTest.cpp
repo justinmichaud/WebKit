@@ -78,15 +78,22 @@ uint64_t patternFor(unsigned page) { return patternBase | page; }
 constexpr uint64_t tailPatternBase = 0x7A11E00000000000ull;
 uint64_t tailPatternFor(unsigned page) { return tailPatternBase | page; }
 
+// Memory at the start of a mapping window, so that every page of `size` bytes is in one.
+static bool allocateAtWindowStart(mach_vm_address_t& base, mach_vm_size_t size)
+{
+    return mach_vm_map(mach_task_self(), &base, size, Memory::mappingWindowSize - 1, VM_FLAGS_ANYWHERE, MEMORY_OBJECT_NULL, 0, FALSE,
+        VM_PROT_DEFAULT, VM_PROT_ALL, VM_INHERIT_DEFAULT) == KERN_SUCCESS;
+}
+
 // Each page holds one pattern at its first word and another at its last, so a read can
-// be attributed to its page and contiguity across a boundary can be checked.
+// be attributed to its page and contiguity across a boundary can be checked. Its window
+// holds its hole, so reads in it map their own pages.
 class Arena {
 public:
     bool build()
     {
         m_pageSize = Memory::pageSize();
-        kern_return_t kr = mach_vm_allocate(mach_task_self(), &m_base, arenaPageCount * m_pageSize, VM_FLAGS_ANYWHERE);
-        if (kr != KERN_SUCCESS)
+        if (!allocateAtWindowStart(m_base, arenaPageCount * m_pageSize))
             return false;
 
         for (unsigned page = 0; page < arenaPageCount; ++page) {
@@ -125,6 +132,26 @@ private:
     size_t m_pageSize { 0 };
 };
 
+// Two whole mapping windows of readable memory, with a pattern at the start and the end of each.
+class WindowArena {
+public:
+    bool build()
+    {
+        if (!allocateAtWindowStart(m_base, 2 * Memory::mappingWindowSize))
+            return false;
+        for (unsigned window = 0; window < 2; ++window) {
+            *reinterpret_cast<uint64_t*>(m_base + window * Memory::mappingWindowSize) = patternFor(window);
+            *reinterpret_cast<uint64_t*>(m_base + (window + 1) * Memory::mappingWindowSize - sizeof(uint64_t)) = tailPatternFor(window);
+        }
+        return true;
+    }
+
+    Address corpseAddressOf(unsigned window) const { return Address(m_base + window * Memory::mappingWindowSize); }
+
+private:
+    mach_vm_address_t m_base { 0 };
+};
+
 // Takes a std::span, so that handing a Memory::Span straight to it is what checks a
 // handle stands in for one.
 uint64_t firstWordOf(std::span<const uint8_t> bytes)
@@ -160,11 +187,13 @@ void testMemory()
         return;
 
     Arena arena;
-    if (!arena.build()) {
-        TEST_ASSERT(false, "the test arena could be built");
+    WindowArena windows;
+    if (!arena.build() || !windows.build()) {
+        TEST_ASSERT(false, "the test arenas could be built");
         return;
     }
     size_t pageSize = arena.pageSize();
+    size_t windowPages = Memory::mappingWindowSize / pageSize;
 
     // The corpse is taken after the arena is laid out, so it holds the same layout at
     // the same addresses.
@@ -180,6 +209,58 @@ void testMemory()
     }
     Memory& memory = snapshot.memory();
     TEST_ASSERT_EQ(memory.regionCount(), 0uz, "a new Memory has nothing mapped");
+
+    {
+        // A read maps its whole window, which stays mapped for the reads after it.
+        const void* windowBase = nullptr;
+        {
+            auto word = memory.ptr<uint64_t>(windows.corpseAddressOf(0) + 64);
+            TEST_ASSERT(word.isValid(), "a word in a readable window maps");
+            TEST_ASSERT_EQ(memory.regionCount(), 1uz, "as one region");
+            TEST_ASSERT_EQ(memory.mappedPageCount(), windowPages, "covering its whole window");
+            windowBase = word.get() - 64 / sizeof(uint64_t);
+        }
+        TEST_ASSERT_EQ(memory.regionCount(), 1uz, "the window stays mapped after its last reader");
+        TEST_ASSERT(isMappedLocally(windowBase), "and its pages stay present");
+        {
+            auto first = memory.ptr<uint64_t>(windows.corpseAddressOf(0));
+            auto last = memory.ptr<uint64_t>(windows.corpseAddressOf(1) - sizeof(uint64_t));
+            TEST_ASSERT(first.get() == windowBase, "a later read in the window is served from it");
+            TEST_ASSERT_HEX_EQ(*first, patternFor(0), "and reads its start");
+            TEST_ASSERT_HEX_EQ(*last, tailPatternFor(0), "and its end");
+            TEST_ASSERT_EQ(memory.regionCount(), 1uz, "with no region of their own");
+        }
+        {
+            auto words = memory.span<uint64_t>(windows.corpseAddressOf(1) - sizeof(uint64_t), 2);
+            TEST_ASSERT(words.isValid(), "a range across two windows maps");
+            TEST_ASSERT_EQ(memory.mappedPageCount(), windowPages + 2, "as its own two pages");
+            TEST_ASSERT_HEX_EQ(words[0], tailPatternFor(0), "the end of the first window");
+            TEST_ASSERT_HEX_EQ(words[1], patternFor(1), "next to the start of the second");
+        }
+        auto inSecond = memory.ptr<uint64_t>(windows.corpseAddressOf(1));
+        TEST_ASSERT_EQ(memory.regionCount(), 3uz, "the second window is a region of its own");
+    }
+    {
+        // The bound on what is kept: keeping one Region drops the others no reader holds.
+        memory.keepRecentMappings(1);
+        TEST_ASSERT_EQ(memory.regionCount(), 0uz, "kept Regions no reader holds are released");
+        const void* firstWindow = nullptr;
+        {
+            auto word = memory.ptr<uint64_t>(windows.corpseAddressOf(0));
+            firstWindow = word.get();
+        }
+        TEST_ASSERT_EQ(memory.regionCount(), 1uz, "the one kept is mapped");
+        {
+            auto word = memory.ptr<uint64_t>(windows.corpseAddressOf(1));
+        }
+        TEST_ASSERT_EQ(memory.regionCount(), 1uz, "a second window takes its place");
+        TEST_ASSERT(!isMappedLocally(firstWindow), "and the first is unmapped");
+    }
+
+    // With nothing kept, each Region is released with its last reader, and the reads in the
+    // arena's window, which holds its hole, map only their own pages.
+    memory.keepRecentMappings(0);
+    TEST_ASSERT_EQ(memory.regionCount(), 0uz, "keeping nothing releases what was kept");
 
     {
         auto word = memory.ptr<uint64_t>(arena.corpseAddressOf(Readable0));
@@ -343,6 +424,8 @@ void testMemory()
         auto span = memory.span<uint8_t>(arena.corpseAddressOf(NoAccess), sizeof(uint64_t));
         TEST_ASSERT(!span.isValid(), "an inaccessible page does not map");
         TEST_ASSERT_EQ(span.error(), Memory::Error::NotReadable, "and says it denies read access");
+        auto again = memory.span<uint8_t>(arena.corpseAddressOf(NoAccess) + 64, sizeof(uint64_t));
+        TEST_ASSERT_EQ(again.error(), Memory::Error::NotReadable, "a page that did not map is remembered with its error");
     }
     {
         auto span = memory.span<uint8_t>(arena.corpseAddressOf(Readable0), 0);

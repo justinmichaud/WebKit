@@ -53,6 +53,10 @@
 #include <sys/types.h>
 #include <unistd.h>
 #include <vector>
+#if OS(DARWIN)
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#endif
 #include <wtf/ASCIICType.h>
 #include <wtf/Assertions.h>
 #include <wtf/CheckedArithmetic.h>
@@ -61,9 +65,11 @@
 #include <wtf/MonotonicTime.h>
 #include <wtf/Ref.h>
 #include <wtf/RefPtr.h>
+#include <wtf/SafeStrerror.h>
 #include <wtf/StdLibExtras.h>
 #include <wtf/Vector.h>
 #include <wtf/text/CString.h>
+#include <wtf/text/MakeString.h>
 #include <wtf/text/StringBuilder.h>
 
 #if HAVE(READLINE)
@@ -221,6 +227,10 @@ private:
         fputs("  snapshot (sn, snap) ...   Capture and manage snapshots\n", out);
         fputs("  thread (th) ...           Inspect the threads in a snapshot\n", out);
         fputs("  heap [<vm>]               Walk the JS heap of the VM at <vm>, or of WebCore's main VM\n", out);
+        fputs("  heapdump <file> [<vm>]    Write the heap as a GCDebugging heap snapshot Web Inspector reads\n", out);
+#if OS(DARWIN)
+        fputs("  memory [<vm>]             Account for the target's footprint by VM tag, and for libpas's pages\n", out);
+#endif
         fputs("  p[/x] &<symbol>           Print a symbol's address, /x for hex\n", out);
         fputs("  history (hi, hist) ...    Show and manage the command history\n", out);
         fputs("  help [<command>]          Show this help, or help for <command>\n", out);
@@ -689,22 +699,18 @@ private:
     // the VM at the hex address <vm>, or from WebCore's g_commonVMOrNull, and
     // reports how much of libpas's heap the walk reaches and reads as a type,
     // and what holds what it misses.
-    void handleHeap(Lexer lex)
+    // The VM at the address `lex` names, or WebCore's main thread VM, or else
+    // the VM JavaScriptCore last entered; and JavaScriptCore's image.
+    bool findHeap(Snapshot& snapshotRef, Lexer& lex, Address& vm, Address& javaScriptCore)
     {
-        using JSC::Corpse::HeapWalk;
-        Snapshot* snapshot = snapshotById(m_currentSnapshot);
-        if (!snapshot) {
-            fputs("No snapshot in use. Capture one with `snapshot`, or select one with `snapshot <n>`.\n", stderr);
-            return;
-        }
-        Address vm;
+        Snapshot* snapshot = &snapshotRef;
         if (!lex.atEnd()) {
             std::string token { lex.nextToken() };
             char* end = nullptr;
             unsigned long long value = strtoull(token.c_str(), &end, 16);
             if (!value || *end || !lex.atEnd()) {
                 fputs("Usage: heap [<vm address, in hex>]\n", stderr);
-                return;
+                return false;
             }
             vm = Address { static_cast<uint64_t>(value) };
         } else {
@@ -719,10 +725,9 @@ private:
             }
             if (!vm) {
                 fputs("mya: No VM in this snapshot; name a VM's address\n", stderr);
-                return;
+                return false;
             }
         }
-        Address javaScriptCore;
         for (const JSC::Corpse::Image& image : snapshot->images()) {
             std::string_view path { image.path().legacyCStringPointer() };
             if (path.ends_with("/JavaScriptCore") || path.ends_with("/libJavaScriptCore.so") || path.find("/libjavascriptcore") != std::string_view::npos)
@@ -730,13 +735,221 @@ private:
         }
         if (!javaScriptCore) {
             fputs("mya: JavaScriptCore is not among the snapshot's images\n", stderr);
+            return false;
+        }
+        return true;
+    }
+
+#if OS(DARWIN)
+    static String vmTagName(unsigned tag)
+    {
+        switch (tag) {
+        case 0: return "untagged"_s;
+        case VM_MEMORY_MALLOC: return "malloc"_s;
+        case VM_MEMORY_MALLOC_SMALL: return "malloc small"_s;
+        case VM_MEMORY_MALLOC_LARGE: return "malloc large"_s;
+        case VM_MEMORY_MALLOC_HUGE: return "malloc huge"_s;
+        case VM_MEMORY_MALLOC_TINY: return "malloc tiny"_s;
+        case VM_MEMORY_MALLOC_NANO: return "malloc nano"_s;
+        case VM_MEMORY_MALLOC_MEDIUM: return "malloc medium"_s;
+        case VM_MEMORY_MALLOC_LARGE_REUSABLE: return "malloc large reusable"_s;
+        case VM_MEMORY_MALLOC_LARGE_REUSED: return "malloc large reused"_s;
+        case VM_MEMORY_STACK: return "stack"_s;
+        case VM_MEMORY_GUARD: return "guard"_s;
+        case VM_MEMORY_IOKIT: return "IOKit"_s;
+        case VM_MEMORY_SHARED_PMAP: return "shared pmap"_s;
+        case VM_MEMORY_DYLD: return "dyld"_s;
+        case VM_MEMORY_DYLD_MALLOC: return "dyld malloc"_s;
+        case VM_MEMORY_TCMALLOC: return "libpas (WebKit Malloc)"_s;
+        case VM_MEMORY_JAVASCRIPT_CORE: return "JavaScriptCore"_s;
+        case VM_MEMORY_JAVASCRIPT_JIT_EXECUTABLE_ALLOCATOR: return "JIT code"_s;
+        case VM_MEMORY_JAVASCRIPT_JIT_REGISTER_FILE: return "JS register file"_s;
+        case VM_MEMORY_OS_ALLOC_ONCE: return "OS alloc once"_s;
+        case VM_MEMORY_LIBDISPATCH: return "libdispatch"_s;
+        case VM_MEMORY_ACCELERATE: return "Accelerate"_s;
+        case VM_MEMORY_COREGRAPHICS: return "CoreGraphics"_s;
+        case VM_MEMORY_FOUNDATION: return "Foundation"_s;
+        case VM_MEMORY_CORESERVICES: return "CoreServices"_s;
+        case VM_MEMORY_IMAGEIO: return "ImageIO"_s;
+        case VM_MEMORY_COLORSYNC: return "ColorSync"_s;
+        case VM_MEMORY_APPLICATION_SPECIFIC_1: return "application specific 1"_s;
+        default: return makeString("tag "_s, tag);
+        }
+    }
+
+    static std::optional<uint64_t> physicalFootprint(mach_port_t task)
+    {
+        task_vm_info_data_t info { };
+        mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
+        if (task_info(task, TASK_VM_INFO, reinterpret_cast<task_info_t>(&info), &count) != KERN_SUCCESS)
+            return std::nullopt;
+        return info.phys_footprint;
+    }
+
+    // What the target's memory footprint is made of: each VM tag's private dirty
+    // and compressed pages, in the snapshot and in the live process, and what
+    // libpas's own dirty and compressed pages hold, by its enumerator's records.
+    void handleMemory(Lexer lex)
+    {
+        using JSC::Corpse::HeapWalk;
+        using JSC::Corpse::Region;
+        Snapshot* snapshot = snapshotById(m_currentSnapshot);
+        if (!snapshot) {
+            SAFE_FPRINTF(stderr, "No snapshot in use. Capture one with `snapshot`, or select one with `snapshot <n>`.\n");
             return;
         }
+        Address vm;
+        Address javaScriptCore;
+        if (!findHeap(*snapshot, lex, vm, javaScriptCore))
+            return;
+        HeapWalk heap(*snapshot, vm, javaScriptCore);
+        if (!heap.isValid()) {
+            SAFE_FPRINTF(stderr, "mya: No JS heap at 0x%llx\n", static_cast<unsigned long long>(vm.toTargetVMAddress()));
+            return;
+        }
+        uint64_t pageSize = vm_kernel_page_size;
+        struct Totals {
+            size_t regions { 0 };
+            uint64_t footprint { 0 }; // By the pages' dispositions, as the snapshot was taken.
+            uint64_t counted { 0 }; // By the regions' own dirty and compressed page counts.
+            uint64_t reusable { 0 };
+        };
+        auto byTag = [&](const Vector<Region>& regions, bool fromSnapshot) {
+            HashMap<unsigned, Totals, IntHash<unsigned>, WTF::UnsignedWithZeroKeyHashTraits<unsigned>> result;
+            for (const Region& region : regions) {
+                if (!region.isPrivate())
+                    continue;
+                auto& totals = result.add(region.userTag(), Totals { }).iterator->value;
+                ++totals.regions;
+                totals.footprint += fromSnapshot ? snapshot->footprintBytes(region) : 0;
+                totals.counted += (region.dirtyPageCount() + region.swappedPageCount()) * pageSize;
+                totals.reusable += region.reusablePageCount() * pageSize;
+            }
+            return result;
+        };
+        const Vector<Region>& snapshotRegions = snapshot->regions();
+        auto snapshotTotals = byTag(snapshotRegions, true);
+        Process* process = snapshot->process();
+        bool hasLive = process && process->isAttached();
+        auto liveTotals = hasLive ? byTag(Region::all(process->taskPort()), false) : decltype(snapshotTotals) { };
+
+        auto footprint = snapshot->physicalFootprint();
+        auto liveFootprint = hasLive ? physicalFootprint(process->taskPort()) : std::nullopt;
+        SAFE_PRINTF("Physical footprint: %llu KB in the snapshot, %s KB live\n", static_cast<unsigned long long>(footprint.value_or(0) / KB),
+            (liveFootprint ? String::number(*liveFootprint / KB) : "unknown"_s).utf8());
+        Vector<std::pair<unsigned, Totals>> tags;
+        for (auto& [tag, totals] : snapshotTotals)
+            tags.append({ tag, totals });
+        std::ranges::sort(tags, std::ranges::greater { }, [](auto& entry) { return entry.second.footprint; });
+        uint64_t sum = 0;
+        SAFE_PRINTF("  %-28s %8s %12s %12s %12s %12s\n", "private memory by VM tag"_s, "regions"_s, "footprint KB"_s, "counted KB"_s, "live KB"_s, "reusable KB"_s);
+        for (auto& [tag, totals] : tags) {
+            uint64_t live = liveTotals.contains(tag) ? liveTotals.get(tag).counted : 0;
+            sum += totals.footprint;
+            if (!totals.footprint && !totals.counted && !live)
+                continue;
+            SAFE_PRINTF("  %-28s %8zu %12llu %12llu %12llu %12llu\n", vmTagName(tag).utf8(), totals.regions, static_cast<unsigned long long>(totals.footprint / KB),
+                static_cast<unsigned long long>(totals.counted / KB), static_cast<unsigned long long>(live / KB), static_cast<unsigned long long>(totals.reusable / KB));
+        }
+        SAFE_PRINTF("  %-28s %8s %12llu\n", "sum"_s, ""_s, static_cast<unsigned long long>(sum / KB));
+
+        auto records = heap.libpasRecords();
+        auto pages = records ? heap.libpasPages(*records) : std::nullopt;
+        if (!pages)
+            return;
+        SAFE_PRINTF("libpas, as the snapshot was taken: %llu KB of dirty or compressed pages (%llu KB compressed), holding\n",
+            static_cast<unsigned long long>(pages->footprintBytes / KB), static_cast<unsigned long long>(pages->compressedBytes / KB));
+        SAFE_PRINTF("  %llu KB of objects, %llu KB of payload no live object holds, %llu KB of metadata, %llu KB libpas records nothing in\n",
+            static_cast<unsigned long long>(pages->objectBytes / KB), static_cast<unsigned long long>(pages->freePayloadBytes / KB),
+            static_cast<unsigned long long>(pages->metaBytes / KB), static_cast<unsigned long long>(pages->unrecordedBytes / KB));
+        SAFE_PRINTF("  and %llu KB of objects in pages outside the footprint; %llu KB of libpas's pages are reusable\n",
+            static_cast<unsigned long long>(pages->objectBytesElsewhere / KB), static_cast<unsigned long long>(pages->reusableBytes / KB));
+        uint64_t otherTags = sum - std::min(sum, snapshotTotals.contains(VM_MEMORY_TCMALLOC) ? snapshotTotals.get(VM_MEMORY_TCMALLOC).footprint : 0);
+        uint64_t ledger = snapshot->taggedLedgerBytes();
+        uint64_t accounted = pages->footprintBytes + otherTags + ledger;
+        int64_t residual = static_cast<int64_t>(footprint.value_or(0)) - static_cast<int64_t>(accounted);
+        SAFE_PRINTF("Footprint %llu KB = libpas's pages %llu KB + other private memory %llu KB + graphics, media, network and neural memory %llu KB + %lld KB that no region or ledger shows, such as page tables\n",
+            static_cast<unsigned long long>(footprint.value_or(0) / KB), static_cast<unsigned long long>(pages->footprintBytes / KB),
+            static_cast<unsigned long long>(otherTags / KB), static_cast<unsigned long long>(ledger / KB), static_cast<long long>(residual / static_cast<int64_t>(KB)));
+    }
+#endif
+
+    // `heapdump <file> [<vm>]`: the walk's heap dump, as a GCDebugging heap snapshot Web Inspector reads.
+    void handleHeapDump(Lexer lex)
+    {
+        using JSC::Corpse::HeapWalk;
+        Snapshot* snapshot = snapshotById(m_currentSnapshot);
+        if (!snapshot) {
+            SAFE_FPRINTF(stderr, "No snapshot in use. Capture one with `snapshot`, or select one with `snapshot <n>`.\n");
+            return;
+        }
+        if (lex.atEnd()) {
+            fputs("Usage: heapdump <file> [<vm address, in hex>]\n", stderr);
+            return;
+        }
+        std::string path { lex.nextToken() };
+        Address vm;
+        Address javaScriptCore;
+        if (!findHeap(*snapshot, lex, vm, javaScriptCore))
+            return;
+        HeapWalk heap(*snapshot, vm, javaScriptCore);
+        auto allocations = heap.isValid() ? heap.libpasAllocations() : std::nullopt;
+        if (!allocations) {
+            SAFE_FPRINTF(stderr, "mya: No JS heap at 0x%llx\n", static_cast<unsigned long long>(vm.toTargetVMAddress()));
+            return;
+        }
+        Vector<HeapWalk::Reference> references;
+        HeapWalk::Reach reach = heap.reach(*allocations, { }, { }, 0, &references);
+        HeapWalk::HeapDump dump = heap.heapDump(*allocations, reach, references);
+        CString json = dump.json().utf8();
+        FILE* file = fopen(path.c_str(), "w");
+        if (!file || fwrite(json.data(), 1, json.length(), file) != json.length()) {
+            SAFE_FPRINTF(stderr, "mya: Could not write %s: %s\n", String::fromUTF8(path.c_str()).utf8(), safeStrerror(errno));
+            if (file)
+                fclose(file);
+            return;
+        }
+        fclose(file);
+        uint64_t bytes = 0;
+        std::array<uint64_t, 4> bytesByKind { };
+        for (auto& node : dump.nodes) {
+            bytes += node.size;
+            bytesByKind[static_cast<size_t>(node.kind)] += node.size;
+        }
+        SAFE_PRINTF("Wrote %zu nodes and %zu edges, %llu bytes in all, to %s\n", dump.nodes.size(), dump.edges.size(), static_cast<unsigned long long>(bytes), String::fromUTF8(path.c_str()).utf8());
+        SAFE_PRINTF("  %llu bytes of live cells, %llu of other allocations the walk reached, %llu of allocations it missed; %zu references read\n",
+            static_cast<unsigned long long>(bytesByKind[static_cast<size_t>(HeapWalk::HeapDump::Kind::Cell)]),
+            static_cast<unsigned long long>(bytesByKind[static_cast<size_t>(HeapWalk::HeapDump::Kind::Allocation)]),
+            static_cast<unsigned long long>(bytesByKind[static_cast<size_t>(HeapWalk::HeapDump::Kind::Missed)]), references.size());
+#if OS(DARWIN)
+        auto records = heap.libpasRecords();
+        auto pages = records ? heap.libpasPages(*records) : std::nullopt;
+        if (pages) {
+            SAFE_PRINTF("  of which %llu bytes are in libpas's dirty or compressed pages, and %llu bytes in pages outside the footprint\n",
+                static_cast<unsigned long long>(pages->objectBytes), static_cast<unsigned long long>(pages->objectBytesElsewhere));
+            SAFE_PRINTF("  those pages also hold %llu bytes of free payload, %llu of metadata and %llu libpas records nothing in; `memory` accounts for the rest of the footprint\n",
+                static_cast<unsigned long long>(pages->freePayloadBytes), static_cast<unsigned long long>(pages->metaBytes), static_cast<unsigned long long>(pages->unrecordedBytes));
+        }
+#endif
+    }
+
+    void handleHeap(Lexer lex)
+    {
+        using JSC::Corpse::HeapWalk;
+        Snapshot* snapshot = snapshotById(m_currentSnapshot);
+        if (!snapshot) {
+            SAFE_FPRINTF(stderr, "No snapshot in use. Capture one with `snapshot`, or select one with `snapshot <n>`.\n");
+            return;
+        }
+        Address vm;
+        Address javaScriptCore;
+        if (!findHeap(*snapshot, lex, vm, javaScriptCore))
+            return;
 
         MonotonicTime start = MonotonicTime::now();
         HeapWalk heap(*snapshot, vm, javaScriptCore);
         if (!heap.isValid()) {
-            fprintf(stderr, "mya: No JS heap at 0x%llx\n", static_cast<unsigned long long>(vm.toTargetVMAddress()));
+            SAFE_FPRINTF(stderr, "mya: No JS heap at 0x%llx\n", static_cast<unsigned long long>(vm.toTargetVMAddress()));
             return;
         }
         MonotonicTime opened = MonotonicTime::now();
@@ -759,46 +972,46 @@ private:
         auto string = [](const String& value) {
             return value.utf8();
         };
-        printf("The heap of the VM at 0x%llx, %s\n", static_cast<unsigned long long>(vm.toTargetVMAddress()),
-            heap.isAtSafePoint() ? "at mya's safe point" : "unverified: the target was not at mya's safe point");
-        printf("  %zu live cells, %llu bytes, in %llu libpas allocations of %llu bytes\n", cells, static_cast<unsigned long long>(cellBytes),
+        SAFE_PRINTF("The heap of the VM at 0x%llx, %s\n", static_cast<unsigned long long>(vm.toTargetVMAddress()),
+            heap.isAtSafePoint() ? "at mya's safe point"_s : "unverified: the target was not at mya's safe point"_s);
+        SAFE_PRINTF("  %zu live cells, %llu bytes, in %llu libpas allocations of %llu bytes\n", cells, static_cast<unsigned long long>(cellBytes),
             static_cast<unsigned long long>(allocations->size()), static_cast<unsigned long long>(reach.bytesAllocated));
-        printf("  reached: %.2f%% (%llu bytes)\n", reach.percent(), static_cast<unsigned long long>(reach.bytesReached));
-        printf("  typed:   %.2f%% (%llu bytes, with %llu free in MarkedBlocks)\n", reach.typedPercent(), static_cast<unsigned long long>(reach.bytesTyped), static_cast<unsigned long long>(reach.bytesFreeInBlocks));
-        printf("  %llu JS cells read as their class, %llu bytes beyond their class; %llu global variables, %llu untyped data symbols\n",
+        SAFE_PRINTF("  reached: %.2f%% (%llu bytes)\n", reach.percent(), static_cast<unsigned long long>(reach.bytesReached));
+        SAFE_PRINTF("  typed:   %.2f%% (%llu bytes, with %llu free in MarkedBlocks)\n", reach.typedPercent(), static_cast<unsigned long long>(reach.bytesTyped), static_cast<unsigned long long>(reach.bytesFreeInBlocks));
+        SAFE_PRINTF("  %llu JS cells read as their class, %llu bytes beyond their class; %llu global variables, %llu untyped data symbols\n",
             static_cast<unsigned long long>(reach.cellsWithClass), static_cast<unsigned long long>(reach.cellBytesBeyondClass),
             static_cast<unsigned long long>(reach.globalVariables), static_cast<unsigned long long>(reach.untypedDataSymbols));
-        printf("  time: %.0f ms to open the debug info, %.0f ms to walk the cells, %.0f ms to enumerate libpas, %.0f ms to reach, type and explain; %.0f ms in all\n",
+        SAFE_PRINTF("  time: %.0f ms to open the debug info, %.0f ms to walk the cells, %.0f ms to enumerate libpas, %.0f ms to reach, type and explain; %.0f ms in all\n",
             (opened - start).milliseconds(), (walked - opened).milliseconds(), (enumerated - walked).milliseconds(), (reached - enumerated).milliseconds(), (reached - start).milliseconds());
-        constexpr std::array<const char*, HeapWalk::numberOfNotFollowedReasons> reasons {
-            "pointers to declarations", "pointers to types without a size", "polymorphic pointees without a dynamic type",
-            "JS cells without a class", "encoded pointers to types not reached", "pointers to types that do not fit their allocation",
+        constexpr std::array<ASCIILiteral, HeapWalk::numberOfNotFollowedReasons> reasons {
+            "pointers to declarations"_s, "pointers to types without a size"_s, "polymorphic pointees without a dynamic type"_s,
+            "JS cells without a class"_s, "encoded pointers to types not reached"_s, "pointers to types that do not fit their allocation"_s,
         };
         for (size_t index = 0; index < reasons.size(); ++index)
-            printf("  not followed: %llu %s\n", static_cast<unsigned long long>(reach.notFollowed[index]), reasons[index]);
-        constexpr std::array<const char*, HeapWalk::numberOfMissCauses> causes {
-            "held by a reached allocation", "held by static data", "held by other memory", "held by other misses", "held by nothing",
+            SAFE_PRINTF("  not followed: %llu %s\n", static_cast<unsigned long long>(reach.notFollowed[index]), reasons[index]);
+        constexpr std::array<ASCIILiteral, HeapWalk::numberOfMissCauses> causes {
+            "held by a reached allocation"_s, "held by static data"_s, "held by other memory"_s, "held by other misses"_s, "held by nothing"_s,
         };
         for (size_t index = 0; index < causes.size(); ++index)
-            printf("  missed: %llu bytes %s\n", static_cast<unsigned long long>(reach.bytesMissedByCause[index]), causes[index]);
+            SAFE_PRINTF("  missed: %llu bytes %s\n", static_cast<unsigned long long>(reach.bytesMissedByCause[index]), causes[index]);
         size_t listed = 0;
         for (const HeapWalk::Miss& miss : reach.misses) {
             if (listed++ == listCount)
                 break;
-            printf("  miss: %llu bytes at 0x%llx, %llu with what only it holds, %s: %s%s%s\n", static_cast<unsigned long long>(miss.allocation.size),
+            SAFE_PRINTF("  miss: %llu bytes at 0x%llx, %llu with what only it holds, %s: %s%s%s\n", static_cast<unsigned long long>(miss.allocation.size),
                 static_cast<unsigned long long>(miss.allocation.address.toTargetVMAddress()), static_cast<unsigned long long>(miss.bytesHeld),
-                causes[static_cast<size_t>(miss.cause)], string(miss.holder).legacyCStringPointer(), miss.content.isEmpty() ? "" : "; it holds ", string(miss.content).legacyCStringPointer());
+                causes[static_cast<size_t>(miss.cause)], string(miss.holder), miss.content.isEmpty() ? ""_s : "; it holds "_s, string(miss.content));
         }
         for (auto& [kind, bytes] : reach.untypedByKind)
-            printf("  untyped bytes: %llu in allocations with %s\n", static_cast<unsigned long long>(bytes), string(kind).legacyCStringPointer());
+            SAFE_PRINTF("  untyped bytes: %llu in allocations with %s\n", static_cast<unsigned long long>(bytes), string(kind));
         for (auto& [name, bytes] : reach.cellBytesBeyondClassByClass)
-            printf("  beyond class: %llu bytes of '%s' cells\n", static_cast<unsigned long long>(bytes), string(name).legacyCStringPointer());
+            SAFE_PRINTF("  beyond class: %llu bytes of '%s' cells\n", static_cast<unsigned long long>(bytes), string(name));
         for (const HeapWalk::Untyped& untyped : reach.mostUntyped) {
-            printf("  untyped: %llu of %llu bytes at 0x%llx, read as %s, reached by %s\n", static_cast<unsigned long long>(untyped.bytesUntyped), static_cast<unsigned long long>(untyped.allocation.size),
-                static_cast<unsigned long long>(untyped.allocation.address.toTargetVMAddress()), untyped.typeAtStart.isNull() ? "nothing at its start" : string(untyped.typeAtStart).legacyCStringPointer(),
-                string(untyped.reachedBy).legacyCStringPointer());
+            SAFE_PRINTF("  untyped: %llu of %llu bytes at 0x%llx, read as %s, reached by %s\n", static_cast<unsigned long long>(untyped.bytesUntyped), static_cast<unsigned long long>(untyped.allocation.size),
+                static_cast<unsigned long long>(untyped.allocation.address.toTargetVMAddress()), string(untyped.typeAtStart.isNull() ? String("nothing at its start"_s) : untyped.typeAtStart),
+                string(untyped.reachedBy));
         }
-        printf("  %zu values read as a type bigger than their allocation\n", reach.overruns.size());
+        SAFE_PRINTF("  %zu values read as a type bigger than their allocation\n", reach.overruns.size());
         // The same overrun at many addresses is one kind: its text without its numbers.
         HashMap<String, std::pair<uint64_t, String>> overrunKinds;
         for (const String& overrun : reach.overruns) {
@@ -821,10 +1034,13 @@ private:
             kinds.append(entry);
         std::ranges::sort(kinds, std::ranges::greater { }, &std::pair<uint64_t, String>::first);
         for (size_t index = 0; index < kinds.size() && index < listCount; ++index)
-            printf("  overrun, %llu like: %s\n", static_cast<unsigned long long>(kinds[index].first), string(kinds[index].second).legacyCStringPointer());
-        printf("  %zu arrays declared past the readable memory they start in\n", reach.clippedArrays.size());
-        for (size_t index = 0; index < reach.clippedArrays.size() && index < listCount; ++index)
-            printf("  clipped array: %s\n", string(reach.clippedArrays[index]).legacyCStringPointer());
+            SAFE_PRINTF("  overrun, %llu like: %s\n", static_cast<unsigned long long>(kinds[index].first), string(kinds[index].second));
+        SAFE_PRINTF("  %zu arrays declared past the readable memory they start in, left unread\n", reach.unreadableArrays.size());
+        for (size_t index = 0; index < reach.unreadableArrays.size() && index < listCount; ++index)
+            SAFE_PRINTF("  unreadable array: %s\n", string(reach.unreadableArrays[index]));
+        SAFE_PRINTF("  %zu unions whose live member no reader picks, left unread\n", reach.unreadUnions.size());
+        for (size_t index = 0; index < reach.unreadUnions.size() && index < listCount; ++index)
+            SAFE_PRINTF("  unread union: %llu of %s\n", static_cast<unsigned long long>(reach.unreadUnions[index].second), string(reach.unreadUnions[index].first));
     }
 
     // Dispatches `p[/<format>] <expression>`. The only expression understood so
@@ -1488,6 +1704,18 @@ private:
             handleHeap(lex);
             return;
         }
+        if (is("heapdump")) {
+            recordCommand(line);
+            handleHeapDump(lex);
+            return;
+        }
+#if OS(DARWIN)
+        if (is("memory")) {
+            recordCommand(line);
+            handleMemory(lex);
+            return;
+        }
+#endif
         if (command == "p" || command == "print") {
             recordCommand(line);
             handlePrint(format, lex);

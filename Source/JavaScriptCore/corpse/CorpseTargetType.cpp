@@ -159,12 +159,45 @@ std::optional<uint64_t> TargetType::templateIntegerArgument(unsigned index) cons
     return value;
 }
 
+auto TargetType::enumerators() const -> Vector<Enumerator>
+{
+    Vector<Enumerator> result;
+    lldb::SBTypeEnumMemberList members = m_type->GetEnumMembers();
+    if (!members.IsValid())
+        return result;
+    for (uint32_t index = 0; index < members.GetSize(); ++index) {
+        lldb::SBTypeEnumMember member = members.GetTypeEnumMemberAtIndex(index);
+        result.append({ copyOf(member.GetName()), member.GetValueAsSigned() });
+    }
+    return result;
+}
+
+std::optional<int64_t> TargetType::enumeratorValue(std::string_view name) const
+{
+    for (const Enumerator& enumerator : enumerators()) {
+        if (std::string_view { enumerator.name.legacyCStringPointer() } == name)
+            return enumerator.value;
+    }
+    return std::nullopt;
+}
+
+const TargetType* TargetType::staticFieldType(const char* name) const
+{
+    lldb::SBTypeStaticField field = m_type->GetStaticFieldWithName(name);
+    if (!field.IsValid())
+        return nullptr;
+    lldb::SBType type = field.GetType();
+    if (!type.IsValid())
+        return nullptr;
+    return &m_debugInfo.type(type);
+}
+
 TargetType::Layout TargetType::readLayout() const
 {
     uint32_t typeClass = m_type->GetTypeClass();
 
     if (typeClass & (lldb::eTypeClassClass | lldb::eTypeClassStruct | lldb::eTypeClassUnion)) {
-        Class result { m_type->IsPolymorphicClass(), { }, { }, { } };
+        Class result { m_type->IsPolymorphicClass(), !!(typeClass & lldb::eTypeClassUnion), { }, { }, { } };
 
         uint32_t fieldCount = m_type->GetNumberOfFields();
         for (uint32_t index = 0; index < fieldCount; ++index) {
@@ -269,6 +302,21 @@ size_t TargetType::readByteSize() const
 }
 
 std::optional<uint64_t> TargetType::templateIntegerArgument(unsigned) const
+{
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+auto TargetType::enumerators() const -> Vector<Enumerator>
+{
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+std::optional<int64_t> TargetType::enumeratorValue(std::string_view) const
+{
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+const TargetType* TargetType::staticFieldType(const char*) const
 {
     RELEASE_ASSERT_NOT_REACHED();
 }

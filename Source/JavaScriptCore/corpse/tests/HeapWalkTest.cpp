@@ -33,6 +33,7 @@
 #include <JavaScriptCore/Completion.h>
 #include <JavaScriptCore/CorpseAddress.h>
 #include <JavaScriptCore/CorpseHeapWalk.h>
+#include <JavaScriptCore/CorpseImage.h>
 #include <JavaScriptCore/CorpseRegion.h>
 #include <JavaScriptCore/CorpseRemote.h>
 #include <JavaScriptCore/CorpseSnapshot.h>
@@ -42,6 +43,7 @@
 #include <JavaScriptCore/HeapCell.h>
 #include <JavaScriptCore/HeapIterationScope.h>
 #include <JavaScriptCore/HeapObserver.h>
+#include <JavaScriptCore/HeapSnapshotBuilder.h>
 #include <JavaScriptCore/Identifier.h>
 #include <JavaScriptCore/InitializeThreading.h>
 #include <JavaScriptCore/JSCJSValueInlines.h>
@@ -65,6 +67,7 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 #include <algorithm>
 #include <bit>
+#include <dlfcn.h>
 #include <optional>
 #include <pthread.h>
 #include <stdint.h>
@@ -78,6 +81,7 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 #include <wtf/HashSet.h>
 #include <wtf/HexNumber.h>
 #include <wtf/IterationStatus.h>
+#include <wtf/JSONValues.h>
 #include <wtf/LazyUniqueRef.h>
 #include <wtf/MallocSpan.h>
 #include <wtf/NeverDestroyed.h>
@@ -87,6 +91,11 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 #include <wtf/Vector.h>
 #include <wtf/text/ASCIILiteral.h>
 #include <wtf/text/MakeString.h>
+#include <wtf/text/StringToIntegerConversion.h>
+
+#if OS(DARWIN)
+#include <mach/mach.h>
+#endif
 
 namespace JSCToolsTest {
 
@@ -94,9 +103,11 @@ namespace {
 
 using JSC::Corpse::Address;
 using JSC::Corpse::HeapWalk;
+using JSC::Corpse::Image;
 using JSC::Corpse::Region;
 using JSC::Corpse::Remote;
 using JSC::Corpse::Snapshot;
+using JSC::Corpse::SnapshotDebugInfo;
 using JSC::Corpse::TargetType;
 using JSC::Corpse::TargetValue;
 
@@ -256,6 +267,8 @@ public:
 
     ReachableObject* reachable { nullptr };
     std::array<ReachableObject*, 3> array { };
+    // Allocated between the two snapshots of the heap dump's diff.
+    std::array<ReachableObject*, 8> added { };
     // Each holds a planted object, as Planted says.
     Vector<ReachableObject*> vector;
     HashSet<ReachableObject*> set;
@@ -307,6 +320,7 @@ struct HeapWalkFixture {
     uint64_t jsonCache { 0 };
     uint64_t builtinExecutables { 0 };
     uint64_t regExpCache { 0 };
+    std::array<uint64_t, 8> added { }; // MyaRoots::added.
 };
 
 HeapWalkFixture& fixtureAt(Address address)
@@ -323,7 +337,9 @@ MyaRoots& rootsOf(Address fixture)
 // can be changing the heap's liveness state, and records that in the roots.
 // False, having said why, if the heap is in a collection: in a quiet target a
 // collection runs only on this thread, so that is a bug in the test.
-bool withMyaSafePoint(MyaRoots& roots, NOESCAPE const Function<void()>& function)
+// A template, so that entering it allocates no WTF::Function.
+template<typename Functor>
+bool withMyaSafePoint(MyaRoots& roots, NOESCAPE const Functor& function)
 {
     JSC::VM& vm = *roots.vm;
     // No other thread allocates cells or sweeps, and this one starts no collection.
@@ -837,10 +853,13 @@ void checkReach(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFixture&
     for (uint64_t missed : fixture.missed)
         expectedMisses.append(missed ^ hiddenAddressMask);
     Vector<HeapWalk::Allocation> excluded;
+    Vector<bool> isExcluded;
+    isExcluded.fill(false, allocations.size());
     uint64_t excludedBytes = 0;
     for (uint64_t address : expectedMisses) {
         if (auto index = indexOf(address)) {
             excluded.append(allocations[*index]);
+            isExcluded[*index] = true;
             excludedBytes += allocations[*index].size;
         }
     }
@@ -868,12 +887,13 @@ void checkReach(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFixture&
 
     // The percentage counts only the program's own memory.
     TEST_ASSERT_EQ(reach.bytesExcluded, excludedBytes, "the excluded bytes are the sizes of the excluded allocations");
-    // The byte counts, from the allocations and which of them the walk reached.
+    // The byte counts, from the allocations and which of them the walk reached. A stale word on a
+    // stack, which the walk scans conservatively, can reach an excluded allocation.
     uint64_t allocatedBytes = 0;
     uint64_t reachedBytes = 0;
     for (size_t index = 0; index < allocations.size(); ++index) {
         allocatedBytes += allocations[index].size;
-        if (reach.isReached[index])
+        if (reach.isReached[index] && !isExcluded[index])
             reachedBytes += allocations[index].size;
     }
     TEST_ASSERT_EQ(reach.bytesAllocated, allocatedBytes, "the allocated bytes are the sizes of the enumerated allocations");
@@ -922,6 +942,10 @@ void checkReach(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFixture&
     TEST_ASSERT(fixture.stringIs8Bit && stringImplAllocation && reach.bytesTypedIn[*stringImplAllocation] == stringImplBytes, "the walk types the whole StringImpl behind a JSString, and its characters");
     TEST_ASSERT(reach.bytesTyped && reach.bytesTyped <= reach.bytesAllocated - reach.bytesExcluded - reach.bytesFreeInBlocks, "the walk types part of the heap");
     TEST_ASSERT(reach.overruns.isEmpty(), "the walk reads no value as a type bigger than its allocation");
+    TEST_ASSERT_EQ(reach.notFollowed[static_cast<size_t>(HeapWalk::NotFollowed::DoesNotFit)], 0u, "the walk follows no pointer to a type bigger than its pointee's allocation");
+    for (const String& array : reach.unreadableArrays)
+        dataLogLn("    unreadable array: ", array);
+    TEST_ASSERT(reach.unreadableArrays.isEmpty(), "the walk reads every array it meets within readable memory");
     TEST_ASSERT(std::ranges::none_of(reach.cellBytesBeyondClassByClass, [](auto& entry) { return entry.first == "JSC::JSFinalObject"_s; }),
         "the walk reads a JSFinalObject's inline storage as JSValues");
 
@@ -998,6 +1022,8 @@ void checkReach(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFixture&
     }
     for (const String& overrun : reach.overruns)
         dataLogLn("    overrun: ", overrun);
+    for (auto& [holder, count] : reach.unreadUnions)
+        dataLogLn("    unread union: ", count, " of ", holder);
 }
 
 // Patch 10: every live JS cell is read as the C++ class its ClassInfo names.
@@ -1155,7 +1181,343 @@ void checkSafePointRefusesCollection(Address fixture)
     TEST_ASSERT(atSafePoint && !*atSafePoint, "inside a full collection, the safe point refuses to snapshot");
 }
 
+// Whether `type` is `base` or derives from it.
+bool derivesFrom(const TargetType& type, const TargetType& base, unsigned depth = 0)
+{
+    if (&type == &base || std::string_view { type.name().legacyCStringPointer() } == std::string_view { base.name().legacyCStringPointer() })
+        return true;
+    auto* klass = std::get_if<TargetType::Class>(&type.layout());
+    return klass && depth < 32 && std::ranges::any_of(klass->bases, [&](const TargetType::Base& candidate) {
+        return derivesFrom(candidate.type, base, depth + 1);
+    });
+}
+
+// JSC's own GCDebugging heap snapshot: the address of each cell node, and each
+// edge between cells, as addresses.
+struct JSCHeapSnapshot {
+    HashSet<uint64_t> cells;
+    HashSet<std::pair<uint64_t, uint64_t>> edges;
+};
+
+std::optional<JSCHeapSnapshot> parseJSCHeapSnapshot(const String& json)
+{
+    RefPtr value = JSON::Value::parseJSON(json);
+    RefPtr object = value ? value->asObject() : nullptr;
+    RefPtr nodes = object ? object->getArray("nodes"_s) : nullptr;
+    RefPtr edges = object ? object->getArray("edges"_s) : nullptr;
+    if (!nodes || !edges)
+        return std::nullopt;
+    // <nodeId>, <sizeInBytes>, <nodeClassNameIndex>, <flags>, <labelIndex>, <cellAddress>, <wrappedAddress>
+    constexpr size_t nodeFields = 7;
+    JSCHeapSnapshot result;
+    HashMap<int, uint64_t, IntHash<int>, WTF::SignedWithZeroKeyHashTraits<int>> addresses;
+    for (size_t index = 0; index + nodeFields <= nodes->length(); index += nodeFields) {
+        auto identifier = nodes->get(index)->asInteger();
+        String address = nodes->get(index + 5)->asString();
+        uint64_t value = address.length() > 2 ? parseInteger<uint64_t>(StringView { address }.substring(2), 16).value_or(0) : 0;
+        if (!identifier || !value)
+            continue;
+        addresses.add(*identifier, value);
+        result.cells.add(value);
+    }
+    // <fromNodeId>, <toNodeId>, <edgeTypeIndex>, <edgeExtraData>; node 0, the root, is no cell.
+    for (size_t index = 0; index + 4 <= edges->length(); index += 4) {
+        auto from = edges->get(index)->asInteger();
+        auto to = edges->get(index + 1)->asInteger();
+        if (!from || !to || !*from || !*to)
+            continue;
+        result.edges.add({ addresses.get(*from), addresses.get(*to) });
+    }
+    return result;
+}
+
+#if OS(DARWIN)
+// The fixture, reported at mya's safe point; then, once the analysis lets it
+// run on, the objects of MyaRoots::added, reported at the safe point again.
+Address createFixtureBeforeAndAfter()
+{
+    Address fixture = createFixture();
+    MyaRoots& roots = rootsOf(fixture);
+    bool atSafePoint = withMyaSafePoint(roots, [&] {
+        reportTargetObject(fixture);
+        waitForAnalysis();
+    });
+    for (size_t index = 0; index < roots.added.size(); ++index) {
+        roots.added[index] = new ReachableObject;
+        fixtureAt(fixture).added[index] = std::bit_cast<uint64_t>(roots.added[index]);
+    }
+    atSafePoint = atSafePoint && withMyaSafePoint(roots, [&] {
+        reportTargetObject(fixture);
+        waitForAnalysis();
+    });
+    RELEASE_ASSERT(atSafePoint);
+    reportTargetObjectAndPark(fixture);
+}
+
+// Two heap dumps of a quiet target differ by the C++ objects it made between them, and only by those.
+void analyzeDiff(Snapshot& before, Snapshot& after, Address fixtureAddress)
+{
+    auto dumpOf = [&](Snapshot& snapshot) -> std::optional<HeapWalk::HeapDump> {
+        auto fixture = snapshot.memory().ptr<HeapWalkFixture>(fixtureAddress);
+        if (!fixture)
+            return std::nullopt;
+        HeapWalk heap(snapshot, Address { fixture->roots });
+        auto allocations = heap.isValid() ? heap.libpasAllocations() : std::nullopt;
+        if (!allocations)
+            return std::nullopt;
+        Vector<HeapWalk::Reference> references;
+        HeapWalk::Reach reach = heap.reach(*allocations, { }, { }, 0, &references);
+        return heap.heapDump(*allocations, reach, references);
+    };
+    auto first = dumpOf(before);
+    auto second = dumpOf(after);
+    auto fixture = after.memory().ptr<HeapWalkFixture>(fixtureAddress);
+    TEST_ASSERT(first && second && fixture, "both snapshots of the target are dumped");
+    if (!first || !second || !fixture)
+        return;
+    auto keyOf = [](const HeapWalk::HeapDump::Node& node) {
+        return makeString(hex(node.address.toTargetVMAddress()), ' ', node.size, ' ', node.className);
+    };
+    HashSet<String> firstNodes;
+    for (auto& node : first->nodes) {
+        if (node.kind != HeapWalk::HeapDump::Kind::Root)
+            firstNodes.add(keyOf(node));
+    }
+    HashSet<uint64_t> added;
+    for (uint64_t address : fixture->added)
+        added.add(address);
+    unsigned unexpected = 0;
+    unsigned found = 0;
+    HashSet<String> secondNodes;
+    for (auto& node : second->nodes) {
+        if (node.kind == HeapWalk::HeapDump::Kind::Root)
+            continue;
+        secondNodes.add(keyOf(node));
+        if (firstNodes.contains(keyOf(node)))
+            continue;
+        if (added.contains(node.address.toTargetVMAddress()) && node.className == "JSCToolsTest::(anonymous namespace)::ReachableObject"_s) {
+            ++found;
+            continue;
+        }
+        if (unexpected++ < 10)
+            dataLogLn("    the second dump has a new node: ", keyOf(node));
+    }
+    unsigned gone = 0;
+    for (auto& key : firstNodes) {
+        if (!secondNodes.contains(key) && gone++ < 10)
+            dataLogLn("    the second dump lacks a node: ", key);
+    }
+    TEST_ASSERT_EQ(found, static_cast<unsigned>(added.size()), "the second dump has a node for each object the target made, read as its class");
+
+    // The dump's bytes against the footprint: libpas's pages, by what they hold, and the other private memory.
+    HeapWalk heap(after, Address { fixture->roots });
+    auto records = heap.libpasRecords();
+    auto pages = records ? heap.libpasPages(*records) : std::nullopt;
+    auto footprint = after.physicalFootprint();
+    TEST_ASSERT(pages && footprint, "libpas's pages and the footprint are read");
+    if (pages && footprint) {
+        uint64_t dumpBytes = 0;
+        for (auto& node : second->nodes)
+            dumpBytes += node.size;
+        TEST_ASSERT_EQ(pages->objectBytes + pages->objectBytesElsewhere, dumpBytes, "the dump's bytes are the objects in libpas's pages in the footprint and elsewhere");
+        // What libpas records nothing in is committed memory just past its payload, most of it zeros.
+        TEST_ASSERT(pages->unrecordedBytes <= 256 * KB, "libpas records what all but a few of its pages hold");
+        uint64_t otherBytes = 0;
+        for (const JSC::Corpse::Region& region : after.regions()) {
+            if (region.isPrivate() && region.userTag() != VM_MEMORY_TCMALLOC)
+                otherBytes += after.footprintBytes(region);
+        }
+        int64_t residual = static_cast<int64_t>(*footprint) - static_cast<int64_t>(pages->footprintBytes + otherBytes + after.taggedLedgerBytes());
+        // What is left is the page tables, which no interface outside the kernel reports.
+        TEST_ASSERT(residual >= 0 && residual < static_cast<int64_t>(2 * MB), "the footprint is libpas's pages, the other private memory and the tagged ledgers, but for under 2 MB of page tables");
+        dataLogLnIf(verbose, "    footprint ", *footprint, " = libpas's pages ", pages->footprintBytes, " (", pages->objectBytes, " objects, ", pages->freePayloadBytes, " free payload, ",
+            pages->metaBytes, " metadata, ", pages->unrecordedBytes, " unrecorded) + other private memory ", otherBytes, " + ", residual, " the regions do not show");
+    }
+    TEST_ASSERT_EQ(unexpected, 0u, "and no other new node");
+    TEST_ASSERT_EQ(gone, 0u, "and none of the first dump's nodes is gone");
+}
+#endif
+
 } // anonymous namespace
+
+// Patch 17: the heap dump holds JSC's own GCDebugging heap snapshot, every cell
+// and every edge between cells, and accounts for every libpas allocation once.
+void testHeapDump()
+{
+    SuiteTracer tracer("HeapDump");
+    if (!tracer.shouldRun())
+        return;
+
+    Address fixtureAddress = createFixture();
+    MyaRoots& roots = rootsOf(fixtureAddress);
+    JSC::VM& vm = *roots.vm;
+    String jscJSON;
+    {
+        // JSC's snapshot collects, so it is taken before mya's, of the heap it leaves.
+        JSC::JSLockHolder locker(vm);
+        JSC::HeapSnapshotBuilder builder(vm.ensureHeapProfiler(), JSC::HeapSnapshotBuilder::SnapshotType::GCDebuggingSnapshot);
+        builder.buildSnapshot();
+        jscJSON = builder.json();
+    }
+    std::unique_ptr<Snapshot> snapshot;
+    bool atSafePoint = withMyaSafePoint(roots, [&] {
+        snapshot = takeSnapshot(getpid());
+    });
+    auto jsc = parseJSCHeapSnapshot(jscJSON);
+    TEST_ASSERT(atSafePoint && snapshot && jsc, "JSC's heap snapshot, then mya's at its safe point, are taken");
+    if (!atSafePoint || !snapshot || !jsc)
+        return;
+
+    HeapWalk heap(*snapshot, Address { fixtureAt(fixtureAddress).roots });
+    auto allocations = heap.isValid() ? heap.libpasAllocations() : std::nullopt;
+    TEST_ASSERT(allocations, "libpas enumerates the heap");
+    if (!allocations)
+        return;
+    Vector<HeapWalk::Reference> references;
+    HeapWalk::Reach reach = heap.reach(*allocations, { }, { }, 0, &references);
+    HeapWalk::HeapDump dump = heap.heapDump(*allocations, reach, references);
+
+    // Every libpas byte is in one node: a cell, or what of an allocation is not its cells.
+    uint64_t allocatedBytes = 0;
+    for (const HeapWalk::Allocation& allocation : *allocations)
+        allocatedBytes += allocation.size;
+    uint64_t nodeBytes = 0;
+    size_t allocationNodes = 0;
+    HashMap<uint64_t, uint32_t> cellNodes;
+    for (size_t index = 0; index < dump.nodes.size(); ++index) {
+        const HeapWalk::HeapDump::Node& node = dump.nodes[index];
+        nodeBytes += node.size;
+        if (node.kind == HeapWalk::HeapDump::Kind::Allocation || node.kind == HeapWalk::HeapDump::Kind::Missed)
+            ++allocationNodes;
+        if (node.kind == HeapWalk::HeapDump::Kind::Cell)
+            cellNodes.add(node.address.toTargetVMAddress(), index);
+    }
+    TEST_ASSERT_EQ(allocationNodes, allocations->size(), "the dump has a node for every libpas allocation");
+    TEST_ASSERT_EQ(nodeBytes, allocatedBytes, "the dump's nodes are, byte for byte, the libpas allocations");
+
+    unsigned missingCells = 0;
+    for (uint64_t cell : jsc->cells) {
+        if (!cellNodes.contains(cell) && missingCells++ < 10)
+            dataLogLn("    JSC's snapshot has the cell 0x", hex(cell), ", which the dump does not");
+    }
+    TEST_ASSERT(jsc->cells.size() > 100, "JSC's snapshot has the fixture's cells");
+    TEST_ASSERT_EQ(missingCells, 0u, "the dump has every cell JSC's heap snapshot has");
+
+    // An edge between cells in JSC's snapshot is a path in the dump that passes
+    // only through C++ objects, such as a code block's constants' FixedVector.
+    Vector<Vector<uint32_t>> outgoing(dump.nodes.size());
+    for (auto [from, to] : dump.edges)
+        outgoing[from].append(to);
+    HashMap<uint32_t, HashSet<uint32_t>> cellsReachedFrom;
+    auto reachedCells = [&](uint32_t start) -> const HashSet<uint32_t>& {
+        return cellsReachedFrom.ensure(start, [&] {
+            HashSet<uint32_t> cells;
+            HashSet<uint32_t> visited;
+            Vector<uint32_t> worklist { start };
+            while (!worklist.isEmpty()) {
+                uint32_t node = worklist.takeLast();
+                for (uint32_t to : outgoing[node]) {
+                    if (!visited.add(to + 1).isNewEntry)
+                        continue;
+                    if (dump.nodes[to].kind == HeapWalk::HeapDump::Kind::Cell)
+                        cells.add(to + 1);
+                    else if (dump.nodes[to].kind != HeapWalk::HeapDump::Kind::Root)
+                        worklist.append(to);
+                }
+            }
+            return cells;
+        }).iterator->value;
+    };
+    HashMap<String, unsigned> missingByClasses;
+    unsigned missingEdges = 0;
+    for (auto [from, to] : jsc->edges) {
+        auto fromNode = cellNodes.find(from);
+        auto toNode = cellNodes.find(to);
+        if (fromNode != cellNodes.end() && toNode != cellNodes.end() && reachedCells(fromNode->value).contains(toNode->value + 1))
+            continue;
+        ++missingEdges;
+        String classes = makeString(fromNode != cellNodes.end() ? dump.nodes[fromNode->value].className : "?"_s, " -> "_s,
+            toNode != cellNodes.end() ? dump.nodes[toNode->value].className : "?"_s);
+        ++missingByClasses.add(classes, 0).iterator->value;
+    }
+    if (missingEdges) {
+        Vector<std::pair<String, unsigned>> sorted;
+        for (auto& [classes, count] : missingByClasses)
+            sorted.append({ classes, count });
+        std::ranges::sort(sorted, std::ranges::greater { }, &std::pair<String, unsigned>::second);
+        for (size_t index = 0; index < sorted.size() && index < 25; ++index)
+            dataLogLn("    the dump misses ", sorted[index].second, " of JSC's edges ", sorted[index].first);
+    }
+    if (verbose)
+        dataLogLn("    the dump has ", dump.nodes.size(), " nodes and ", dump.edges.size(), " edges; JSC's snapshot ", jsc->cells.size(), " cells and ", jsc->edges.size(), " edges between them");
+    TEST_ASSERT_EQ(missingEdges, 0u, "the dump has a path, through C++ objects alone, for every edge between cells JSC's heap snapshot has");
+
+#if OS(DARWIN)
+    analyzeBeforeAndAfter(createFixtureBeforeAndAfter, analyzeDiff);
+#endif
+}
+
+// The walk's tables of the hierarchies that name an object's class in a type
+// field agree with WebCore's debug info: every enumerator has an entry, so a
+// new subclass fails here, and every entry's class is in WebCore and derives
+// from the base. WebCore is loaded into this process, which is snapshotted.
+void testTypeFieldHierarchies()
+{
+    SuiteTracer tracer("TypeFields");
+    if (!tracer.shouldRun())
+        return;
+
+    Dl_info javaScriptCore { };
+    if (!dladdr(reinterpret_cast<const void*>(static_cast<void(*)()>(&JSC::initialize)), &javaScriptCore) || !javaScriptCore.dli_fname) {
+        TEST_ASSERT(false, "JavaScriptCore's image has a path");
+        return;
+    }
+    std::string path { javaScriptCore.dli_fname };
+    constexpr std::string_view javaScriptCoreFramework = "JavaScriptCore.framework/Versions/A/JavaScriptCore";
+    size_t frameworkStart = path.rfind(javaScriptCoreFramework);
+    void* webCore = frameworkStart == std::string::npos ? nullptr
+        : dlopen(path.replace(frameworkStart, javaScriptCoreFramework.size(), "WebCore.framework/Versions/A/WebCore").c_str(), RTLD_LAZY | RTLD_LOCAL);
+    if (!webCore) {
+        skipSuite("TypeFields", "WebCore is not built beside JavaScriptCore");
+        return;
+    }
+
+    std::unique_ptr<Snapshot> snapshot = takeSnapshot(getpid());
+    RefPtr debugInfo = snapshot ? SnapshotDebugInfo::create(*snapshot) : nullptr;
+    auto webCoreImage = snapshot ? std::ranges::find_if(snapshot->images(), [](const Image& image) {
+        return std::string_view { image.path().legacyCStringPointer() }.ends_with("/WebCore");
+    }) : Vector<Image>::const_iterator { };
+    if (!debugInfo || webCoreImage == snapshot->images().end()) {
+        TEST_ASSERT(false, "a snapshot of this process has WebCore's debug info");
+        return;
+    }
+    Address inWebCore = webCoreImage->loadAddress();
+
+    for (const HeapWalk::TypeFieldHierarchy& hierarchy : HeapWalk::typeFieldHierarchies()) {
+        const TargetType* base = debugInfo->classNamed(inWebCore, hierarchy.base);
+        const TargetType* enumeration = hierarchy.enumeration ? debugInfo->classNamed(inWebCore, hierarchy.enumeration) : nullptr;
+        TEST_ASSERT(base && (enumeration || !hierarchy.enumeration), makeString("WebCore describes '"_s, String::fromLatin1(hierarchy.base), "' and its type field's type"_s));
+        if (!base || (!enumeration && hierarchy.enumeration))
+            continue;
+        auto* baseClass = std::get_if<TargetType::Class>(&base->layout());
+        TEST_ASSERT(baseClass && std::ranges::any_of(baseClass->properFields, [&](const TargetType::Field& field) { return std::string_view { field.name.legacyCStringPointer() } == hierarchy.typeField; }),
+            makeString('\'', String::fromLatin1(hierarchy.base), "' declares its type field"_s));
+        auto enumerators = enumeration ? enumeration->enumerators() : Vector<TargetType::Enumerator> { { UTF8CString { "false"_s }, 0 }, { UTF8CString { "true"_s }, 1 } };
+        TEST_ASSERT(!enumerators.isEmpty(), makeString("the type field of '"_s, String::fromLatin1(hierarchy.base), "' has enumerators"_s));
+        for (const TargetType::Enumerator& enumerator : enumerators) {
+            std::string_view name { enumerator.name.legacyCStringPointer() };
+            TEST_ASSERT(std::ranges::any_of(hierarchy.subclasses, [&](const HeapWalk::TypeFieldSubclass& entry) { return name == entry.enumerator; }),
+                makeString("the walk knows the subclass of '"_s, String::fromLatin1(hierarchy.base), "' for '"_s, String::fromUTF8(enumerator.name.span()), '\''));
+        }
+        for (const HeapWalk::TypeFieldSubclass& entry : hierarchy.subclasses) {
+            if (!entry.name)
+                continue;
+            const TargetType* subclass = debugInfo->classNamed(inWebCore, entry.name);
+            TEST_ASSERT(subclass ? derivesFrom(*subclass, *base) : entry.isConditional,
+                makeString('\'', String::fromLatin1(entry.name), "' is a subclass of '"_s, String::fromLatin1(hierarchy.base), "' in WebCore"_s));
+        }
+    }
+}
 
 void testHeapWalk()
 {
@@ -1199,6 +1561,22 @@ void testHeapWalk()
 #else
     skipSuite("HeapWalk", "mya_heap is not enabled");
 #endif
+}
+
+void testTypeFieldHierarchies()
+{
+    SuiteTracer tracer("TypeFields");
+    if (!tracer.shouldRun())
+        return;
+    skipSuite("TypeFields", "liblldb's headers were not found");
+}
+
+void testHeapDump()
+{
+    SuiteTracer tracer("HeapDump");
+    if (!tracer.shouldRun())
+        return;
+    skipSuite("HeapDump", "liblldb's headers were not found");
 }
 
 } // namespace JSCToolsTest

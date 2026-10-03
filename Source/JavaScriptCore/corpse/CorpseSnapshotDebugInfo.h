@@ -85,6 +85,12 @@ public:
     // The same, in the image that describes `neighbor`, such as WebCore for one
     // of its classes, or else in the first image that has one.
     const TargetType* classNamedBeside(const TargetType& neighbor, const char* name);
+    // The class `declaration` declares, as the image that describes the
+    // declaration defines it, or, if liblldb knows no image for it, as the one
+    // image that defines a class of its name; or null. liblldb does not
+    // complete every declaration a type of an image refers to from that
+    // image's definition.
+    const TargetType* definitionInItsImage(const TargetType& declaration);
 
     // The class whose static data member `member` is the variable starting at
     // `variable`, such as a JS cell class's s_info: the one class whose member
@@ -160,6 +166,7 @@ private:
     // By name; types of one name from different images or anonymous namespaces share an entry.
     HashMap<String, Vector<std::unique_ptr<TargetType>>> m_types;
     HashMap<Address, const TargetType*> m_classesOfVTables;
+    HashMap<const TargetType*, const TargetType*> m_definitions;
     struct DynamicTypeOfFirstWord {
         int64_t offsetToTop;
         const TargetType* type; // Null if an object with this first word has none.

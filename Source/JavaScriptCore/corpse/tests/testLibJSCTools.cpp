@@ -149,6 +149,8 @@ int main(int argc, char** argv)
         runCorpseSuite();
         JSCToolsTest::testDebugInfo();
         JSCToolsTest::testHeapWalk();
+        JSCToolsTest::testTypeFieldHierarchies();
+        JSCToolsTest::testHeapDump();
         JSCToolsTest::testVM();
     }
 

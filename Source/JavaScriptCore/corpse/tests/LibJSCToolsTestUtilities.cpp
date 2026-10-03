@@ -531,6 +531,68 @@ void analyzeOutOfProcessThenRelease(CreateTargetObject create, NOESCAPE const Fu
 }
 #endif
 
+#if OS(DARWIN)
+void waitForAnalysis()
+{
+    uint8_t go = 0;
+    while (read(STDIN_FILENO, &go, 1) < 0 && errno == EINTR) { }
+}
+
+void analyzeBeforeAndAfter(CreateTargetObject create, NOESCAPE const Function<void(JSC::Corpse::Snapshot& before, JSC::Corpse::Snapshot& after, JSC::Corpse::Address)>& analyze)
+{
+    UTF8CString executablePath = thisExecutablePath();
+    auto offset = executablePath.isNull() ? std::nullopt : createOffset(create);
+    if (!offset)
+        return;
+    auto offsetText = makeString(hex(*offset)).utf8();
+    char* const arguments[] = {
+        const_cast<char*>(executablePath.legacyCStringPointer()),
+        const_cast<char*>("--target"),
+        const_cast<char*>(offsetText.legacyCStringPointer()),
+        nullptr
+    };
+    // The target's standard output is the address pipe, and its standard input the pipe that lets it run on.
+    std::array<int, 2> addressPipe { -1, -1 };
+    std::array<int, 2> goPipe { -1, -1 };
+    bool opened = !pipe(addressPipe.data()) && !pipe(goPipe.data());
+    auto closePipes = makeScopeExit([&] {
+        for (int fd : { addressPipe[0], addressPipe[1], goPipe[0], goPipe[1] }) {
+            if (fd >= 0)
+                close(fd);
+        }
+    });
+    TEST_ASSERT(opened, "the pipes to and from the target open");
+    if (!opened)
+        return;
+    for (int fd : { addressPipe[0], addressPipe[1], goPipe[0], goPipe[1] })
+        fcntl(fd, F_SETFD, FD_CLOEXEC);
+    posix_spawn_file_actions_t actions;
+    posix_spawn_file_actions_init(&actions);
+    posix_spawn_file_actions_adddup2(&actions, addressPipe[1], STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(&actions, goPipe[0], STDIN_FILENO);
+    pid_t child = 0;
+    int error = posix_spawn(&child, executablePath.legacyCStringPointer(), &actions, nullptr, arguments, environ);
+    posix_spawn_file_actions_destroy(&actions);
+    TEST_ASSERT(!error, "the target process launches");
+    if (error)
+        return;
+    auto killChild = makeScopeExit([&] {
+        kill(child, SIGKILL);
+        while (waitpid(child, nullptr, 0) < 0 && errno == EINTR) { }
+    });
+    uint64_t address = 0;
+    uint64_t again = 0;
+    bool reported = readAll(addressPipe[0], asMutableByteSpan(address));
+    auto before = reported ? takeSnapshot(child) : nullptr;
+    uint8_t go = 1;
+    reported = reported && write(goPipe[1], &go, 1) == 1 && readAll(addressPipe[0], asMutableByteSpan(again)) && again == address;
+    TEST_ASSERT(reported, "the target reports its object before and after");
+    auto after = reported ? takeSnapshot(child) : nullptr;
+    if (before && after)
+        analyze(*before, *after, JSC::Corpse::Address { address });
+}
+#endif
+
 void analyzeAfterTargetExits(CreateTargetObject create, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
 {
     analyzeOutOfProcess(create, TargetAfterSnapshot::Exits, analyze);

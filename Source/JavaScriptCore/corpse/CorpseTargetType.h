@@ -32,6 +32,7 @@
 #include <JavaScriptCore/CorpseAddress.h>
 #include <memory>
 #include <optional>
+#include <string_view>
 #include <wtf/Noncopyable.h>
 #include <wtf/TZoneMalloc.h>
 #include <wtf/Variant.h>
@@ -78,6 +79,7 @@ public:
 
     struct Class {
         bool isPolymorphic;
+        bool isUnion; // Every field starts at the start; which one is live is the holder's to say.
         Vector<Field> properFields; // Declared by this class itself, not by a base.
         Vector<Base> bases; // Direct and non-virtual.
         Vector<Base> virtualBases; // Direct and indirect, at their offsets in a complete object of this class.
@@ -104,6 +106,16 @@ public:
     const TargetType* templateArgument(unsigned index) const;
     // The `index`th template argument, if it is an integer, such as PackedAlignedPtr's alignment.
     std::optional<uint64_t> templateIntegerArgument(unsigned index) const;
+
+    struct Enumerator {
+        UTF8CString name; // Unqualified.
+        int64_t value;
+    };
+    // The enumerators of an enumeration, in declaration order; empty for any other type.
+    Vector<Enumerator> enumerators() const;
+    std::optional<int64_t> enumeratorValue(std::string_view name) const;
+    // The type of the static data member `name` this class declares itself, or null.
+    const TargetType* staticFieldType(const char* name) const;
 
 private:
     TargetType(SnapshotDebugInfo&, const lldb::SBType&);
