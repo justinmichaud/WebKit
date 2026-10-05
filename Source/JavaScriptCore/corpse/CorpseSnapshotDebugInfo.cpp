@@ -50,6 +50,11 @@
 namespace JSC {
 namespace Corpse {
 
+static unsigned long long forReport(Address address)
+{
+    return address.toTargetVMAddress();
+}
+
 WTF_MAKE_TZONE_ALLOCATED_IMPL(SnapshotDebugInfo);
 
 // Itanium C++ ABI: the offset to top is the second word before a vtable's address point.
@@ -204,12 +209,12 @@ const TargetType* SnapshotDebugInfo::classOfDestructor(Address function, bool& i
     // A destructor's only parameter is `this`.
     lldb::SBValueList parameters = destructor.GetBlock().GetVariables(*m_target, true, false, false);
     if (parameters.GetSize() != 1) {
-        CORPSE_REPORT("The destructor at 0x%llx has %u parameters in its debug info", function.toTargetVMAddress(), parameters.GetSize());
+        CORPSE_REPORT("The destructor at 0x%llx has %u parameters in its debug info", forReport(function), parameters.GetSize());
         return nullptr;
     }
     lldb::SBType type = parameters.GetValueAtIndex(0).GetType().GetPointeeType();
     if (!type.IsValid() || !type.IsTypeComplete()) {
-        CORPSE_REPORT("The class of the destructor at 0x%llx is incomplete in its debug info", function.toTargetVMAddress());
+        CORPSE_REPORT("The class of the destructor at 0x%llx is incomplete in its debug info", forReport(function));
         return nullptr;
     }
     return &this->type(type);
@@ -238,24 +243,24 @@ const TargetType* SnapshotDebugInfo::dynamicTypeAt(Snapshot& snapshot, Address a
     }
     std::optional<Diagnostics> diagnostics;
     if (reportFailures == ReportFailures::Yes)
-        diagnostics.emplace(CORPSE_DESCRIBE("resolving the dynamic type of the object at 0x%llx", address.toTargetVMAddress()));
+        diagnostics.emplace(CORPSE_DESCRIBE("resolving the dynamic type of the object at 0x%llx", forReport(address)));
     Memory& memory = snapshot.memory();
 
     auto vptr = memory.ptr<uint64_t>(address);
     if (!vptr) {
-        CORPSE_REPORT_IF(reportFailures, "Could not read the vtable pointer of the object at 0x%llx", address.toTargetVMAddress());
+        CORPSE_REPORT_IF(reportFailures, "Could not read the vtable pointer of the object at 0x%llx", forReport(address));
         return nullptr;
     }
     Address vtable = Address { *vptr }.stripped();
     if (!vtable || vtable == Address::deletedValue()) {
-        CORPSE_REPORT_IF(reportFailures, "The object at 0x%llx has no vtable pointer", address.toTargetVMAddress());
+        CORPSE_REPORT_IF(reportFailures, "The object at 0x%llx has no vtable pointer", forReport(address));
         return nullptr;
     }
     // A vtable fixes where its complete object starts and the class it is, so
     // each first word is resolved once, including those that are no vtable.
     if (auto known = m_dynamicTypesOfFirstWords.find(vtable); known != m_dynamicTypesOfFirstWords.end()) {
         if (!known->value.type) {
-            CORPSE_REPORT_IF(reportFailures, "The object at 0x%llx has no dynamic type, as an earlier lookup of its vtable found", address.toTargetVMAddress());
+            CORPSE_REPORT_IF(reportFailures, "The object at 0x%llx has no dynamic type, as an earlier lookup of its vtable found", forReport(address));
             return nullptr;
         }
         completeObject = address + static_cast<uint64_t>(known->value.offsetToTop);
@@ -269,12 +274,12 @@ const TargetType* SnapshotDebugInfo::dynamicTypeAt(Snapshot& snapshot, Address a
     // An object that is not polymorphic, read as if it were, holds anything in
     // its first word; only a pointer into an image's data can be a vtable.
     if (!isInImage(vtable)) {
-        CORPSE_REPORT_IF(reportFailures, "The vtable at 0x%llx is in no image with debug info", vtable.toTargetVMAddress());
+        CORPSE_REPORT_IF(reportFailures, "The vtable at 0x%llx is in no image with debug info", forReport(vtable));
         return remember(nullptr);
     }
     auto offsetToTop = memory.ptr<int64_t>(vtable - offsetToTopBeforeAddressPoint);
     if (!offsetToTop) {
-        CORPSE_REPORT_IF(reportFailures, "Could not read the offset to top of the vtable at 0x%llx", vtable.toTargetVMAddress());
+        CORPSE_REPORT_IF(reportFailures, "Could not read the offset to top of the vtable at 0x%llx", forReport(vtable));
         return remember(nullptr);
     }
     completeObject = address + static_cast<uint64_t>(*offsetToTop);
@@ -283,12 +288,12 @@ const TargetType* SnapshotDebugInfo::dynamicTypeAt(Snapshot& snapshot, Address a
     if (*offsetToTop) {
         vptr = memory.ptr<uint64_t>(completeObject);
         if (!vptr) {
-            CORPSE_REPORT_IF(reportFailures, "Could not read the vtable pointer of the complete object at 0x%llx", completeObject.toTargetVMAddress());
+            CORPSE_REPORT_IF(reportFailures, "Could not read the vtable pointer of the complete object at 0x%llx", forReport(completeObject));
             return nullptr;
         }
         vtable = Address { *vptr }.stripped();
         if (!isInImage(vtable)) {
-            CORPSE_REPORT_IF(reportFailures, "The vtable at 0x%llx is in no image with debug info", vtable.toTargetVMAddress());
+            CORPSE_REPORT_IF(reportFailures, "The vtable at 0x%llx is in no image with debug info", forReport(vtable));
             return remember(nullptr);
         }
     }
@@ -298,7 +303,7 @@ const TargetType* SnapshotDebugInfo::dynamicTypeAt(Snapshot& snapshot, Address a
         return classOfVTable(snapshot, vtable, reportFailures);
     });
     if (!entry.isNewEntry && !entry.iterator->value)
-        CORPSE_REPORT_IF(reportFailures, "The vtable at 0x%llx names no class, as an earlier lookup found", vtable.toTargetVMAddress());
+        CORPSE_REPORT_IF(reportFailures, "The vtable at 0x%llx names no class, as an earlier lookup found", forReport(vtable));
     return remember(entry.iterator->value);
 }
 
@@ -308,7 +313,7 @@ const TargetType* SnapshotDebugInfo::classOfVTable(Snapshot& snapshot, Address v
     for (size_t slot = 0; slot < maxVTableSlots; ++slot) {
         auto entry = memory.ptr<uint64_t>(vtable + slot * sizeof(uint64_t));
         if (!entry) {
-            CORPSE_REPORT_IF(reportFailures, "Could not read slot %zu of the vtable at 0x%llx", slot, vtable.toTargetVMAddress());
+            CORPSE_REPORT_IF(reportFailures, "Could not read slot %zu of the vtable at 0x%llx", slot, forReport(vtable));
             return nullptr;
         }
         bool inImage = false;
@@ -319,7 +324,7 @@ const TargetType* SnapshotDebugInfo::classOfVTable(Snapshot& snapshot, Address v
             break;
         Diagnostics::count(DiagnosticCounter::VTableSlotsNotDestructors);
     }
-    CORPSE_REPORT_IF(reportFailures, "No destructor in the vtable at 0x%llx: its class needs a virtual destructor", vtable.toTargetVMAddress());
+    CORPSE_REPORT_IF(reportFailures, "No destructor in the vtable at 0x%llx: its class needs a virtual destructor", forReport(vtable));
     return nullptr;
 }
 
@@ -470,12 +475,20 @@ static bool isMemberOf(std::string_view member, std::string_view className)
 // of a class, so a class whose destructor is implicit lists none. liblldb
 // computes each one's linkage name with clang's mangler from the class itself,
 // and demangles it with LLVM's demangler, as it does the symbol table's names.
+// A class template's instance that liblldb gave no template arguments, such as
+// the PtrHash<WTF::SymbolImpl*> of a WeakGCMap on Linux, is mangled as one
+// identifier, "26PtrHash<WTF::SymbolImpl *>", which no Itanium mangled name
+// holds and whose demangling is not the symbol table's: such a member is
+// skipped.
 static std::string declaredMember(lldb::SBType& type)
 {
     std::string result;
     uint32_t count = type.GetNumberOfMemberFunctions();
     for (uint32_t index = 0; index < count; ++index) {
         lldb::SBTypeMemberFunction function = type.GetMemberFunctionAtIndex(index);
+        const char* mangledName = function.GetMangledName();
+        if (mangledName && std::string_view { mangledName }.find_first_of("<> ") != std::string_view::npos)
+            continue;
         const char* demangledName = function.GetDemangledName();
         std::string member = demangledName ? demangledName : std::string { };
         if (member.empty())
@@ -591,7 +604,7 @@ const TargetType* SnapshotDebugInfo::closureOfCallableWrapper(Snapshot& snapshot
                 parameters = std::string_view { name }.substr(callPrefix.size() - 1);
         }
         if (parameters.empty()) {
-            CORPSE_REPORT("The vtable at 0x%llx, of '%s', has no call()", vtable.toTargetVMAddress(), wrapper.c_str());
+            CORPSE_REPORT("The vtable at 0x%llx, of '%s', has no call()", forReport(vtable), wrapper.c_str());
             return Closure { true, nullptr };
         }
 
@@ -636,7 +649,7 @@ bool SnapshotDebugInfo::vtableSymbolNames(Snapshot& snapshot, Address vtable, co
     }
     std::string vtableClass = vtableClassName(vtable);
     if (vtableClass.empty()) {
-        CORPSE_REPORT("The vtable at 0x%llx is in '%s', which is not a class's vtable", vtable.toTargetVMAddress(), vtableName);
+        CORPSE_REPORT("The vtable at 0x%llx is in '%s', which is not a class's vtable", forReport(vtable), vtableName);
         return false;
     }
 
@@ -645,7 +658,7 @@ bool SnapshotDebugInfo::vtableSymbolNames(Snapshot& snapshot, Address vtable, co
     // class's are not.
     std::string member = declaredMember(*type.m_type);
     if (member.empty()) {
-        CORPSE_REPORT("'%s', the class of the destructor in the vtable at 0x%llx, declares no member function with a linkage name", type.name().legacyCStringPointer(), vtable.toTargetVMAddress());
+        CORPSE_REPORT("'%s', the class of the destructor in the vtable at 0x%llx, declares no member function with a linkage name", type.name().legacyCStringPointer(), forReport(vtable));
         return false;
     }
     if (isMemberOf(withUnnamedLocalTypesErased(member), withUnnamedLocalTypesErased(vtableClass)))
@@ -657,7 +670,7 @@ bool SnapshotDebugInfo::vtableSymbolNames(Snapshot& snapshot, Address vtable, co
         if (auto* closure = closureOfCallableWrapper(snapshot, vtable, isUnnamed); closure && closureFits(type, *closure))
             return true;
     }
-    CORPSE_REPORT("The vtable at 0x%llx is the vtable of '%s', but the class its destructor gives declares '%s'", vtable.toTargetVMAddress(), vtableClass.c_str(), member.c_str());
+    CORPSE_REPORT("The vtable at 0x%llx is the vtable of '%s', but the class its destructor gives declares '%s'", forReport(vtable), vtableClass.c_str(), member.c_str());
     return false;
 }
 
@@ -685,6 +698,14 @@ const TargetType* SnapshotDebugInfo::classNamedBeside(const TargetType& neighbor
     for (uint32_t index = 0; !isComplete(found) && index < m_target->GetNumModules(); ++index)
         found = m_target->GetModuleAtIndex(index).FindFirstType(name);
     if (!isComplete(found))
+        return nullptr;
+    return &type(found);
+}
+
+const TargetType* SnapshotDebugInfo::nestedClass(const TargetType& outer, const char* name)
+{
+    lldb::SBType found = outer.m_type->FindDirectNestedType(name);
+    if (!found.IsValid() || !found.IsTypeComplete() || !found.GetByteSize())
         return nullptr;
     return &type(found);
 }
@@ -726,13 +747,13 @@ const TargetType* SnapshotDebugInfo::classOfStaticMember(Address variable, const
     const char* linkageName = symbol.IsValid() ? symbol.GetMangledName() : nullptr;
     const char* demangledName = symbol.IsValid() ? symbol.GetName() : nullptr;
     if (!linkageName || !demangledName || symbol.GetStartAddress().GetLoadAddress(*m_target) != variable.toTargetVMAddress()) {
-        CORPSE_REPORT("No variable with a linkage name starts at 0x%llx", variable.toTargetVMAddress());
+        CORPSE_REPORT("No variable with a linkage name starts at 0x%llx", forReport(variable));
         return nullptr;
     }
     std::string_view name { demangledName };
     std::string scopedMember = std::string { "::" } + member;
     if (!name.ends_with(scopedMember)) {
-        CORPSE_REPORT("The variable at 0x%llx is '%s', not a static member '%s'", variable.toTargetVMAddress(), demangledName, member);
+        CORPSE_REPORT("The variable at 0x%llx is '%s', not a static member '%s'", forReport(variable), demangledName, member);
         return nullptr;
     }
     std::string className { name.substr(0, name.size() - scopedMember.size()) };
@@ -993,6 +1014,11 @@ const TargetType* SnapshotDebugInfo::classNamed(Address, const char*)
 }
 
 const TargetType* SnapshotDebugInfo::classNamedBeside(const TargetType&, const char*)
+{
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+const TargetType* SnapshotDebugInfo::nestedClass(const TargetType&, const char*)
 {
     RELEASE_ASSERT_NOT_REACHED();
 }

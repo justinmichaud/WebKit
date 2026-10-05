@@ -320,6 +320,18 @@ std::optional<Region> Region::findContaining(const Vector<Region>& regions, Addr
     return *(after - 1);
 }
 
+std::optional<Address> Region::readableEnd(const Vector<Region>& regions, Address address)
+{
+    auto span = regions.span();
+    auto after = std::ranges::upper_bound(span, address, { }, &Region::base);
+    if (after == span.begin() || !(after - 1)->contains(address) || !(after - 1)->isReadable())
+        return std::nullopt;
+    Address end = (after - 1)->end();
+    for (; after != span.end() && after->base() == end && after->isReadable(); ++after)
+        end = after->end();
+    return end;
+}
+
 } // namespace Corpse
 } // namespace JSC
 

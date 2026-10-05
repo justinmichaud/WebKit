@@ -76,8 +76,14 @@
 #if ENABLE(MYA_HEAP)
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 #include <bmalloc/pas_enumerator.h>
+#if !OS(DARWIN)
+#include <bmalloc/pas_heap_lock.h>
+#endif
 #include <bmalloc/pas_root.h>
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+#if !OS(DARWIN)
+#include <dlfcn.h>
+#endif
 #endif
 
 namespace JSC {
@@ -848,7 +854,7 @@ private:
     // by the qualified name of a class the walk has reached. True if `value` was
     // one, and has been read.
     bool walkByName(const TargetValue&);
-    enum class Reader : uint8_t { None, Vector, HashTable, RobinHoodHashTable, TrailingArray, ButterflyArray, SegmentedVector, ConcurrentBufferArray, SymbolTableEntry, CodeBlock, AlignedStorage, CodePointer, LazyPointer, CompactPointer, PackedPointer, JSString, PropertyTable, Optional, StringImpl, ObjectButterfly, StrongBlock, InlineWatchpointSet, ArraySegment, WeakBlock, ExpressionInfo, ArrayBufferView, ArrayBufferContents, Variant, HasOwnPropertyCache, ImmutableStyleProperties, InlineMap, UnlinkedFunctionExecutable, CSSSelector, JSValue, StringImplShape, HashTableValue, PropertyCondition, InlineCacheHandler, CellButterfly, CSSPrimitiveValue, CSSPrimitiveData, MarkedSpace, TypeField, CompactPointerTuple, StructureID, Function, StructureChain, WeakPointer, CallableWrapper, ShareableElementData, Atomic, Span, UnlinkedMetadataTable, CodeOrigin, InferredValue, IncomingReferences };
+    enum class Reader : uint8_t { None, Vector, HashTable, RobinHoodHashTable, TrailingArray, ButterflyArray, SegmentedVector, ConcurrentBufferArray, SymbolTableEntry, CodeBlock, AlignedStorage, CodePointer, LazyPointer, CompactPointer, PackedPointer, JSString, PropertyTable, Optional, StringImpl, ObjectButterfly, StrongBlock, InlineWatchpointSet, ArraySegment, WeakBlock, ExpressionInfo, ArrayBufferView, ArrayBufferContents, Variant, HasOwnPropertyCache, ImmutableStyleProperties, InlineMap, UnlinkedFunctionExecutable, CSSSelector, JSValue, StringImplShape, HashTableValue, PropertyCondition, InlineCacheHandler, CellButterfly, CSSPrimitiveValue, CSSPrimitiveData, MarkedSpace, TypeField, CompactPointerTuple, StructureID, Function, StructureChain, WeakPointer, CallableWrapper, ShareableElementData, Atomic, Span, UnlinkedMetadataTable, CodeOrigin, InferredValue, IncomingReferences, LoaderThreads, ThreadSpecific };
     Reader readerFor(const TargetType&);
     static Reader readerNamed(std::string_view qualifiedName);
     void walkVector(const TargetValue&);
@@ -876,6 +882,23 @@ private:
     void walkStrongBlock(const TargetValue&);
     void walkInlineWatchpointSet(const TargetValue&);
     void walkArraySegment(const TargetValue&);
+    void walkLoaderThreads(const TargetValue&);
+    void walkThreadSpecific(const TargetValue&);
+    void walkThreadSpecificValues();
+    // Each thread's struct pthread, which walkLoaderThreads finds, and its type.
+    Vector<Address> m_threads;
+    const TargetType* m_threadClass { nullptr };
+    // Each WTF::ThreadSpecific's address, its pthread key and the class of what
+    // it keeps there, its Data; and how many walkThreadSpecificValues has read.
+    struct ThreadSpecificKey {
+        Address owner;
+        uint64_t key;
+        const TargetType* data;
+        friend bool operator==(const ThreadSpecificKey&, const ThreadSpecificKey&) = default;
+    };
+    Vector<ThreadSpecificKey> m_threadSpecifics;
+    size_t m_threadSpecificsRead { 0 };
+    HashMap<const TargetType*, const TargetType*> m_threadSpecificDataClasses;
     void walkWeakBlock(const TargetValue&);
     void walkExpressionInfo(const TargetValue&);
     void walkArrayBufferView(const TargetValue&);
@@ -1122,6 +1145,11 @@ void ReachWalk::run()
     m_rootKind = "a thread's stack";
     walkStacks();
     drain();
+    // The values a value read there holds may have values of their own.
+    while (m_threadSpecificsRead < m_threadSpecifics.size()) {
+        walkThreadSpecificValues();
+        drain();
+    }
     // A precise allocation holds its header and, while it is live, its cell;
     // the cell of one that is dead, and not yet swept, is the JS heap's free memory.
     m_rootKind = "a PreciseAllocation";
@@ -1428,9 +1456,9 @@ void ReachWalk::walkInPlace(Address address, const TargetType& type, const Targe
             return;
         // An array is a member of a value its allocation or variable holds whole, so one that runs
         // past readable memory means the walk misread that value. None of it is read.
-        auto region = Region::findContaining(m_snapshot.regions(), address);
+        auto readableEnd = Region::readableEnd(m_snapshot.regions(), address);
         uint64_t count = array->count;
-        if (!region || !region->isReadable() || count > (region->end() - address) / array->element.byteSize()) {
+        if (!readableEnd || count > (*readableEnd - address) / array->element.byteSize()) {
             String holder;
             if (auto [holderAddress, holderType] = m_contextObject; holderType) {
                 auto holderAllocation = allocationOf(holderAddress, 1);
@@ -1821,6 +1849,10 @@ auto ReachWalk::readerNamed(std::string_view name) -> Reader
         return Reader::ArraySegment;
     if (name == "JSC::WeakBlock")
         return Reader::WeakBlock;
+    if (name == "rtld_global")
+        return Reader::LoaderThreads;
+    if (name.starts_with("WTF::ThreadSpecific<") && name.ends_with(">"))
+        return Reader::ThreadSpecific;
     if (name == "JSC::ExpressionInfo")
         return Reader::ExpressionInfo;
     if (name == "JSC::JSArrayBufferView")
@@ -1872,7 +1904,7 @@ auto ReachWalk::readerNamed(std::string_view name) -> Reader
         return Reader::ShareableElementData;
     if (name.starts_with("std::__1::__cxx_atomic_base_impl<"))
         return Reader::Atomic;
-    if (name.starts_with("std::__1::span<"))
+    if (name.starts_with("std::__1::span<") || name.starts_with("std::span<"))
         return Reader::Span;
     if (name == "JSC::UnlinkedMetadataTable")
         return Reader::UnlinkedMetadataTable;
@@ -1966,6 +1998,12 @@ bool ReachWalk::walkByName(const TargetValue& value)
         return true;
     case Reader::WeakBlock:
         walkWeakBlock(value);
+        return true;
+    case Reader::LoaderThreads:
+        walkLoaderThreads(value);
+        return true;
+    case Reader::ThreadSpecific:
+        walkThreadSpecific(value);
         return true;
     case Reader::ExpressionInfo:
         walkExpressionInfo(value);
@@ -2541,6 +2579,112 @@ void ReachWalk::walkWeakBlock(const TargetValue& block)
     uint64_t capacity = WeakBlock::blockSize / weakImpl->byteSize();
     if (first < capacity)
         walkElements(block.address() + first * weakImpl->byteSize(), *weakImpl, capacity - first);
+}
+
+// glibc's ld.so lists every thread's struct pthread in _rtld_global's
+// _dl_stack_user (the main thread's, and those on stacks the program gave) and
+// _dl_stack_used (on stacks glibc made), through each one's `list` member
+// (nptl-stack.c). A thread keeps its pthread_getspecific values in its struct
+// pthread, which no pointer reaches: it is read where the list says, as the
+// image that describes rtld_global describes struct pthread.
+void ReachWalk::walkLoaderThreads(const TargetValue& loader)
+{
+    walkMembers(loader, IsComplete::Yes);
+    const TargetType* thread = classBeside(loader.type(), "pthread");
+    uint64_t listOffset = 0;
+    auto* list = thread ? findField(*thread, "list", listOffset) : nullptr;
+    if (!list)
+        return;
+    listOffset += list->offset;
+    for (const char* name : { "_dl_stack_user", "_dl_stack_used" }) {
+        uint64_t headOffset = 0;
+        auto* headField = findField(loader.type(), name, headOffset);
+        if (!headField)
+            continue;
+        Address head = loader.address() + headOffset + headField->offset;
+        auto next = m_snapshot.memory().ptr<uint64_t>(head);
+        for (unsigned count = 0; next && *next && Address { *next } != head && count < maxLinkedListLength; ++count) {
+            Address node { *next };
+            if (!m_threads.contains(node - listOffset))
+                m_threads.append(node - listOffset);
+            enqueue(TargetValue::at(m_snapshot, node - listOffset, *thread));
+            next = m_snapshot.memory().ptr<uint64_t>(node);
+        }
+    }
+    m_threadClass = thread;
+}
+
+// A WTF::ThreadSpecific keeps each thread's value, a Data, in the thread's
+// slot for its pthread key (ThreadSpecific::setInTLS), where only a void*
+// holds it. Its members are walked as usual, and its key and its Data's class
+// are kept for walkThreadSpecificValues.
+void ReachWalk::walkThreadSpecific(const TargetValue& threadSpecific)
+{
+    walkMembers(threadSpecific, IsComplete::Yes);
+    auto key = threadSpecific.properField("m_key").integer();
+    const TargetType* data = m_threadSpecificDataClasses.ensure(&threadSpecific.type(), [&] {
+        return m_heap.m_debugInfo->nestedClass(threadSpecific.type(), "Data");
+    }).iterator->value;
+    if (!key || *key < 0 || !data)
+        return;
+    ThreadSpecificKey entry { threadSpecific.address(), static_cast<uint64_t>(*key), data };
+    if (!m_threadSpecifics.contains(entry))
+        m_threadSpecifics.append(entry);
+}
+
+// Each thread's value of each ThreadSpecific, as glibc's pthread_getspecific
+// reads it: a key below PTHREAD_KEY_2NDLEVEL_SIZE (32) in specific_1stblock,
+// and any other in the second-level block `specific` points to. A value is
+// that ThreadSpecific's only if its Data's `owner` says so: a ThreadSpecific
+// read in storage not yet constructed, such as a LazyNeverDestroyed's, has
+// key 0, another's.
+void ReachWalk::walkThreadSpecificValues()
+{
+    size_t unread = m_threadSpecificsRead;
+    m_threadSpecificsRead = m_threadSpecifics.size();
+    if (!m_threadClass)
+        return;
+    uint64_t firstBlockOffset = 0;
+    uint64_t secondLevelOffset = 0;
+    auto* firstBlock = findField(*m_threadClass, "specific_1stblock", firstBlockOffset);
+    auto* secondLevel = findField(*m_threadClass, "specific", secondLevelOffset);
+    auto* keyDataArray = firstBlock ? std::get_if<TargetType::Array>(&firstBlock->type.layout()) : nullptr;
+    uint64_t dataOffset = 0;
+    auto* data = keyDataArray ? findField(keyDataArray->element, "data", dataOffset) : nullptr;
+    if (!data || !secondLevel || !keyDataArray->count)
+        return;
+    firstBlockOffset += firstBlock->offset;
+    secondLevelOffset += secondLevel->offset;
+    dataOffset += data->offset;
+    uint64_t blockSize = keyDataArray->count;
+    uint64_t keyDataSize = keyDataArray->element.byteSize();
+    m_rootKind = "a thread's ThreadSpecific value";
+    for (size_t index = unread; index < m_threadSpecificsRead; ++index) {
+        auto [owner, key, dataClass] = m_threadSpecifics[index];
+        uint64_t ownerOffset = 0;
+        auto* ownerField = findField(*dataClass, "owner", ownerOffset);
+        if (!ownerField)
+            continue;
+        ownerOffset += ownerField->offset;
+        for (Address thread : m_threads) {
+            Address keyData = thread + firstBlockOffset + key * keyDataSize;
+            if (key >= blockSize) {
+                auto block = m_snapshot.memory().ptr<uint64_t>(thread + secondLevelOffset + (key / blockSize) * sizeof(uint64_t));
+                if (!block || !*block)
+                    continue;
+                keyData = Address { *block } + (key % blockSize) * keyDataSize;
+            }
+            auto value = m_snapshot.memory().ptr<uint64_t>(keyData + dataOffset);
+            if (!value || !*value)
+                continue;
+            auto valueOwner = m_snapshot.memory().ptr<uint64_t>(Address { *value } + ownerOffset);
+            if (!valueOwner || Address { *valueOwner } != owner)
+                continue;
+            m_contextClass = nullptr;
+            m_contextField = nullptr;
+            follow(Address { *value }, *dataClass);
+        }
+    }
 }
 
 // ExpressionInfo::chapters() and encodedInfo(): m_numberOfChapters Chapters
@@ -3150,18 +3294,26 @@ void ReachWalk::walkAtomic(const TargetValue& atomic)
     walkInPlace(atomic.address() + offset + value->offset, *type, &atomic.type(), value);
 }
 
-// libc++'s std::span: __size_ elements at __data_, or, for a static extent, as
-// many as the extent, its second template argument, says.
+// std::span: libc++'s __size_ elements at __data_, or libstdc++'s
+// _M_extent._M_extent_value (__detail::__extent_storage) at _M_ptr. A static
+// extent stores no size; its second template argument says it.
 void ReachWalk::walkSpan(const TargetValue& span)
 {
-    TargetValue data = span.properField("__data_");
+    bool isLibCxx = std::string_view { span.type().name().legacyCStringPointer() }.starts_with("std::__1::");
+    TargetValue data = span.properField(isLibCxx ? "__data_" : "_M_ptr");
     auto* pointer = data ? std::get_if<TargetType::Pointer>(&data.type().layout()) : nullptr;
     auto address = data ? data.pointerValue() : std::nullopt;
     if (!pointer || !address || !*address)
         return;
+    uint64_t sizeOffset = 0;
+    auto* size = findField(span.type(), isLibCxx ? "__size_" : "_M_extent", sizeOffset);
+    if (size && !isLibCxx) {
+        sizeOffset += size->offset;
+        size = findField(size->type, "_M_extent_value", sizeOffset);
+    }
     std::optional<uint64_t> count;
-    if (TargetValue size = span.properField("__size_")) {
-        if (auto value = size.integer())
+    if (size) {
+        if (auto value = TargetValue::at(m_snapshot, span.address() + sizeOffset + size->offset, size->type).integer())
             count = static_cast<uint64_t>(*value);
     } else if (auto extent = span.type().templateIntegerArgument(1); extent && *extent != std::dynamic_extent)
         count = *extent;
@@ -3544,7 +3696,8 @@ void ReachWalk::summarize(const Vector<HeapWalk::Allocation>& excluded, size_t l
         auto next = std::ranges::upper_bound(excludedRanges, allocation.address, { }, [](const HeapWalk::Allocation& range) { return range.address + range.size; });
         return next != excludedRanges.end() && next->address < allocation.address + allocation.size;
     };
-    Vector<HeapWalk::Untyped> untyped;
+    // Each allocation with untyped bytes, by index: only the largest are named.
+    Vector<std::pair<size_t, uint64_t>> untyped;
     HashMap<const TargetType*, uint64_t> untypedByType;
     HashMap<String, uint64_t> untypedByReacher;
     for (size_t index = 0; index < m_allocations.size(); ++index) {
@@ -3565,11 +3718,11 @@ void ReachWalk::summarize(const Vector<HeapWalk::Allocation>& excluded, size_t l
         result.bytesReached += allocation.size;
         if (accounted > result.bytesTypedIn[index]) {
             uint64_t bytes = accounted - result.bytesTypedIn[index];
-            untyped.append({ allocation, bytes, m_typeAtStart[index] ? makeString(m_typeAtStart[index]->name()) : String(), reachedBy(index) });
+            untyped.append({ index, bytes });
             if (m_typeAtStart[index])
                 untypedByType.add(m_typeAtStart[index], 0).iterator->value += bytes;
             else
-                untypedByReacher.add(untyped.last().reachedBy, 0).iterator->value += bytes;
+                untypedByReacher.add(reachedBy(index), 0).iterator->value += bytes;
         }
     }
     for (auto& [type, bytes] : untypedByType)
@@ -3578,9 +3731,10 @@ void ReachWalk::summarize(const Vector<HeapWalk::Allocation>& excluded, size_t l
         result.untypedByKind.append({ makeString("nothing at the start, reached by "_s, reacher), bytes });
     std::ranges::sort(result.untypedByKind, std::ranges::greater { }, &std::pair<String, uint64_t>::second);
     result.untypedByKind.shrink(std::min(result.untypedByKind.size(), listCount));
-    std::ranges::sort(untyped, std::ranges::greater { }, &HeapWalk::Untyped::bytesUntyped);
+    std::ranges::sort(untyped, std::ranges::greater { }, &std::pair<size_t, uint64_t>::second);
     untyped.shrink(std::min(untyped.size(), listCount));
-    result.mostUntyped = WTF::move(untyped);
+    for (auto [index, bytes] : untyped)
+        result.mostUntyped.append({ m_allocations[index], bytes, m_typeAtStart[index] ? makeString(m_typeAtStart[index]->name()) : String(), reachedBy(index) });
 }
 
 // The deepest field of `type` that covers `offset`, as "Class::field".
@@ -4016,17 +4170,49 @@ struct LibpasEnumeration {
     Vector<uint8_t> copy;
     HeapWalk::LibpasRecords records;
     bool failed { false };
+    // Bytes mya gives libpas in place of the snapshot's (relocatedRoot), sorted by address.
+    struct Overlay {
+        Address address;
+        Vector<uint8_t> bytes;
+    };
+    Vector<Overlay> overlays;
 };
 
 void* readSnapshotMemory(pas_enumerator*, void* address, size_t size, void* argument)
 {
     auto& enumeration = *static_cast<LibpasEnumeration*>(argument);
-    auto bytes = enumeration.memory.span<uint8_t>(Address { address }, size);
-    if (!bytes) {
+    Address start { address };
+    // The snapshot's bytes between the overlays, and each overlay's own.
+    Vector<uint8_t> copy(size);
+    uint64_t offset = 0;
+    auto readSnapshot = [&](uint64_t end) {
+        if (offset >= end)
+            return true;
+        auto bytes = enumeration.memory.span<uint8_t>(start + offset, static_cast<size_t>(end - offset));
+        if (!bytes)
+            return false;
+        memcpySpan(copy.mutableSpan().subspan(offset), std::span<const uint8_t> { bytes });
+        offset = end;
+        return true;
+    };
+    for (const auto& overlay : enumeration.overlays) {
+        uint64_t overlayEnd = overlay.address.toTargetVMAddress() + overlay.bytes.size();
+        if (overlayEnd <= start.toTargetVMAddress() || overlay.address >= start + size)
+            continue;
+        uint64_t overlayStart = overlay.address >= start ? overlay.address - start : 0;
+        if (!readSnapshot(overlayStart)) {
+            enumeration.failed = true;
+            return nullptr;
+        }
+        uint64_t end = std::min<uint64_t>(size, overlayEnd - start.toTargetVMAddress());
+        memcpySpan(copy.mutableSpan().subspan(offset), overlay.bytes.span().subspan((start + offset) - overlay.address, static_cast<size_t>(end - offset)));
+        offset = end;
+    }
+    if (!readSnapshot(size)) {
         enumeration.failed = true;
         return nullptr;
     }
-    enumeration.copy = Vector<uint8_t> { std::span<const uint8_t> { bytes } };
+    enumeration.copy = WTF::move(copy);
     return enumeration.copy.mutableSpan().data();
 }
 
@@ -4047,11 +4233,116 @@ void recordLibpasRange(pas_enumerator*, void* address, size_t size, pas_enumerat
     }
 }
 
+#if !OS(DARWIN)
+// libpas makes a root for libmalloc's enumeration only on Darwin. Elsewhere,
+// the target's root is this process's, pas_root_construct's, with every address
+// moved from this process's JavaScriptCore to the target's: mya is the target's
+// build (A12), and a root holds only the addresses of libpas's globals in
+// JavaScriptCore and two arrays of them. The root, its heap configs and a
+// compact heap bump are given to libpas at `rootAddress`, where the target maps
+// nothing. The enumerator reads the static heaps from its copy of the compact
+// heap, where the root's own array is, so the target's compact heap is given
+// to it with the array after its last allocation, and that bump after the
+// array.
+std::optional<Vector<LibpasEnumeration::Overlay>> relocatedRoot(Snapshot& snapshot, SnapshotDebugInfo& debugInfo, Address javaScriptCoreImage, Address rootAddress)
+{
+    auto targetConstruct = debugInfo.symbolAddress(javaScriptCoreImage, "pas_root_construct");
+    Dl_info ownImage { };
+    if (!targetConstruct || !dladdr(reinterpret_cast<const void*>(&pas_root_construct), &ownImage)) {
+        CORPSE_REPORT("JavaScriptCore's image has no pas_root_construct to make libpas's root from");
+        return std::nullopt;
+    }
+    // The heap lock, which libpas needs to create a root, keeps this process's libpas threads out of the heap.
+    static pas_root* ownRoot = [] {
+        pas_heap_lock_lock();
+        pas_root* root = pas_root_create();
+        pas_heap_lock_unlock();
+        return root;
+    }();
+    uint64_t slide = *targetConstruct - Address { reinterpret_cast<const void*>(&pas_root_construct) };
+    bool failed = false;
+    auto relocate = [&]<typename T>(T* pointer) -> T* {
+        Dl_info image { };
+        if (!pointer)
+            return nullptr;
+        if (!dladdr(pointer, &image) || image.dli_fbase != ownImage.dli_fbase) {
+            failed = true;
+            return nullptr;
+        }
+        return std::bit_cast<T*>(std::bit_cast<uintptr_t>(pointer) + slide);
+    };
+    // Every member of pas_root is relocated below, so that a new one fails to build here.
+    static_assert(sizeof(pas_root) == 26 * sizeof(void*));
+    pas_root root = *ownRoot;
+    root.compact_heap_reservation_base = relocate(root.compact_heap_reservation_base);
+    root.compact_heap_reservation_size = relocate(root.compact_heap_reservation_size);
+    root.compact_heap_reservation_guard_size = relocate(root.compact_heap_reservation_guard_size);
+    root.compact_heap_reservation_available_size = relocate(root.compact_heap_reservation_available_size);
+    root.compact_heap_reservation_bump = relocate(root.compact_heap_reservation_bump);
+    root.enumerable_page_malloc_page_list = relocate(root.enumerable_page_malloc_page_list);
+    root.large_heap_physical_page_sharing_cache_page_list = relocate(root.large_heap_physical_page_sharing_cache_page_list);
+    root.payload_reservation_page_list = relocate(root.payload_reservation_page_list);
+    root.thread_local_cache_node_first = relocate(root.thread_local_cache_node_first);
+    root.thread_local_cache_layout_first_segment = relocate(root.thread_local_cache_layout_first_segment);
+    root.all_heaps_first_heap = relocate(root.all_heaps_first_heap);
+    root.large_maps = relocate(root.large_maps);
+    root.large_sharing_tree = relocate(root.large_sharing_tree);
+    root.large_sharing_tree_jettisoned_nodes = relocate(root.large_sharing_tree_jettisoned_nodes);
+    root.baseline_allocator_table = relocate(root.baseline_allocator_table);
+    root.pas_pgm_hash_map_instance = relocate(root.pas_pgm_hash_map_instance);
+    root.pas_pgm_hash_map_instance_in_flux_stash = relocate(root.pas_pgm_hash_map_instance_in_flux_stash);
+    root.probabilistic_guard_malloc_has_been_used = relocate(root.probabilistic_guard_malloc_has_been_used);
+    Vector<pas_heap*> staticHeaps;
+    for (size_t index = 0; index < root.num_static_heaps; ++index)
+        staticHeaps.append(relocate(ownRoot->static_heaps[index]));
+    Vector<const pas_heap_config*> heapConfigs;
+    for (unsigned index = 0; index < root.num_heap_configs; ++index)
+        heapConfigs.append(relocate(ownRoot->heap_configs[index]));
+    if (failed) {
+        CORPSE_REPORT("libpas's root holds an address outside JavaScriptCore's image");
+        return std::nullopt;
+    }
+
+    auto readWord = [&](auto* pointer) {
+        return snapshot.memory().ptr<uint64_t>(Address { reinterpret_cast<const void*>(pointer) });
+    };
+    auto base = readWord(root.compact_heap_reservation_base);
+    auto size = readWord(root.compact_heap_reservation_size);
+    auto bump = readWord(root.compact_heap_reservation_bump);
+    if (!base || !size || !bump || !*base) {
+        CORPSE_REPORT("libpas's compact heap cannot be read");
+        return std::nullopt;
+    }
+    uint64_t staticHeapsOffset = roundUpToMultipleOf<sizeof(void*)>(*bump);
+    uint64_t newBump = staticHeapsOffset + staticHeaps.sizeInBytes();
+    if (newBump > *size) {
+        CORPSE_REPORT("libpas's compact heap has no room after its bump for the static heaps");
+        return std::nullopt;
+    }
+    root.static_heaps = std::bit_cast<pas_heap**>(static_cast<uintptr_t>(*base + staticHeapsOffset));
+    root.heap_configs = std::bit_cast<const pas_heap_config**>(static_cast<uintptr_t>((rootAddress + sizeof(pas_root)).toTargetVMAddress()));
+    root.compact_heap_reservation_bump = std::bit_cast<size_t*>(static_cast<uintptr_t>((rootAddress + sizeof(pas_root) + heapConfigs.sizeInBytes()).toTargetVMAddress()));
+
+    Vector<uint8_t> synthetic;
+    synthetic.append(asByteSpan(root));
+    synthetic.append(asByteSpan(heapConfigs.span()));
+    synthetic.append(asByteSpan(newBump));
+    Vector<uint8_t> staticHeapBytes;
+    staticHeapBytes.append(asByteSpan(staticHeaps.span()));
+    Vector<LibpasEnumeration::Overlay> overlays;
+    overlays.append({ rootAddress, WTF::move(synthetic) });
+    overlays.append({ Address { *base + staticHeapsOffset }, WTF::move(staticHeapBytes) });
+    return overlays;
+}
+#endif
+
 std::optional<HeapWalk::LibpasRecords> enumerateLibpas(Snapshot& snapshot, SnapshotDebugInfo& debugInfo, Address javaScriptCoreImage, bool allKinds)
 {
     CORPSE_DIAGNOSTICS(diagnostics, "enumerating libpas's heap from its root for libmalloc's enumeration");
+    LibpasEnumeration enumeration { snapshot.memory(), { }, { }, false, { } };
     // libpas is linked into JavaScriptCore, so this process's libpas is the
     // target's, with the root's layout its enumerator reads.
+#if OS(DARWIN)
     auto rootSymbol = debugInfo.symbolAddress(javaScriptCoreImage, "pas_root_for_libmalloc_enumeration");
     auto root = rootSymbol ? snapshot.memory().ptr<uint64_t>(*rootSymbol) : Memory::Ptr<uint64_t> { };
     if (!root || !*root) {
@@ -4063,7 +4354,19 @@ std::optional<HeapWalk::LibpasRecords> enumerateLibpas(Snapshot& snapshot, Snaps
         CORPSE_REPORT("The libpas root at 0x%llx is not one", static_cast<unsigned long long>(*root));
         return std::nullopt;
     }
-    LibpasEnumeration enumeration { snapshot.memory(), { }, { } };
+#else
+    // Below mmap_min_addr, where no process maps memory.
+    Address rootAddress { static_cast<uint64_t>(0x1000) };
+    if (Region::findContaining(snapshot.regions(), rootAddress)) {
+        CORPSE_REPORT("The target maps the address mya gives libpas's root, 0x%llx", forReport(rootAddress));
+        return std::nullopt;
+    }
+    auto overlays = relocatedRoot(snapshot, debugInfo, javaScriptCoreImage, rootAddress);
+    if (!overlays)
+        return std::nullopt;
+    enumeration.overlays = WTF::move(*overlays);
+    std::optional<uint64_t> root { rootAddress.toTargetVMAddress() };
+#endif
     pas_enumerator* enumerator = pas_enumerator_create(std::bit_cast<pas_root*>(static_cast<uintptr_t>(*root)), readSnapshotMemory, &enumeration, recordLibpasRange, &enumeration,
         allKinds ? pas_enumerator_record_meta_records : pas_enumerator_do_not_record_meta_records,
         allKinds ? pas_enumerator_record_payload_records : pas_enumerator_do_not_record_payload_records,

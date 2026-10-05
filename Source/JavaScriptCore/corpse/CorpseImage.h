@@ -56,6 +56,8 @@ public:
 #else
     // The NT_GNU_BUILD_ID note of the image as it is mapped.
     const Vector<uint8_t>& buildID() const { return m_buildID; }
+    // Its dynamic section in memory, link_map's l_ld.
+    Address dynamicSection() const { return m_dynamicSection; }
 #endif
 
 private:
@@ -70,10 +72,11 @@ private:
     {
     }
 #else
-    Image(Address loadAddress, UTF8CString&& path, Vector<uint8_t>&& buildID)
+    Image(Address loadAddress, UTF8CString&& path, Vector<uint8_t>&& buildID, Address dynamicSection)
         : m_loadAddress(loadAddress)
         , m_path(WTF::move(path))
         , m_buildID(WTF::move(buildID))
+        , m_dynamicSection(dynamicSection)
     {
     }
 #endif
@@ -84,6 +87,7 @@ private:
     UUID m_uuid;
 #else
     Vector<uint8_t> m_buildID;
+    Address m_dynamicSection;
 #endif
 };
 

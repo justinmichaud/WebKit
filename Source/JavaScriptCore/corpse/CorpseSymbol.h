@@ -44,7 +44,12 @@ class Snapshot;
 
 // A symbol looked up in a corpse by name. The lookup happens on construction.
 //
-// Only regular and absolute exports are read out of an image's trie. A re-export is
+// On Linux, an image's dynamic symbol table is searched through its GNU hash
+// table, in the loader's order, as dlsym(RTLD_DEFAULT) searches it: only the
+// symbols an image exports, at their default version. A thread-local is not
+// found, and neither is an indirect function, whose symbol is its resolver.
+//
+// On Darwin, only regular and absolute exports are read out of an image's trie. A re-export is
 // skipped rather than followed, so a name that one image re-exports resolves in the
 // image that defines it, as long as that image is loaded in the corpse. A
 // thread-local is not found at all.
@@ -67,16 +72,16 @@ private:
     Address lookUpName(Snapshot&);
 #if OS(DARWIN)
     Address resolveInImage(Memory&, Address loadAddress, std::string_view name);
-    bool hasReadBudget(size_t length);
+#else
+    Address resolveInImage(Memory&, Address loadAddress, Address dynamicSection, std::string_view name);
 #endif
+    bool hasReadBudget(size_t length);
 
     std::string m_name;
     Address m_address;
 
-#if OS(DARWIN)
     // What this lookup may still copy out of the corpse. Set when the search starts.
     size_t m_readBudget { 0 };
-#endif
 };
 
 } // namespace Corpse

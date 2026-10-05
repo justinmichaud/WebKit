@@ -58,8 +58,6 @@ void testSymbol()
     SuiteTracer tracer("Symbol");
     if (!tracer.shouldRun())
         return;
-    if (linuxSkip("Symbol", "corpses are not implemented on Linux yet"))
-        return;
 
     SelfSnapshot self;
     if (!self.isValid())

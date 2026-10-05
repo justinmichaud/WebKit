@@ -90,7 +90,8 @@ name for Apple's clang, which names a destructor's declaration with the unified
 
 - **mya parses no binary formats.** liblldb reads Mach-O, ELF and DWARF. mya
   reads only fixed structs from memory, such as dyld's image list and the ELF
-  program headers and `r_debug` the loader leaves there.
+  program headers, `r_debug`, dynamic sections and GNU hash tables the loader
+  leaves there.
 - **Every type comes from data in the target, or from the image that defines
   it.**
   - A vtable gives a class's dynamic type (patch 2).
@@ -176,6 +177,8 @@ printf 'snapshot --pid <WebContent pid>\nheap\n' | DYLD_FRAMEWORK_PATH=WebKitBui
 On Linux the DebugInfo suite needs libstdc++'s debug info in
 `/usr/lib/debug/.build-id` (patch 6). On Debian that is `libstdc++6-dbgsym`,
 from the `debian-debug` archive. Without it, the system-library test fails.
+The HeapWalk suite needs glibc's, `libc6-dbg`, which describes the `struct
+pthread` the walk reads each thread's pthread-specific data from (patch 14).
 
 `--verbose` prints, for the HeapWalk suite, the walk's reach and typed coverage,
 in and out of process, with the largest misses and untyped allocations.
@@ -310,6 +313,14 @@ against `alignof`.
    LLVM's demangler, and the class each names must be the same string.
    Anything else, including a construction vtable (`_ZTC…`), is reported, and
    the object has no dynamic type.
+
+   - *A member whose linkage name liblldb mangled from a class it gave no
+     template arguments is skipped.* On Linux, liblldb mangles
+     `WeakGCMap<WTF::SymbolImpl*, …>`'s constructors and destructor with
+     `NS1_26PtrHash<WTF::SymbolImpl *>E`, its `PtrHash` instance spelled as one
+     identifier, and their demangled names do not match the vtable's. No
+     Itanium mangled name holds `<`, `>` or a space, so a member whose name
+     does is passed over for the next.
 
    - *Not `abi::__cxa_demangle`.* Debian 12's cannot demangle a C++20
      constraint, which `RunLoop::Timer`'s constructors put in their lambdas'
@@ -534,7 +545,19 @@ by its path.
    `SetModuleLoadAddress(module, l_addr)`.
 
 An image's `loadAddress()` is its `l_addr`, which is where its header is in a
-position-independent image.
+position-independent image, and its `dynamicSection()` its `l_ld`.
+
+**Symbols.** `Snapshot::symbol` looks a name up, without liblldb, as
+`dlsym(RTLD_DEFAULT)` does: in each image in the loader's order, through the
+`DT_GNU_HASH` table its dynamic section gives (Bloom filter, bucket, chain),
+then `DT_SYMTAB`, `DT_STRTAB` and `DT_VERSYM`, as Darwin reads an exports trie.
+Only exported symbols at their default version are found. A thread-local is
+not, and neither is an indirect function, whose symbol is its resolver. glibc
+relocates a dynamic section's addresses in place except where the section is
+read-only (`DL_RO_DYN_SECTION`), so an address below the image's slide is an
+offset from it. The lookup shares Darwin's read budget. `mya heap` finds
+`JSC::VMManager::s_recentVM` this way, and JavaScriptCore's image by its
+soname, `libJavaScriptCore.so.1`.
 
 **Rejected.**
 - *Opening each file through `/proc/<pid>/map_files`*, which keeps a deleted
@@ -573,6 +596,8 @@ used.
 
 **Test.**
 - The tests of patches 1 to 5, run on Linux.
+- The Symbol suite: `g_config`, `tolower` and `environ` resolve to this
+  process's own addresses, and a hidden, an absent and an empty name do not.
 - Each image's path names the file `dladdr` gives for it.
 - `malloc`'s image is listed.
 - The target's executable, replaced after loading by a new file renamed over
@@ -789,6 +814,19 @@ The enumerator interprets the root's structs with mya's own libpas, which is
 why mya must be the target's build (A12). It covers `fastMalloc`, IsoHeaps and
 TZone heaps, using the production allocator.
 
+**On Linux libpas makes no root**: `pas_root_ensure_for_libmalloc_enumeration`
+is Darwin's. A root holds only the addresses of libpas's globals in
+JavaScriptCore and two arrays of them, so the target's root is mya's own,
+`pas_root_construct`'s, with each address moved by the difference between the
+two processes' `pas_root_construct` (`relocatedRoot`); every address must lie
+in mya's JavaScriptCore, and a `static_assert` on `pas_root`'s size makes a new
+member fail to build. The reader gives libpas the root, its heap configs and a
+compact heap bump at `0x1000`, below `mmap_min_addr`, where no process maps
+memory. The enumerator reads the static heaps from its copy of the compact heap
+(`pas_enumerator_read_compact`), where a real root's array is, so the reader
+gives it the target's compact heap with the array after its last allocation,
+and that bump just after the array. libpas's sources do not change (A8).
+
 The test's target also enumerates its own heap, in process, inside mya's safe
 point, the same way, with a reader that returns the address it is given, and
 records the result in the fixture. The test compares the two.
@@ -935,12 +973,14 @@ and `HashTable` use patch 4's readers.
 | `WebCore::CSS::PrimitiveData` | `payload.calc` when the index's storage is `indexStorageForCalc`, `UnitTraits::count`, which WebCore asserts is one more than the last enumerator of the raw type's unit: a member, or a static one for a type of one unit. |
 | `WebCore::CSSValue`, `WebCore::StyleRuleBase`, `WebCore::NodeRareData`, `WebCore::StyleProperties`, `WebCore::ElementData` | The subclass the type field names (below). |
 | `std::__1::__cxx_atomic_base_impl` (so libc++'s `std::atomic`) | `__a_value`, a C11 `_Atomic(T)` whose pointee liblldb does not give, as the template argument `T`. |
-| `std::__1::span` | `__size_` elements at `__data_`, or, for a static extent, as many as the second template argument; elements that run past the allocation they start in are an overrun, and none is read. A span's elements are otherwise read as one object, its first. |
+| `std::__1::span`, `std::span` | libc++'s `__size_` elements at `__data_`, or libstdc++'s `_M_extent._M_extent_value` at `_M_ptr`; for a static extent, which neither stores, as many as the second template argument. Elements that run past the allocation they start in are an overrun, and none is read. A span's elements are otherwise read as one object, its first. |
 | `JSC::UnlinkedMetadataTable` | Once finalized, `m_rawBuffer` as `MetadataTable::forEach` reads it: `m_numValueProfiles` `ValueProfile`s, the `LinkingData`, the offset tables (`s_offset16TableSize`, and `s_offset32TableSize` with `m_is32Bit`, private, computed from `NUMBER_OF_BYTECODE_WITH_METADATA`), then each bytecode's `Metadata`s from its offset, aligned to the `Metadata`, to the next. The `Metadata` classes are named, in their offset table's order, by JavaScriptCore's own `FOR_EACH_BYTECODE_METADATA_SIZE`, compiled into the walk, and asked for in JavaScriptCore's image. A range past the buffer's allocation is an overrun. |
 | `JSC::CodeOrigin` | On a 64-bit build, `m_compositeValue`: an `OutOfLineCodeOrigin*` when `s_maskIsOutOfLine` is set, masked with `s_maskCompositeValueForOutOfLinePointer`, and an `InlineCallFrame*` in `s_maskCompositeValueForPointer` otherwise (private, copied). |
 | `JSC::InferredValue` | `m_data`: an `InferredValueWatchpointSet*` without `IsThinFlag`, as the class named that in `InferredValue<T>`; with it, a cell in the bits of `ValueMask` (private, copied), which the walk reads with every live cell. |
 | `JSC::GCIncomingRefCounted` | `m_encodedPointer`: with `singletonFlag()` (private, copied), the one cell that refers to it; otherwise a `Vector<JSCell*>*`, the return type of its `vectorOfCells()`, which liblldb gives where a name would have to spell `Vector`'s defaulted arguments as liblldb does. |
 | `WebCore::ShareableElementData` | Its members, then `arraySize()` `Attribute`s where the class ends: `m_attributeArray`, a flexible array member, which liblldb leaves out of the class. `arraySize()` is `m_arraySizeAndFlags` above its flags (`ElementData::s_flagCount`, private). Attributes that run past the allocation are an overrun, and none is read. |
+| `rtld_global` (glibc's ld.so) | Its members, then each `struct pthread` its `_dl_stack_user` and `_dl_stack_used` lists hold, through each one's `list` member (`nptl-stack.c`), as the image that describes `rtld_global` describes `pthread` (patch 14). |
+| `WTF::ThreadSpecific` | Its members; then, once every root is read, each thread's value for its `m_key`, as `pthread_getspecific` finds it (`specific_1stblock`, or the second-level block `specific` points to), read as its nested `Data` class (`SBType::FindDirectNestedType`), when that `Data`'s `owner` is this `ThreadSpecific`: one read in storage not yet constructed, such as a `LazyNeverDestroyed`'s, has key 0, another's. |
 
 More storage follows a cell or an allocation, and is read where the walk meets
 it:
@@ -1046,8 +1086,8 @@ index vector; an object a `WeakPtr<T>` reaches, and one whose
 captures of two lambdas of one function and of a lambda in two instances of a
 function template, all of one size, capturing different types; an object a
 polymorphic object in system malloc's memory holds (on Darwin, patch 13); the
-value of a `std::atomic<T*>`; the last of three elements of a `std::span` (with
-libc++); and a `JSString` built with `join` (so not an atom, and only the `JSString` holds its
+value of a `std::atomic<T*>`; the last of three elements of a `std::span`
+(libc++'s and libstdc++'s); and a `JSString` built with `join` (so not an atom, and only the `JSString` holds its
 `StringImpl`). Each is reached only through its holder, and each is reached;
 removing a reader fails its case. liblldb gives the template's two closures one
 class (patch 2): without the closure's own type, one is refused and its object
@@ -1177,13 +1217,17 @@ by element, until pointers that do not fit (patch 11) were left unfollowed. An
 array that runs past the readable memory it starts in is not read at all, and
 is listed in `Reach::unreadableArrays` with the field that led to it, the value
 that holds it and what reached that value. The tests require the list to be
-empty; it is on google.com too.
+empty; it is on google.com too. Readable memory runs on through adjacent
+readable regions (`Region::readableEnd`): on Linux an image's `.bss` runs on
+from its last file-backed page into an anonymous mapping, and libc's
+`exit_function_list` crosses that boundary.
 
 **Test.** The walk reads over a thousand global variables, and misses no
-allocation the test does not exclude, but for what the thread at the safe point
-holds in its pthread specific data (patch 14). No array runs past readable
-memory. On Darwin, a planted object held only by a polymorphic object in
-system malloc's memory is reached (patch 11's test).
+allocation the test does not exclude, but, on Darwin, for what the thread at the
+safe point holds in its pthread specific data (patch 14). No array runs past
+readable memory. On Darwin, a planted object held only by a polymorphic object
+in system malloc's memory is reached (patch 11's test); elsewhere the object it
+holds is excluded, as a miss the walk means to make.
 
 ### 14. Explaining every miss
 
@@ -1213,10 +1257,12 @@ range check per word of writable memory.
 holder: an integer field of a reached object; nothing, for one whose address is
 kept only XORed; that object, for the one it holds; nothing, for the stale value
 of a deleted `HashMap` entry; and `createFixture()::roots`, for the stale payload
-of a reset `std::optional`. The only misses left are what the thread at the safe
-point holds in its pthread specific data, such as `ParkingLot`'s `ThreadData`,
-which the C library keeps in its thread control block, in a layout it does not
-publish.
+of a reset `std::optional`. On Darwin the only misses left are what the thread
+at the safe point holds in its pthread specific data, such as `ParkingLot`'s
+`ThreadData`, which libpthread keeps in its thread control block, in a layout it
+does not publish. On Linux glibc's debug info describes that block, `struct
+pthread`, and ld.so lists every thread's: the walk reads each `WTF::ThreadSpecific`
+value as its own type (patch 11), and the test requires that no miss is left.
 
 ### 15. Speed
 
@@ -1245,7 +1291,14 @@ under 10 s, in a Debug build.
   that cannot be mapped is remembered with its error. Mapping each read's own
   pages took 46 s of a 107 s web-process walk. `CorpseMemoryTest` checks the
   windows, what is kept and the bound, and, with `keepRecentMappings(0)`, the
-  page-by-page mappings in a window with a hole.
+  page-by-page mappings in a window with a hole, on both platforms. On Linux,
+  `process_vm_readv` fails with `EFAULT` for a hole and an unreadable page
+  alike, so a failed copy is told apart by the target's mappings, listed once
+  at the first failure: as Darwin's `mach_vm_remap` does, a gap is
+  `UnmappedHole` and a region without read access `NotReadable`.
+- **Reports.** The allocations with the most untyped bytes are named, with
+  liblldb's type names, only once they are chosen: naming each of a heap's
+  hundred thousand `StringImpl`s first took 4 s of a Linux walk.
 - **Misses.** Each word of writable memory is looked up among the misses alone
   (patch 14).
 - **`-O2`** for `libJavaScriptCoreTools` in a Debug build.
@@ -1311,6 +1364,18 @@ typed; 2.2 to 2.9 s for the reach. The whole testLibJSCTools run is 2,047
 assertions in 45 s with `OS_ACTIVITY_MODE=disable`; without it, the HeapWalk
 suite took 21 s against 9.8 s.
 
+**Measured on Linux** (Debug JSCOnly, Debian 12 aarch64, 80 cores, liblldb
+22.1.8, glibc 2.36 with `libc6-dbg`), the same `large-heap.js` in `jsc` with
+the same options, `mya heap` on the live process (A1): 761,762 live cells,
+171,091 libpas allocations (40.2 MB); 100.00% reached, 96.85% typed, no miss.
+3.7 s to open the debug info (liblldb indexes the DWARF itself, patch 6), 43 ms
+to walk the cells, 68 ms to enumerate libpas, 6.4 s to reach, type and
+explain: 10.2 s in all, 3.2 GB resident at most. Most of the reach is liblldb's,
+as on Darwin: classes of `s_info`s, vtables and global variables. The HeapWalk
+fixture: 100.00% reached, 99.48% typed, 1.3 s for the reach out of process.
+The whole testLibJSCTools run is 1,639 assertions in 45 s; the ExportsTrie
+suites (Mach-O) and TypeFields (no WebCore) are skipped.
+
 ### 16. `mya heap`: walking any process
 
 `mya heap [<vm>]` walks the JS heap of the snapshot in use: from the VM at
@@ -1333,7 +1398,14 @@ the VM JavaScriptCore last entered (`JSC::VMManager::s_recentVM`).
 
 A target must let mya read it: a local macOS build signs WebContent with
 `com.apple.security.get-task-allow` (`process-entitlements.sh`), and `jsc`,
-which is not, needs a copy signed with it.
+which is not, needs a copy signed with it. On Linux, Yama's `ptrace_scope`
+must let mya read the process (0, or mya its ancestor at 1):
+
+```
+WebKitBuild/JSCOnly/Debug/bin/jsc --useConcurrentGC=0 --useConcurrentJIT=0 \
+    --useWarmUpMarkedBlocks=0 large-heap.js &
+printf 'snapshot --pid <pid>\nheap\n' | WebKitBuild/JSCOnly/Debug/bin/mya
+```
 
 **Measured: google.com.** MiniBrowser from the same Debug build, on
 https://www.google.com, idle after loading; `mya heap` on its WebContent
@@ -1519,9 +1591,10 @@ bytes counted as typed before.
 pointee's allocation, and no array past readable memory, and every closure is
 read as its own closure type (patch 2).
 
-On the large JSC heap, the misses are 17 KB, held by anonymous memory outside
-any allocation, the holder the HeapWalk suite identifies as the thread's pthread
-specific data; and the untyped bytes are `StringImpl` size-class slack (979 KB),
+On the large JSC heap, the misses are 17 KB on Darwin, held by anonymous memory
+outside any allocation, the holder the HeapWalk suite identifies as the thread's
+pthread specific data, and none on Linux, where the walk reads it (patch 14);
+and the untyped bytes are `StringImpl` size-class slack (979 KB),
 the prefault supply's spare blocks (426 KB, reached through a block of merged
 statics), and JIT code.
 
@@ -1582,9 +1655,12 @@ pointers hold.
   suites fail until the SDK has the headers. `wk test <ws> -- --testlibjsctools`
   needs the `--`.
 - **Debian.** Debian 12's own liblldb is 18, which is too old (A6). Install
-  `liblldb-22-dev` from apt.llvm.org, and `libstdc++6-dbgsym` from
-  `debian-debug`, whose version must be libstdc++6's own. A build directory
-  configured with an older liblldb needs `-ULLDB_INCLUDE_DIR -ULLDB_LIBRARY`.
+  `liblldb-22-dev` from apt.llvm.org, `libstdc++6-dbgsym` from
+  `debian-debug`, whose version must be libstdc++6's own, and `libc6-dbg`. A
+  build directory configured with an older liblldb needs
+  `-ULLDB_INCLUDE_DIR -ULLDB_LIBRARY`. Build with `build-jsc`, not a bare
+  `ninja`: its default targets include TestWTF, whose `FormattedLogging.h`
+  needs `<format>`, which Debian 12's libstdc++ 12 does not have.
 - **liblldb and type units.** LLD before 19 concatenates the compile units'
   `.debug_names` rather than merging them, and every type unit it discards as a
   duplicate leaves an entry with a tombstone offset: 371,947 of the 385,805 in
@@ -1617,24 +1693,25 @@ addresses a report names.
    grouped by holder in `mya heap`'s output. `mya refs` names the words that
    hold an address, with their regions. What is left is system malloc objects
    without a vtable, and integers that hold addresses.
-3. **What the main thread's pthread specific data holds.** libpthread keeps it
-   in its static `_main_thread`, in a layout it does not publish (patch 14), as
-   it keeps every thread's in its control block: 2.7 KB on google.com, and the
-   misses the HeapWalk suite allows.
+3. **What the main thread's pthread specific data holds, on Darwin.**
+   libpthread keeps it in its static `_main_thread`, in a layout it does not
+   publish (patch 14), as it keeps every thread's in its control block: 2.7 KB
+   on google.com, and the misses the HeapWalk suite allows there. Linux reads
+   glibc's through its debug info; the `ThreadSpecific` reader (patch 11) needs
+   only each thread's slots, so Darwin needs only a way to find them.
 4. **A web process's walk takes 31 to 45 s, 7.3 GB at most** (patch 16). What is
    left is liblldb completing types, finding global variables one symbol at a
    time, and resolving vtables. A target with fewer types, or a cache of the
    completed layouts across runs, is what would make it faster.
-5. **Linux.** Nothing here was built or run on Linux. `Memory` keeps 256
-   copied windows there, and the TypeFields suite is skipped. Linux is not
-   measured since the walk's speed-ups: draft 7 measured 240 µs a cell there;
-   the same changes apply, and `Memory`'s windows copy rather than map there
-   (`process_vm_readv`). The readers of `std::span` and `std::atomic` read
-   libc++'s members; libstdc++'s `std::atomic<T*>` holds a plain pointer, but
-   its `std::span` needs a reader of its own (`_M_ptr`, `_M_extent`). Objects
-   in system malloc are read on Darwin only, where its regions have VM tags.
-   `ENABLE_MYA_HEAP` drops `-gsimple-template-names` in every CMake build,
-   Linux's included, which has not been built since.
+5. **Linux.** The JSCOnly Debug build passes every suite it builds on Debian
+   12 aarch64, and `mya heap` walks a live `jsc` (patch 15's measurement).
+   Left: objects in system malloc are read on Darwin only, where its regions
+   have VM tags (patch 13); on Linux the planted case is excluded. It is not on
+   the walk's critical path: it only adds what such objects hold, 0.09% of
+   google.com's heap. A web process (WPE or GTK) is not measured, and the
+   TypeFields suite is skipped without WebCore. The walk takes 10.2 s on the
+   large heap, of which 3.7 s is liblldb indexing the DWARF; nothing here was
+   built on x86_64 Linux.
 6. **The CMake Cocoa build** (`build-jsc --debug --cmake`) passes every
    suite it builds: 1,847 assertions, with TypeFields skipped, as it has no
    WebCore, and Process's x86_64 translation case, as the Xcode build skips it

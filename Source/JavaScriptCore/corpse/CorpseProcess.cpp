@@ -187,7 +187,7 @@ pid_t forkCopy(int lifetime)
     // changes it beyond what glibc needs for async-signal-safe calls.
     pid_t copy = _Fork();
     if (copy < 0) {
-        CORPSE_REPORT("Could not copy pid %d: %s", static_cast<int>(getpid()), safeStrerror(errno).data());
+        CORPSE_REPORT("Could not copy pid %d: %s", static_cast<int>(getpid()), safeStrerror(errno).legacyCStringPointer());
         return -1;
     }
     if (copy)

@@ -90,8 +90,8 @@ static ASCIILiteral label(DiagnosticCounter counter)
         return "image headers read"_s;
     case DiagnosticCounter::ImagesInSharedCache:
         return "images in the shared cache"_s;
-    case DiagnosticCounter::ExportsTriesSearched:
-        return "exports tries searched"_s;
+    case DiagnosticCounter::SymbolTablesSearched:
+        return "symbol tables searched"_s;
     case DiagnosticCounter::UnreadableImageHeaders:
         return "unreadable image headers"_s;
     case DiagnosticCounter::ImplausibleLoadCommandSizes:

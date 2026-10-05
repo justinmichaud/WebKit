@@ -61,7 +61,7 @@ void testDiagnostics()
     TEST_ASSERT_EQ(outer.value(DiagnosticCounter::ImageHeadersRead), uint64_t { 0 }, "a count made before the scope opened is not in it");
     readHeader();
     Diagnostics::count(DiagnosticCounter::ImagesListed, 40);
-    Diagnostics::count(DiagnosticCounter::ExportsTriesSearched);
+    Diagnostics::count(DiagnosticCounter::SymbolTablesSearched);
     TEST_ASSERT_EQ(outer.value(DiagnosticCounter::ImageHeadersRead), uint64_t { 1 }, "a count reaches its scope from a callee");
     TEST_ASSERT_EQ(outer.value(DiagnosticCounter::ImagesListed), uint64_t { 40 }, "a count adds what it is given");
 
@@ -76,7 +76,7 @@ void testDiagnostics()
         TEST_ASSERT_EQ(Diagnostics::context(), toUTF8CString(
             Client::name(), ":   while reading more headers: image headers read 1\n"_s,
             Client::name(), ":   while doing something in between\n"_s,
-            Client::name(), ":   while running the Diagnostics suite: images listed 40, image headers read 1, exports tries searched 1\n"_s),
+            Client::name(), ":   while running the Diagnostics suite: images listed 40, image headers read 1, symbol tables searched 1\n"_s),
             "the context names every open scope, innermost first, with the counts that are not zero");
     }
 

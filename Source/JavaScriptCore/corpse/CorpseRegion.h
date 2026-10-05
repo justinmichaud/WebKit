@@ -50,6 +50,10 @@ public:
 
     // The region containing `address` among `regions`, which are by address.
     static std::optional<Region> findContaining(const Vector<Region>&, Address);
+    // Where the readable memory `address` is in ends, through adjacent readable
+    // regions: on Linux an image's .bss runs on from its last file-backed page
+    // into an anonymous mapping.
+    static std::optional<Address> readableEnd(const Vector<Region>&, Address);
 
 #if !OS(DARWIN)
     // Region::all, with their page counts, which costs more to read.

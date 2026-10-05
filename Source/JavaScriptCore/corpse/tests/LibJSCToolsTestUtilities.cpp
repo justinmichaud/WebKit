@@ -140,19 +140,6 @@ void skipSuite(const char* name, const char* why)
     dataLogLn("SKIP: ", name, ": ", why);
 }
 
-bool linuxSkip(const char* name, const char* why)
-{
-#if OS(LINUX)
-    // FIXME: Implement the corpse functionality these suites need on Linux.
-    skipSuite(name, why);
-    return true;
-#else
-    UNUSED_PARAM(name);
-    UNUSED_PARAM(why);
-    return false;
-#endif
-}
-
 #if ENABLE(MYA) && OS(DARWIN)
 
 unsigned machPortNameCount()

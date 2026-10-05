@@ -58,7 +58,7 @@ enum class DiagnosticCounter : uint8_t {
     ImagesListed,
     ImageHeadersRead,
     ImagesInSharedCache,
-    ExportsTriesSearched,
+    SymbolTablesSearched,
     UnreadableImageHeaders,
     ImplausibleLoadCommandSizes,
     UnreadableLoadCommands,

@@ -223,7 +223,7 @@ static OwnedTaskHandle takeSnapshot(Process* process, int& lifetime)
 
     std::array<int, 2> lifetimePipe { -1, -1 };
     if (pipe2(lifetimePipe.data(), O_CLOEXEC)) {
-        CORPSE_REPORT("Could not make the lifetime pipe of a copy of pid %d: %s", static_cast<int>(process->pid()), safeStrerror(errno).data());
+        CORPSE_REPORT("Could not make the lifetime pipe of a copy of pid %d: %s", static_cast<int>(process->pid()), safeStrerror(errno).legacyCStringPointer());
         return { };
     }
     pid_t copy = forkCopy(lifetimePipe[0]);

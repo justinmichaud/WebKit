@@ -31,12 +31,17 @@
 
 #include "CorpseError.h"
 #include "CorpseExportsTrie.h"
+#include "CorpseImage.h"
 #include "CorpseLimits.h"
+#include "CorpseMemory.h"
+#include "CorpseProcess.h"
 #include "CorpseSnapshot.h"
 
 #if OS(DARWIN)
 #include <mach-o/dyld_images.h>
 #include <mach-o/loader.h>
+#else
+#include <elf.h>
 #endif
 #include <optional>
 #include <span>
@@ -88,15 +93,6 @@ bool segmentNameIs(const char (&name)[16], std::string_view expected)
 
 } // anonymous namespace
 
-bool Symbol::hasReadBudget(size_t length)
-{
-    if (length > m_readBudget) {
-        Diagnostics::count(DiagnosticCounter::ImagesSkippedForReadBudget);
-        return false;
-    }
-    m_readBudget -= length;
-    return true;
-}
 
 // Resolves `name` in the one image loaded at `imageAddress`, via its exports
 // trie. Returns a null address if this image does not export it.
@@ -223,7 +219,7 @@ Address Symbol::resolveInImage(Memory& memory, Address imageAddress, std::string
         Diagnostics::count(DiagnosticCounter::UnreadableExportsTries);
         return { };
     }
-    Diagnostics::count(DiagnosticCounter::ExportsTriesSearched);
+    Diagnostics::count(DiagnosticCounter::SymbolTablesSearched);
 
     auto found = ExportsTrie::lookUp(trie, name);
     if (!found) {
@@ -288,7 +284,7 @@ Address Symbol::lookUpName(Snapshot& snapshot)
 
     if (diagnostics.value(DiagnosticCounter::ImagesSkippedForReadBudget))
         CORPSE_REPORT("No symbol '%s' in pid %d: the lookup gave up after reading %zu MB, so some images were not searched", m_name.c_str(), pid, maxTotalBytesRead / MB);
-    else if (!diagnostics.value(DiagnosticCounter::ExportsTriesSearched))
+    else if (!diagnostics.value(DiagnosticCounter::SymbolTablesSearched))
         CORPSE_REPORT("No symbol '%s' in pid %d: no exports trie could be read, so this is a memory access problem", m_name.c_str(), pid);
     else
         CORPSE_REPORT("No symbol '%s' in pid %d: only exported symbols are in an exports trie, so a symbol the linker hid is invisible here", m_name.c_str(), pid);
@@ -297,13 +293,157 @@ Address Symbol::lookUpName(Snapshot& snapshot)
 
 #else
 
-Address Symbol::lookUpName(Snapshot&)
+namespace {
+
+// The GNU hash of a symbol name (dl_new_hash in glibc).
+uint32_t gnuHash(std::string_view name)
 {
-    CORPSE_REPORT("Symbol lookup is not supported on this platform");
+    uint32_t hash = 5381;
+    for (char character : name)
+        hash = hash * 33 + static_cast<uint8_t>(character);
+    return hash;
+}
+
+} // anonymous namespace
+
+// An image's dynamic section, as ld.so leaves it, gives its symbol, string,
+// GNU hash and version tables. glibc relocates the addresses in it in place on
+// most architectures, and leaves them as offsets from the image's slide where
+// the section is read-only (DL_RO_DYN_SECTION, as on RISC-V): an address below
+// the slide is an offset.
+Address Symbol::resolveInImage(Memory& memory, Address loadAddress, Address dynamicSection, std::string_view name)
+{
+    if (!dynamicSection)
+        return { };
+    if (!hasReadBudget(maxDynamicEntries * sizeof(Elf64_Dyn)))
+        return { };
+    Address gnuHashTable, symbolTable, stringTable, versionTable;
+    uint64_t stringTableSize = 0;
+    for (size_t index = 0; index < maxDynamicEntries; ++index) {
+        auto entry = memory.ptr<Elf64_Dyn>(dynamicSection + index * sizeof(Elf64_Dyn));
+        if (!entry) {
+            CORPSE_REPORT("Could not read the dynamic section at 0x%llx", static_cast<unsigned long long>(dynamicSection.toTargetVMAddress()));
+            return { };
+        }
+        if (entry->d_tag == DT_NULL)
+            break;
+        Address address { entry->d_un.d_ptr < loadAddress.toTargetVMAddress() ? loadAddress.toTargetVMAddress() + entry->d_un.d_ptr : entry->d_un.d_ptr };
+        switch (entry->d_tag) {
+        case DT_GNU_HASH:
+            gnuHashTable = address;
+            break;
+        case DT_SYMTAB:
+            symbolTable = address;
+            break;
+        case DT_STRTAB:
+            stringTable = address;
+            break;
+        case DT_STRSZ:
+            stringTableSize = entry->d_un.d_val;
+            break;
+        case DT_VERSYM:
+            versionTable = address;
+            break;
+        default:
+            break;
+        }
+    }
+    // Every image ld.so loads for glibc 2.34 or newer has a GNU hash table.
+    if (!gnuHashTable || !symbolTable || !stringTable)
+        return { };
+    Diagnostics::count(DiagnosticCounter::SymbolTablesSearched);
+
+    struct Header {
+        uint32_t bucketCount;
+        uint32_t firstHashedSymbol;
+        uint32_t bloomWords;
+        uint32_t bloomShift;
+    };
+    auto header = memory.ptr<Header>(gnuHashTable);
+    if (!header || !header->bucketCount || header->bucketCount > maxGNUHashBuckets || header->bloomWords > maxGNUHashBloomWords
+        || header->bloomWords & (header->bloomWords - 1) || header->bloomShift >= 64) {
+        CORPSE_REPORT("The GNU hash table at 0x%llx is not one", static_cast<unsigned long long>(gnuHashTable.toTargetVMAddress()));
+        return { };
+    }
+    uint32_t hash = gnuHash(name);
+    Address bloom = gnuHashTable + sizeof(Header);
+    if (header->bloomWords) {
+        auto word = memory.ptr<uint64_t>(bloom + ((hash / 64) & (header->bloomWords - 1)) * sizeof(uint64_t));
+        if (!word)
+            return { };
+        uint64_t mask = (1ull << (hash % 64)) | (1ull << ((hash >> header->bloomShift) % 64));
+        if ((*word & mask) != mask)
+            return { };
+    }
+    Address buckets = bloom + static_cast<uint64_t>(header->bloomWords) * sizeof(uint64_t);
+    Address chains = buckets + static_cast<uint64_t>(header->bucketCount) * sizeof(uint32_t);
+    auto bucket = memory.ptr<uint32_t>(buckets + (hash % header->bucketCount) * sizeof(uint32_t));
+    if (!bucket || *bucket < header->firstHashedSymbol)
+        return { };
+
+    for (uint32_t index = *bucket, length = 0; length < maxGNUHashChainLength; ++index, ++length) {
+        if (!hasReadBudget(sizeof(uint32_t) + sizeof(Elf64_Sym) + name.size() + 1))
+            return { };
+        auto chain = memory.ptr<uint32_t>(chains + static_cast<uint64_t>(index - header->firstHashedSymbol) * sizeof(uint32_t));
+        if (!chain)
+            return { };
+        if ((*chain | 1) == (hash | 1)) {
+            auto symbol = memory.ptr<Elf64_Sym>(symbolTable + static_cast<uint64_t>(index) * sizeof(Elf64_Sym));
+            if (!symbol)
+                return { };
+            bool nameFits = !stringTableSize || (symbol->st_name < stringTableSize && stringTableSize - symbol->st_name > name.size());
+            auto symbolName = nameFits ? memory.span<char>(stringTable + symbol->st_name, name.size() + 1) : Memory::Span<char> { };
+            bool matches = symbolName && std::string_view { symbolName.data(), name.size() } == name && !symbolName[name.size()];
+            unsigned type = ELF64_ST_TYPE(symbol->st_info);
+            // A hidden version is not the default, which is the one dlsym gives.
+            bool isDefaultVersion = true;
+            if (matches && versionTable) {
+                auto version = memory.ptr<uint16_t>(versionTable + static_cast<uint64_t>(index) * sizeof(uint16_t));
+                isDefaultVersion = version && !(*version & 0x8000);
+            }
+            if (matches && isDefaultVersion && symbol->st_shndx != SHN_UNDEF && type != STT_TLS && type != STT_GNU_IFUNC)
+                return symbol->st_shndx == SHN_ABS ? Address { symbol->st_value } : loadAddress + symbol->st_value;
+        }
+        if (*chain & 1)
+            return { };
+    }
+    return { };
+}
+
+// ld.so lists every image in its search order, which is dlsym's.
+Address Symbol::lookUpName(Snapshot& snapshot)
+{
+    if (!snapshot.isValid()) {
+        CORPSE_REPORT("Cannot look up '%s' in an invalid snapshot", m_name.c_str());
+        return { };
+    }
+    int pid = static_cast<int>(snapshot.process()->pid());
+    CORPSE_DIAGNOSTICS(diagnostics, "looking up the symbol '%s' in pid %d", m_name.c_str(), pid);
+    m_readBudget = maxTotalBytesRead;
+    for (const Image& image : snapshot.images()) {
+        if (Address address = resolveInImage(snapshot.memory(), image.loadAddress(), image.dynamicSection(), m_name))
+            return address;
+    }
+    if (diagnostics.value(DiagnosticCounter::ImagesSkippedForReadBudget))
+        CORPSE_REPORT("No symbol '%s' in pid %d: the lookup gave up after reading %zu MB, so some images were not searched", m_name.c_str(), pid, maxTotalBytesRead / MB);
+    else if (!diagnostics.value(DiagnosticCounter::SymbolTablesSearched))
+        CORPSE_REPORT("No symbol '%s' in pid %d: no GNU hash table could be read, so this is a memory access problem", m_name.c_str(), pid);
+    else
+        CORPSE_REPORT("No symbol '%s' in pid %d: only exported symbols are in a dynamic symbol table, so a symbol the linker hid is invisible here", m_name.c_str(), pid);
     return { };
 }
 
 #endif // OS(DARWIN)
+
+bool Symbol::hasReadBudget(size_t length)
+{
+    if (length > m_readBudget) {
+        Diagnostics::count(DiagnosticCounter::ImagesSkippedForReadBudget);
+        return false;
+    }
+    m_readBudget -= length;
+    return true;
+}
 
 Symbol::Symbol(Snapshot& snapshot, const char* name)
     : m_name(name ? name : "")

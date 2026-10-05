@@ -731,7 +731,8 @@ private:
         }
         for (const JSC::Corpse::Image& image : snapshot->images()) {
             std::string_view path { image.path().legacyCStringPointer() };
-            if (path.ends_with("/JavaScriptCore") || path.ends_with("/libJavaScriptCore.so") || path.find("/libjavascriptcore") != std::string_view::npos)
+            // On Linux, by its soname, such as libJavaScriptCore.so.1.
+            if (path.ends_with("/JavaScriptCore") || path.find("/libJavaScriptCore.so") != std::string_view::npos || path.find("/libjavascriptcore") != std::string_view::npos)
                 javaScriptCore = image.loadAddress();
         }
         if (!javaScriptCore) {

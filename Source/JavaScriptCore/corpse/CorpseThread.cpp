@@ -265,7 +265,7 @@ Vector<Thread> Thread::platformCollect(const Snapshot& snapshot)
     ASCIICString taskPath = makeString("/proc/"_s, pid, "/task"_s).ascii();
     DIR* directory = opendir(taskPath.data());
     if (!directory) {
-        CORPSE_REPORT("Could not list the threads of pid %d: %s", static_cast<int>(pid), safeStrerror(errno).data());
+        CORPSE_REPORT("Could not list the threads of pid %d: %s", static_cast<int>(pid), safeStrerror(errno).legacyCStringPointer());
         return result;
     }
     long ticksPerSecond = sysconf(_SC_CLK_TCK);

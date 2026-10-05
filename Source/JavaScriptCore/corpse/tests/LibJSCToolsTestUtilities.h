@@ -69,8 +69,6 @@ extern bool verbose;
 
 void skipSuite(const char* name, const char* why);
 
-bool linuxSkip(const char* name, const char* why);
-
 void testAddress();
 void testByteParser();
 void testDebugInfo();

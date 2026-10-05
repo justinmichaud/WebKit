@@ -140,6 +140,11 @@ Vector<Image> Image::collect(Snapshot& snapshot)
 
 #else
 
+static unsigned long long forReport(Address address)
+{
+    return address.toTargetVMAddress();
+}
+
 // glibc's r_debug, found as ld.so's debugger interface says: the kernel's
 // auxiliary vector gives the executable's program headers, whose PT_DYNAMIC
 // has a DT_DEBUG entry that ld.so points at r_debug.
@@ -148,7 +153,7 @@ static std::optional<Address> loaderDebugState(Memory& memory, int pid)
     ASCIICString auxvPath = makeString("/proc/"_s, pid, "/auxv"_s).ascii();
     int file = open(auxvPath.data(), O_RDONLY | O_CLOEXEC);
     if (file < 0) {
-        CORPSE_REPORT("Could not open the auxiliary vector of pid %d: %s", pid, safeStrerror(errno).data());
+        CORPSE_REPORT("Could not open the auxiliary vector of pid %d: %s", pid, safeStrerror(errno).legacyCStringPointer());
         return std::nullopt;
     }
     std::array<Elf64_auxv_t, maxAuxiliaryVectorEntries> auxv;
@@ -164,12 +169,12 @@ static std::optional<Address> loaderDebugState(Memory& memory, int pid)
     }
     if (!programHeadersAddress || !programHeaderCount || programHeaderCount > maxProgramHeaders) {
         CORPSE_REPORT("The auxiliary vector of pid %d gives %llu program headers at 0x%llx",
-            pid, static_cast<unsigned long long>(programHeaderCount), programHeadersAddress.toTargetVMAddress());
+            pid, static_cast<unsigned long long>(programHeaderCount), forReport(programHeadersAddress));
         return std::nullopt;
     }
     auto programHeaders = memory.span<Elf64_Phdr>(programHeadersAddress, programHeaderCount);
     if (!programHeaders) {
-        CORPSE_REPORT("Could not read the executable's program headers at 0x%llx", programHeadersAddress.toTargetVMAddress());
+        CORPSE_REPORT("Could not read the executable's program headers at 0x%llx", forReport(programHeadersAddress));
         return std::nullopt;
     }
 
@@ -300,7 +305,7 @@ Vector<Image> Image::collect(Snapshot& snapshot)
         return { };
     auto debugState = memory.ptr<r_debug>(*debugStateAddress);
     if (!debugState) {
-        CORPSE_REPORT("Could not read r_debug at 0x%llx", debugStateAddress->toTargetVMAddress());
+        CORPSE_REPORT("Could not read r_debug at 0x%llx", forReport(*debugStateAddress));
         return { };
     }
 
@@ -314,7 +319,7 @@ Vector<Image> Image::collect(Snapshot& snapshot)
         }
         auto entry = memory.ptr<link_map>(next);
         if (!entry) {
-            CORPSE_REPORT("Could not read the link_map at 0x%llx", next.toTargetVMAddress());
+            CORPSE_REPORT("Could not read the link_map at 0x%llx", forReport(next));
             break;
         }
         next = Address { entry->l_next };
@@ -358,7 +363,7 @@ Vector<Image> Image::collect(Snapshot& snapshot)
             CORPSE_REPORT("The image '%s' of pid %d has no build-id, so a rebuilt file could not be told from it", path->legacyCStringPointer(), pid);
             continue;
         }
-        result.append(Image { Address { entry->l_addr }, WTF::move(*path), WTF::move(*buildID) });
+        result.append(Image { Address { entry->l_addr }, WTF::move(*path), WTF::move(*buildID), Address { entry->l_ld } });
     }
     Diagnostics::count(DiagnosticCounter::ImagesListed, listed);
     return result;

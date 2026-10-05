@@ -86,6 +86,10 @@ public:
     // The same, in the image that describes `neighbor`, such as WebCore for one
     // of its classes, or else in the first image that has one.
     const TargetType* classNamedBeside(const TargetType& neighbor, const char* name);
+    // The class `name` that `type` declares within itself, such as a class
+    // template instance's nested class, whose qualified name spells the
+    // template's arguments as the instance's own name may not.
+    const TargetType* nestedClass(const TargetType&, const char* name);
     // The class `declaration` declares, as the image that describes the
     // declaration defines it, or, if liblldb knows no image for it, as the one
     // image that defines a class of its name; or null. liblldb does not

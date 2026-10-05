@@ -107,7 +107,7 @@ Memory::MapResult Memory::Region::create(Memory& memory, Address remoteBase, siz
     if (copied != static_cast<ssize_t>(size)) {
         KernelResult result = copied < 0 ? errno : EFAULT;
         munmap(target, size);
-        return MapResult { .error = Error::Unknown, .kernResult = result };
+        return MapResult { .error = result == EFAULT ? memory.errorOfFailedCopy(remoteBase, size) : Error::Unknown, .kernResult = result };
     }
 
     auto* localBase = static_cast<const uint8_t*>(target);
@@ -118,6 +118,29 @@ Memory::MapResult Memory::Region::create(Memory& memory, Address remoteBase, siz
 Memory::Region::~Region()
 {
     munmap(const_cast<uint8_t*>(m_localBase), m_pageCount * pageSize());
+}
+
+// The first byte of the range that no readable region holds says why, as
+// mach_vm_remap does on Darwin: a gap is a hole, and a region without read
+// access is not readable.
+auto Memory::errorOfFailedCopy(Address base, size_t size) -> Error
+{
+    if (!m_regionsOfFailedCopies)
+        m_regionsOfFailedCopies = JSC::Corpse::Region::all(m_corpsePort);
+    Address cursor = base;
+    Address end = base + size;
+    for (const auto& region : *m_regionsOfFailedCopies) {
+        if (region.end() <= cursor)
+            continue;
+        if (region.base() > cursor)
+            return Error::UnmappedHole;
+        if (!region.isReadable())
+            return Error::NotReadable;
+        cursor = region.end();
+        if (cursor >= end)
+            return Error::Unknown;
+    }
+    return Error::UnmappedHole;
 }
 
 #endif // OS(DARWIN)

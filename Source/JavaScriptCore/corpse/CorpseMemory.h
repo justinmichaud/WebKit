@@ -30,6 +30,10 @@
 #if ENABLE(MYA)
 
 #include <JavaScriptCore/CorpseAddress.h>
+#if !OS(DARWIN)
+#include <JavaScriptCore/CorpseRegion.h>
+#include <optional>
+#endif
 #include <stdint.h>
 #include <wtf/ForbidHeapAllocation.h>
 #include <wtf/HashMap.h>
@@ -174,6 +178,12 @@ private:
     size_t m_nextRecentRegion { 0 };
     HashSet<target_address_t> m_unmappableWindows; // Windows with a hole, which reads map page by page.
     HashMap<target_address_t, std::pair<Error, KernelResult>> m_unmappablePages;
+#if !OS(DARWIN)
+    // Why a copy failed: process_vm_readv says only EFAULT, for a hole and an
+    // unreadable page alike. Listed at the first failure.
+    Error errorOfFailedCopy(Address, size_t);
+    std::optional<Vector<JSC::Corpse::Region>> m_regionsOfFailedCopies;
+#endif
 };
 
 } // namespace Corpse

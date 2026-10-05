@@ -56,6 +56,9 @@ constexpr size_t maxAuxiliaryVectorEntries = 128; // Linux gives about 20.
 constexpr uint64_t maxProgramHeaders = 256; // An ELF object has about 12.
 constexpr size_t maxDynamicEntries = 4096; // A shared library has about 40.
 constexpr uint64_t maxNoteSegmentSize = 64 * KB; // A build-id note is 36 bytes.
+constexpr uint32_t maxGNUHashBuckets = 16 * 1024 * 1024; // libJavaScriptCore's .gnu.hash has about 2,000.
+constexpr uint32_t maxGNUHashBloomWords = 1024 * 1024; // And 256 Bloom filter words.
+constexpr uint32_t maxGNUHashChainLength = 1024 * 1024; // A chain holds a few symbols.
 constexpr size_t maxRegionCount = 1024 * 1024; // A large process maps tens of thousands.
 constexpr size_t maxVTableSlots = 64 * 1024; // Well above the few hundred virtual functions of the largest WebCore classes.
 

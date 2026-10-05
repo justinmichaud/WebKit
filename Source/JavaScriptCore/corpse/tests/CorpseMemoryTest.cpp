@@ -43,6 +43,8 @@
 #if OS(DARWIN)
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#else
+#include <sys/mman.h>
 #endif
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
@@ -54,9 +56,12 @@ using JSC::Corpse::Memory;
 using JSC::Corpse::Process;
 using JSC::Corpse::Snapshot;
 
-#if OS(DARWIN)
-
 namespace {
+
+#if !OS(DARWIN)
+using mach_vm_address_t = uint64_t;
+using mach_vm_size_t = uint64_t;
+#endif
 
 // The arena's page layout, all of it set up before the corpse is taken. The pages the
 // kernel will not hand back are what the error cases below are about.
@@ -81,8 +86,41 @@ uint64_t tailPatternFor(unsigned page) { return tailPatternBase | page; }
 // Memory at the start of a mapping window, so that every page of `size` bytes is in one.
 static bool allocateAtWindowStart(mach_vm_address_t& base, mach_vm_size_t size)
 {
+#if OS(DARWIN)
     return mach_vm_map(mach_task_self(), &base, size, Memory::mappingWindowSize - 1, VM_FLAGS_ANYWHERE, MEMORY_OBJECT_NULL, 0, FALSE,
         VM_PROT_DEFAULT, VM_PROT_ALL, VM_INHERIT_DEFAULT) == KERN_SUCCESS;
+#else
+    // A window more than asked for, less what lies outside the aligned part.
+    size_t reserved = size + Memory::mappingWindowSize;
+    void* mapped = mmap(nullptr, reserved, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (mapped == MAP_FAILED)
+        return false;
+    uint64_t start = std::bit_cast<uintptr_t>(mapped);
+    base = roundUpToMultipleOf(Memory::mappingWindowSize, start);
+    if (base > start)
+        munmap(mapped, base - start);
+    if (uint64_t after = start + reserved - (base + size))
+        munmap(std::bit_cast<void*>(static_cast<uintptr_t>(base + size)), after);
+    return true;
+#endif
+}
+
+static bool deallocate(mach_vm_address_t address, size_t size)
+{
+#if OS(DARWIN)
+    return mach_vm_deallocate(mach_task_self(), address, size) == KERN_SUCCESS;
+#else
+    return !munmap(std::bit_cast<void*>(static_cast<uintptr_t>(address)), size);
+#endif
+}
+
+static bool protect(mach_vm_address_t address, size_t size, bool isReadable)
+{
+#if OS(DARWIN)
+    return mach_vm_protect(mach_task_self(), address, size, FALSE, isReadable ? VM_PROT_READ : VM_PROT_NONE) == KERN_SUCCESS;
+#else
+    return !mprotect(std::bit_cast<void*>(static_cast<uintptr_t>(address)), size, isReadable ? PROT_READ : PROT_NONE);
+#endif
 }
 
 // Each page holds one pattern at its first word and another at its last, so a read can
@@ -101,13 +139,7 @@ public:
             *tailOf(page) = tailPatternFor(page);
         }
 
-        if (mach_vm_deallocate(mach_task_self(), addressOf(Hole), m_pageSize) != KERN_SUCCESS)
-            return false;
-        if (mach_vm_protect(mach_task_self(), addressOf(ReadOnly), m_pageSize, FALSE, VM_PROT_READ) != KERN_SUCCESS)
-            return false;
-        if (mach_vm_protect(mach_task_self(), addressOf(NoAccess), m_pageSize, FALSE, VM_PROT_NONE) != KERN_SUCCESS)
-            return false;
-        return true;
+        return deallocate(addressOf(Hole), m_pageSize) && protect(addressOf(ReadOnly), m_pageSize, true) && protect(addressOf(NoAccess), m_pageSize, false);
     }
 
     size_t pageSize() const { return m_pageSize; }
@@ -165,6 +197,7 @@ uint64_t firstWordOf(std::span<const uint8_t> bytes)
 // Checks whether `address` is mapped in this process.
 bool isMappedLocally(const void* address)
 {
+#if OS(DARWIN)
     mach_vm_address_t regionAddress = reinterpret_cast<mach_vm_address_t>(address);
     mach_vm_size_t regionSize = 0;
     vm_region_basic_info_data_64_t info;
@@ -176,6 +209,13 @@ bool isMappedLocally(const void* address)
         return false;
     auto queried = reinterpret_cast<mach_vm_address_t>(address);
     return queried >= regionAddress && queried < regionAddress + regionSize;
+#else
+    // mincore fails with ENOMEM for a page that is not mapped.
+    size_t pageSize = Memory::pageSize();
+    unsigned char residency = 0;
+    void* page = std::bit_cast<void*>(std::bit_cast<uintptr_t>(address) & ~(pageSize - 1));
+    return !mincore(page, pageSize, &residency);
+#endif
 }
 
 } // anonymous namespace
@@ -520,17 +560,6 @@ void testMemory()
     }
 }
 
-#else
-
-void testMemory()
-{
-    SuiteTracer tracer("Memory");
-    if (!tracer.shouldRun())
-        return;
-    skipSuite("Memory", "the test arena is laid out with Mach VM calls");
-}
-
-#endif // OS(DARWIN)
 
 } // namespace JSCToolsTest
 

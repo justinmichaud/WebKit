@@ -223,12 +223,6 @@ constexpr bool readsSystemMallocObjects = true;
 #else
 constexpr bool readsSystemMallocObjects = false;
 #endif
-// The walk reads libc++'s std::span.
-#if defined(_LIBCPP_VERSION)
-constexpr bool readsSpans = true;
-#else
-constexpr bool readsSpans = false;
-#endif
 constexpr std::array<ASCIILiteral, numberOfPlanted> plantedNames {
     "the last element of a Vector"_s,
     "a HashSet's value"_s,
@@ -968,6 +962,9 @@ void checkReach(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFixture&
     expectedMisses.appendRange(fixture.probes.begin(), fixture.probes.end());
     for (uint64_t missed : fixture.missed)
         expectedMisses.append(missed ^ hiddenAddressMask);
+    // Where the walk does not read objects in system malloc's memory, what only one holds is missed.
+    if (!readsSystemMallocObjects)
+        expectedMisses.append(fixture.planted[static_cast<size_t>(Planted::SystemMallocObject)]);
     Vector<HeapWalk::Allocation> excluded;
     Vector<bool> isExcluded;
     isExcluded.fill(false, allocations.size());
@@ -1028,7 +1025,7 @@ void checkReach(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFixture&
     std::array<uint64_t, numberOfPlanted> planted = fixture.planted;
     planted[static_cast<size_t>(Planted::PropertyTableIndex)] = propertyTableIndexBuffer(snapshot, heap, Address { fixture.wideStructure });
     for (size_t index = 0; index < numberOfPlanted; ++index) {
-        if ((index == static_cast<size_t>(Planted::SystemMallocObject) && !readsSystemMallocObjects) || (index == static_cast<size_t>(Planted::SpanElement) && !readsSpans))
+        if (index == static_cast<size_t>(Planted::SystemMallocObject) && !readsSystemMallocObjects)
             continue;
         TEST_ASSERT(planted[index] && isReached(planted[index]), makeString("the walk reaches the object behind "_s, plantedNames[index]));
     }
@@ -1048,8 +1045,7 @@ void checkReach(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFixture&
 
     // Patch 12: the walk reads each planted object as its class.
     for (size_t index = 0; index < numberOfPlanted; ++index) {
-        if (!isPlantedObject(static_cast<Planted>(index)) || (index == static_cast<size_t>(Planted::SystemMallocObject) && !readsSystemMallocObjects)
-            || (index == static_cast<size_t>(Planted::SpanElement) && !readsSpans))
+        if (!isPlantedObject(static_cast<Planted>(index)) || (index == static_cast<size_t>(Planted::SystemMallocObject) && !readsSystemMallocObjects))
             continue;
         auto allocation = indexOf(planted[index]);
         TEST_ASSERT(allocation && reach.bytesTypedIn[*allocation] == sizeof(ReachableObject), makeString("the walk types the whole object behind "_s, plantedNames[index]));
@@ -1078,8 +1074,9 @@ void checkReach(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFixture&
         "held by a reached allocation"_s, "held by static data"_s, "held by other memory"_s, "held by other misses"_s, "held by nothing"_s,
     };
     // The only misses allowed are what the safe point thread's own ThreadSpecific values hold:
-    // ParkingLot's ThreadData and the assembler's cached buffers. The C library keeps them in
-    // its thread control block, in a layout it does not publish, so the walk does not read them.
+    // ParkingLot's ThreadData and the assembler's cached buffers. Darwin's libpthread keeps them
+    // in its thread control block, in a layout it does not publish, so the walk does not read
+    // them there; glibc's debug info describes its struct pthread, which the walk reads.
     // A secondary thread's control block is in its stack mapping, which the walk scans.
     auto controlBlock = Region::findContaining(snapshot.regions(), Address { fixture.threadControlBlock });
     // The allocations the control block's words point into: the thread's values, reached by the walk or not.
@@ -1118,6 +1115,10 @@ void checkReach(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFixture&
     TEST_ASSERT(controlBlock, "the safe point thread's control block is in the snapshot");
     TEST_ASSERT_EQ(unexplained, 0u, "the walk reaches every allocation the test does not exclude, but for the safe point thread's own values");
     TEST_ASSERT(threadValueBytes < 64 * KB, "the safe point thread's own values are small");
+#if OS(LINUX)
+    // glibc's debug info describes each thread's struct pthread, which ld.so lists.
+    TEST_ASSERT_EQ(threadValueBytes, 0u, "on Linux the walk reads every thread's ThreadSpecific values");
+#endif
 
     if (!verbose)
         return;
