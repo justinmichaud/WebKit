@@ -34,6 +34,8 @@
 #if HAVE(LLDB)
 
 #include <lldb/API/LLDB.h>
+#include <string>
+#include <string_view>
 #include <wtf/StdLibExtras.h>
 #include <wtf/text/StringCommon.h>
 
@@ -124,8 +126,46 @@ const TargetType::Layout& TargetType::layout() const
     return *m_layout;
 }
 
+// The class the `index`th argument in liblldb's own name for an instance of a
+// class template names, in the image that describes the instance.
+static const TargetType* templateArgumentFromName(SnapshotDebugInfo& debugInfo, const TargetType& type, std::string_view name, unsigned index)
+{
+    size_t start = name.find('<');
+    if (start == std::string_view::npos)
+        return nullptr;
+    unsigned depth = 0;
+    unsigned argument = 0;
+    for (size_t position = ++start; position < name.size(); ++position) {
+        char character = name[position];
+        if (character == '<' || character == '(')
+            ++depth;
+        else if ((character == '>' || character == ')') && depth)
+            --depth;
+        else if (!depth && (character == ',' || character == '>')) {
+            if (argument++ == index) {
+                std::string_view spelled = name.substr(start, position - start);
+                if (spelled.starts_with("const "))
+                    spelled.remove_prefix(6);
+                return debugInfo.classNamedBeside(type, std::string { spelled }.c_str());
+            }
+            if (character == '>')
+                return nullptr;
+            start = position + 1;
+            while (start < name.size() && name[start] == ' ')
+                ++start;
+        }
+    }
+    return nullptr;
+}
+
 const TargetType* TargetType::templateArgument(unsigned index) const
 {
+    // liblldb gives some instances no template arguments, such as one it
+    // completed from another compile unit; their names still spell them.
+    if (!m_type->GetNumberOfTemplateArguments()) {
+        const char* name = m_type->GetName();
+        return name ? templateArgumentFromName(m_debugInfo, *this, name, index) : nullptr;
+    }
     if (index >= m_type->GetNumberOfTemplateArguments() || m_type->GetTemplateArgumentKind(index) != lldb::eTemplateArgumentKindType)
         return nullptr;
     lldb::SBType argument = m_type->GetTemplateArgumentType(index);
@@ -136,7 +176,29 @@ const TargetType* TargetType::templateArgument(unsigned index) const
 
 size_t TargetType::alignment() const
 {
-    return static_cast<size_t>(m_type->GetByteAlign());
+    if (m_alignment)
+        return *m_alignment;
+    size_t result = static_cast<size_t>(m_type->GetByteAlign());
+    const Layout& layout = this->layout();
+    if (auto* klass = std::get_if<Class>(&layout)) {
+        auto memberAlignment = [&](const TargetType& member) {
+            const TargetType* definition = &member;
+            if (std::holds_alternative<Class>(member.layout()) && !member.byteSize())
+                definition = m_debugInfo.definitionInItsImage(member);
+            return definition ? definition->alignment() : 1;
+        };
+        for (const Field& field : klass->properFields)
+            result = std::max(result, memberAlignment(field.type));
+        for (const Base& base : klass->bases)
+            result = std::max(result, memberAlignment(base.type));
+        for (const Base& base : klass->virtualBases)
+            result = std::max(result, memberAlignment(base.type));
+    } else if (auto* array = std::get_if<Array>(&layout))
+        result = std::max(result, array->element.alignment());
+    else if (std::holds_alternative<Pointer>(layout) || std::holds_alternative<Integer>(layout))
+        result = std::max(result, byteSize());
+    m_alignment = result;
+    return result;
 }
 
 size_t TargetType::readByteSize() const
@@ -190,6 +252,20 @@ const TargetType* TargetType::staticFieldType(const char* name) const
     if (!type.IsValid())
         return nullptr;
     return &m_debugInfo.type(type);
+}
+
+const TargetType* TargetType::returnTypeOfMemberFunction(const char* name) const
+{
+    uint32_t count = m_type->GetNumberOfMemberFunctions();
+    for (uint32_t index = 0; index < count; ++index) {
+        lldb::SBTypeMemberFunction function = m_type->GetMemberFunctionAtIndex(index);
+        const char* functionName = function.GetName();
+        if (!functionName || std::string_view { functionName } != name)
+            continue;
+        lldb::SBType returnType = function.GetReturnType();
+        return returnType.IsValid() ? &m_debugInfo.type(returnType) : nullptr;
+    }
+    return nullptr;
 }
 
 TargetType::Layout TargetType::readLayout() const
@@ -317,6 +393,11 @@ std::optional<int64_t> TargetType::enumeratorValue(std::string_view) const
 }
 
 const TargetType* TargetType::staticFieldType(const char*) const
+{
+    RELEASE_ASSERT_NOT_REACHED();
+}
+
+const TargetType* TargetType::returnTypeOfMemberFunction(const char*) const
 {
     RELEASE_ASSERT_NOT_REACHED();
 }

@@ -33,6 +33,7 @@
 #include <memory>
 #include <optional>
 #include <span>
+#include <string>
 #include <string_view>
 #include <wtf/Function.h>
 #include <wtf/HashMap.h>
@@ -110,6 +111,15 @@ public:
     // Where the symbol `name`, a mangled name, is in the image mapped at `inImage`.
     std::optional<Address> symbolAddress(Address inImage, const char* name);
 
+    // The closure type of the WTF::Detail::CallableWrapper whose vtable is at
+    // `vtable`, if it is an unnamed local type, such as a lambda's: the pointee
+    // of `this` in the closure's call operator. liblldb may give the
+    // CallableWrappers of unnamed closure types of one size one class, whose
+    // m_callable is of only one of their closure types. Null, with `isUnnamed`
+    // false, if the closure type has a name; or, with `isUnnamed` true, if its
+    // call operator is not found.
+    const TargetType* closureOfCallableWrapper(Snapshot&, Address vtable, bool& isUnnamed);
+
     // The symbol `address` lies in, as "name" or "name+0x10". Null if none does.
     String symbolAt(Address);
 
@@ -149,7 +159,14 @@ private:
     // Whether the symbol the vtable at `vtable` lies in names the class whose
     // destructor gave `type`. It never supplies a type, only refuses one, and
     // reports why unless the image has no symbol table.
-    bool vtableSymbolNames(Address vtable, const TargetType&);
+    bool vtableSymbolNames(Snapshot&, Address vtable, const TargetType&);
+    // The class the symbol the vtable at `vtable` lies in names, demangled; empty if it names none.
+    std::string vtableClassName(Address vtable);
+    struct Closure {
+        bool isUnnamed;
+        const TargetType* type;
+    };
+    HashMap<Address, Closure> m_closures; // By the CallableWrapper's vtable.
 
     // The class whose destructor starts at `function`, or null. `inImage` is
     // false when no image with debug info is mapped there, which is how a walk

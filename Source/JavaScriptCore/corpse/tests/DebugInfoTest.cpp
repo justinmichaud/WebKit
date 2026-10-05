@@ -37,6 +37,7 @@
 #include <JavaScriptCore/CorpseSnapshotDebugInfo.h>
 #include <JavaScriptCore/CorpseTargetType.h>
 #include <JavaScriptCore/CorpseTargetValue.h>
+#include <JavaScriptCore/UnlinkedCodeBlock.h>
 #include <JavaScriptCore/Watchpoint.h>
 #include <lldb/API/LLDB.h>
 #include <algorithm>
@@ -135,6 +136,16 @@ std::optional<TargetValue> completeObjectAt(Snapshot& snapshot, Address object)
     TEST_ASSERT(value, "an object with a virtual destructor has a dynamic type");
     TEST_ASSERT(!value || value->address() == object, "an object held through its primary base starts where its complete object does");
     return value;
+}
+
+// liblldb lays out UnlinkedSimpleJumpTable with its FixedVector<int32_t> only
+// declared, and gives it too small an alignment: the members give it.
+void analyzeAlignment(Snapshot& snapshot, Address object)
+{
+    RefPtr debugInfo = SnapshotDebugInfo::create(snapshot);
+    auto vtable = snapshot.memory().ptr<uint64_t>(object);
+    const TargetType* jumpTable = debugInfo && vtable ? debugInfo->classNamed(Address { *vtable }.stripped(), "JSC::UnlinkedSimpleJumpTable") : nullptr;
+    TEST_ASSERT(jumpTable && jumpTable->alignment() == alignof(JSC::UnlinkedSimpleJumpTable), "a class's alignment is its members' largest");
 }
 
 Address createSameImageObject()
@@ -438,6 +449,7 @@ void testDebugInfo()
     analyzeInAndOutOfProcess(createDiamondObject, analyzeDiamondObject);
     analyzeInAndOutOfProcess(createSystemLibraryObject, analyzeSystemLibraryObject);
     analyzeInAndOutOfProcess(createContainers, analyzeContainers);
+    analyzeInAndOutOfProcess(createSameImageObject, analyzeAlignment);
 
     // Everything is read from the snapshot, so the process may be gone.
     analyzeAfterTargetExits(createSameImageObject, analyzeSameImageObject);

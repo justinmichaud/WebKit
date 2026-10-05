@@ -314,7 +314,7 @@ const TargetType* SnapshotDebugInfo::classOfVTable(Snapshot& snapshot, Address v
         bool inImage = false;
         Address function = Address { *entry }.stripped();
         if (auto* type = classOfDestructor(function, inImage))
-            return vtableSymbolNames(vtable, *type) ? type : nullptr;
+            return vtableSymbolNames(snapshot, vtable, *type) ? type : nullptr;
         if (!inImage)
             break;
         Diagnostics::count(DiagnosticCounter::VTableSlotsNotDestructors);
@@ -410,7 +410,8 @@ static std::string enclosingFunctionSignature(std::string_view scope)
 // classes of one name and size, such as two CallableWrappers of lambdas local
 // to different functions, so the function tells their classes apart; two
 // unnamed local types of one function still match each other.
-static std::string withUnnamedLocalTypesErased(std::string_view name)
+enum class KeepsFunction : bool { No, Yes };
+static std::string withUnnamedLocalTypesErased(std::string_view name, KeepsFunction keepsFunction = KeepsFunction::Yes)
 {
     std::string result;
     result.reserve(name.size());
@@ -422,7 +423,8 @@ static std::string withUnnamedLocalTypesErased(std::string_view name)
             std::string function = enclosingFunctionSignature(std::string_view { result }.substr(argumentStart));
             result.resize(argumentStart);
             result += '?';
-            result += function;
+            if (keepsFunction == KeepsFunction::Yes)
+                result += function;
             index += length;
             continue;
         }
@@ -490,7 +492,140 @@ static std::string declaredMember(lldb::SBType& type)
 // class's destructor an alias of its base's when it does nothing more, and
 // linkers fold identical functions. Neither folds a vtable, which is
 // relocated data, so the vtable's own symbol checks the class.
-bool SnapshotDebugInfo::vtableSymbolNames(Address vtable, const TargetType& type)
+std::string SnapshotDebugInfo::vtableClassName(Address vtable)
+{
+    lldb::SBSymbol symbol = m_target->ResolveLoadAddress(vtable.toTargetVMAddress()).GetSymbol();
+    const char* vtableName = symbol.IsValid() ? symbol.GetMangledName() : nullptr;
+    // Anything but a complete object's vtable, such as a construction vtable (_ZTC), names no class.
+    // Debian 12's __cxa_demangle cannot demangle a C++20 constraint, so the name is liblldb's.
+    const char* demangledName = vtableName && std::string_view { vtableName }.starts_with("_ZTV") ? symbol.GetName() : nullptr;
+    constexpr std::string_view vtablePrefix = "vtable for ";
+    if (!demangledName || !std::string_view { demangledName }.starts_with(vtablePrefix))
+        return { };
+    return std::string { std::string_view { demangledName }.substr(vtablePrefix.size()) };
+}
+
+// Where the last scope of a demangled name starts, after its last "::" outside any brackets.
+static size_t lastScopeStart(std::string_view name)
+{
+    size_t start = 0;
+    unsigned depth = 0;
+    for (size_t index = 0; index + 1 < name.size(); ++index) {
+        char character = name[index];
+        if (character == '<' || character == '(' || character == '{')
+            ++depth;
+        else if ((character == '>' || character == ')' || character == '}') && depth)
+            --depth;
+        else if (!depth && character == ':' && name[index + 1] == ':')
+            start = index + 2;
+    }
+    return start;
+}
+
+// The first template argument of a demangled class template specialization: "X" in "N<X, Y>".
+static std::string_view firstTemplateArgument(std::string_view name)
+{
+    size_t open = name.find('<');
+    if (open == std::string_view::npos)
+        return { };
+    unsigned depth = 0;
+    for (size_t index = open + 1; index < name.size(); ++index) {
+        char character = name[index];
+        if (character == '<' || character == '(' || character == '{')
+            ++depth;
+        else if (character == '>' || character == ')' || character == '}') {
+            if (!depth)
+                return name.substr(open + 1, index - open - 1);
+            --depth;
+        } else if (!depth && character == ',')
+            return name.substr(open + 1, index - open - 1);
+    }
+    return { };
+}
+
+// Whether `closure`, the type of a CallableWrapper's m_callable, belongs where `wrapper`, liblldb's
+// class of a CallableWrapper of the same size, has its m_callable.
+static bool closureFits(const TargetType& wrapper, const TargetType& closure)
+{
+    auto* klass = std::get_if<TargetType::Class>(&wrapper.layout());
+    if (!klass || !closure.byteSize())
+        return false;
+    uint64_t basesEnd = 0;
+    for (const TargetType::Base& base : klass->bases)
+        basesEnd = std::max<uint64_t>(basesEnd, base.offset + base.type.byteSize());
+    for (const TargetType::Field& field : klass->properFields) {
+        if (std::string_view { field.name.legacyCStringPointer() } != "m_callable")
+            continue;
+        size_t alignment = std::max(closure.alignment(), wrapper.alignment());
+        return field.offset == roundUpToMultipleOf(closure.alignment(), basesEnd)
+            && wrapper.byteSize() == roundUpToMultipleOf(alignment, field.offset + closure.byteSize());
+    }
+    return false;
+}
+
+const TargetType* SnapshotDebugInfo::closureOfCallableWrapper(Snapshot& snapshot, Address vtable, bool& isUnnamed)
+{
+    Closure& closure = m_closures.ensure(vtable, [&] {
+        constexpr std::string_view wrapperPrefix = "WTF::Detail::CallableWrapper<";
+        std::string wrapper = vtableClassName(vtable);
+        if (!std::string_view { wrapper }.starts_with(wrapperPrefix))
+            return Closure { false, nullptr };
+        std::string_view closureName = firstTemplateArgument(wrapper);
+        std::string_view lastScope = closureName.substr(lastScopeStart(closureName));
+        if (lastScope.empty() || unnamedLocalTypeLength(lastScope) != lastScope.size())
+            return Closure { false, nullptr };
+
+        // CallableWrapper::call(In...) calls the closure's operator() with the same parameters.
+        std::string callPrefix = wrapper + "::call(";
+        std::string parameters;
+        Memory& memory = snapshot.memory();
+        // CallableWrapperBase's virtual functions: the destructor's two entries and call().
+        constexpr size_t callableWrapperSlots = 3;
+        for (size_t slot = 0; slot < callableWrapperSlots && parameters.empty(); ++slot) {
+            auto entry = memory.ptr<uint64_t>(vtable + slot * sizeof(uint64_t));
+            if (!entry)
+                break;
+            lldb::SBSymbol symbol = m_target->ResolveLoadAddress(Address { *entry }.stripped().toTargetVMAddress()).GetSymbol();
+            const char* name = symbol.IsValid() ? symbol.GetName() : nullptr;
+            if (name && std::string_view { name }.starts_with(callPrefix))
+                parameters = std::string_view { name }.substr(callPrefix.size() - 1);
+        }
+        if (parameters.empty()) {
+            CORPSE_REPORT("The vtable at 0x%llx, of '%s', has no call()", vtable.toTargetVMAddress(), wrapper.c_str());
+            return Closure { true, nullptr };
+        }
+
+        // The candidate's symbol must have exactly its name, from the demangler that spelled the vtable's.
+        lldb::SBModule module = moduleAt(vtable);
+        for (std::string_view qualifiers : { " const", "" }) {
+            std::string candidate = std::string { closureName } + "::operator()" + parameters + std::string { qualifiers };
+            // The symbol table, not the debug info's index, which finds a function by its base name, operator().
+            lldb::SBSymbolContextList found = module.FindSymbols(candidate.c_str(), lldb::eSymbolTypeCode);
+            for (uint32_t index = 0; index < found.GetSize(); ++index) {
+                lldb::SBSymbol symbol = found.GetContextAtIndex(index).GetSymbol();
+                const char* name = symbol.IsValid() ? symbol.GetName() : nullptr;
+                if (!name || std::string_view { name } != candidate)
+                    continue;
+                lldb::SBFunction function = symbol.GetStartAddress().GetFunction();
+                lldb::SBValueList arguments = function.IsValid() ? function.GetBlock().GetVariables(*m_target, true, false, false) : lldb::SBValueList { };
+                lldb::SBValue self = arguments.IsValid() ? arguments.GetFirstValueByName("this") : lldb::SBValue { };
+                lldb::SBType pointee = self.IsValid() ? self.GetType().GetPointeeType().GetUnqualifiedType() : lldb::SBType { };
+                if (pointee.IsValid() && pointee.IsTypeComplete() && pointee.GetByteSize())
+                    return Closure { true, &type(pointee) };
+            }
+        }
+        Diagnostics::count(DiagnosticCounter::ClosuresWithoutCallOperator);
+        return Closure { true, nullptr };
+    }).iterator->value;
+    isUnnamed = closure.isUnnamed;
+    return closure.type;
+}
+
+// One function can be the destructor of two classes: clang makes a derived
+// class's destructor an alias of its base's when it does nothing more, and
+// linkers fold identical functions. Neither folds a vtable, which is
+// relocated data, so the vtable's own symbol checks the class.
+bool SnapshotDebugInfo::vtableSymbolNames(Snapshot& snapshot, Address vtable, const TargetType& type)
 {
     lldb::SBSymbol symbol = m_target->ResolveLoadAddress(vtable.toTargetVMAddress()).GetSymbol();
     const char* vtableName = symbol.IsValid() ? symbol.GetMangledName() : nullptr;
@@ -499,17 +634,11 @@ bool SnapshotDebugInfo::vtableSymbolNames(Address vtable, const TargetType& type
         Diagnostics::count(DiagnosticCounter::VTablesWithoutSymbol);
         return false;
     }
-    // Anything but a complete object's vtable, such as a construction vtable (_ZTC), names no class.
-    // The name is liblldb's, from the demangler that spelled the member's.
-    // Debian 12's __cxa_demangle cannot demangle a C++20 constraint.
-    const char* vtableDemangledName = std::string_view { vtableName }.starts_with("_ZTV") ? symbol.GetName() : nullptr;
-    std::string vtableClass = vtableDemangledName ? vtableDemangledName : std::string { };
-    constexpr std::string_view vtablePrefix = "vtable for ";
-    if (!vtableClass.starts_with(vtablePrefix)) {
+    std::string vtableClass = vtableClassName(vtable);
+    if (vtableClass.empty()) {
         CORPSE_REPORT("The vtable at 0x%llx is in '%s', which is not a class's vtable", vtable.toTargetVMAddress(), vtableName);
         return false;
     }
-    vtableClass.erase(0, vtablePrefix.size());
 
     // The class rule 1 found must be the vtable's: its own members are named
     // as members of that class, and a base's, a derived class's or a nested
@@ -519,11 +648,17 @@ bool SnapshotDebugInfo::vtableSymbolNames(Address vtable, const TargetType& type
         CORPSE_REPORT("'%s', the class of the destructor in the vtable at 0x%llx, declares no member function with a linkage name", type.name().legacyCStringPointer(), vtable.toTargetVMAddress());
         return false;
     }
-    if (!isMemberOf(withUnnamedLocalTypesErased(member), withUnnamedLocalTypesErased(vtableClass))) {
-        CORPSE_REPORT("The vtable at 0x%llx is the vtable of '%s', but the class its destructor gives declares '%s'", vtable.toTargetVMAddress(), vtableClass.c_str(), member.c_str());
-        return false;
+    if (isMemberOf(withUnnamedLocalTypesErased(member), withUnnamedLocalTypesErased(vtableClass)))
+        return true;
+    // liblldb's class of a CallableWrapper of another closure of the same size, whose m_callable
+    // the walk reads as the vtable's own closure type.
+    bool isUnnamed = false;
+    if (isMemberOf(withUnnamedLocalTypesErased(member, KeepsFunction::No), withUnnamedLocalTypesErased(vtableClass, KeepsFunction::No))) {
+        if (auto* closure = closureOfCallableWrapper(snapshot, vtable, isUnnamed); closure && closureFits(type, *closure))
+            return true;
     }
-    return true;
+    CORPSE_REPORT("The vtable at 0x%llx is the vtable of '%s', but the class its destructor gives declares '%s'", vtable.toTargetVMAddress(), vtableClass.c_str(), member.c_str());
+    return false;
 }
 
 lldb::SBModule SnapshotDebugInfo::moduleAt(Address address) const

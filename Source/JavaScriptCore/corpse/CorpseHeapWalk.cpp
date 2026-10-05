@@ -33,6 +33,7 @@
 #include "CorpseRegion.h"
 #include "CorpseThread.h"
 #include <JavaScriptCore/BlockDirectoryBits.h>
+#include <JavaScriptCore/Bytecodes.h>
 #include <JavaScriptCore/CollectionScope.h>
 #include <JavaScriptCore/FreeList.h>
 #include <JavaScriptCore/GCSegmentedArray.h>
@@ -48,6 +49,7 @@
 #include <JavaScriptCore/PreciseAllocation.h>
 #include <JavaScriptCore/StrongBlock.h>
 #include <JavaScriptCore/StructureID.h>
+#include <JavaScriptCore/UnlinkedMetadataTable.h>
 #include <JavaScriptCore/WeakBlock.h>
 #include <algorithm>
 #include <bit>
@@ -347,11 +349,20 @@ static constexpr std::array stylePropertiesSubclasses {
     HeapWalk::TypeFieldSubclass { "true", "WebCore::MutableStyleProperties", false },
 };
 
+// ElementData::isUnique.
+static constexpr std::array elementDataSubclasses {
+    HeapWalk::TypeFieldSubclass { "false", "WebCore::ShareableElementData", false },
+    HeapWalk::TypeFieldSubclass { "true", "WebCore::UniqueElementData", false },
+};
+static constexpr uint64_t elementDataIsUniqueFlag = 1; // ElementData::s_flagIsUnique, private.
+static constexpr unsigned elementDataFlagCount = 5; // ElementData::s_flagCount, private: arraySize() is the bits above the flags.
+
 static constexpr std::array typeFieldHierarchyTable {
     HeapWalk::TypeFieldHierarchy { "WebCore::CSSValue", "m_classType", "WebCore::CSSValue::ClassType", cssValueSubclasses },
     HeapWalk::TypeFieldHierarchy { "WebCore::StyleRuleBase", "m_type", "WebCore::StyleRuleType", styleRuleSubclasses },
     HeapWalk::TypeFieldHierarchy { "WebCore::NodeRareData", "m_isElementRareData", nullptr, nodeRareDataSubclasses },
     HeapWalk::TypeFieldHierarchy { "WebCore::StyleProperties", "m_isMutable", nullptr, stylePropertiesSubclasses },
+    HeapWalk::TypeFieldHierarchy { "WebCore::ElementData", "m_arraySizeAndFlags", nullptr, elementDataSubclasses, elementDataIsUniqueFlag },
 };
 
 // What MarkedBlock::Handle::isLive reads from a block and its header.
@@ -688,6 +699,20 @@ IterationStatus HeapWalk::walkPreciseAllocations(const Remote<MarkedSpace>& spac
     return IterationStatus::Continue;
 }
 
+// Where a WeakPtr<T>'s impl keeps its pointer, to T::WeakValueType in a T, and, for each
+// CanMakeWeakPtrBase of T, where its WeakPtrFactory keeps its impl and where the factory's
+// ObjectType is. T::WeakValueType is the ObjectType of the factory whose impl it is.
+struct WeakPointerLayout {
+    uint64_t implPointerOffset;
+    struct Factory {
+        uint64_t implOffset;
+        uint64_t objectTypeOffset;
+        bool isCompact; // A WeakPtrFactoryWithBitField, whose impl shares its word with the bits.
+    };
+    Vector<Factory, 1> factories;
+    const TargetType* object;
+};
+
 // The walk of HeapWalk::reach: every live cell as its C++ class, and every C++
 // object reached from the roots or from a cell.
 class ReachWalk {
@@ -745,6 +770,13 @@ private:
     std::optional<std::pair<uint64_t, uint64_t>> m_scopeOffsets; // Of the SymbolTable in an environment, and of its maxScopeOffset.
     // The live auxiliary cell `address` lies in, if any.
     const HeapWalk::Cell* auxiliaryCellContaining(Address) const;
+    // Every live cell, sorted, and for each MarkedBlock and precise allocation, by
+    // its allocation's address, where its header is.
+    Vector<HeapWalk::Cell> m_liveCells;
+    HashMap<uint64_t, HeapWalk::Allocation> m_jsHeapBlockHeaders;
+    // Whether `address`, in the allocation at `index`, is the JS heap's free or dead
+    // memory: in a MarkedBlock or a precise allocation, but in no live cell or header.
+    bool isFreeInJSHeap(size_t index, Address) const;
 
     // An object is a value the walk read that is not part of another one: the
     // roots, a JS cell, a block's header, or a value reached through a pointer
@@ -810,12 +842,13 @@ private:
     void followPointer(Address pointer, const TargetType& pointee);
     void follow(Address, const TargetType&);
     void followUntyped(Address);
+    void followInSystemMalloc(Address, const TargetType&);
 
     // Readers for values whose pointers the debug info cannot describe, picked
     // by the qualified name of a class the walk has reached. True if `value` was
     // one, and has been read.
     bool walkByName(const TargetValue&);
-    enum class Reader : uint8_t { None, Vector, HashTable, RobinHoodHashTable, TrailingArray, ButterflyArray, SegmentedVector, ConcurrentBufferArray, SymbolTableEntry, CodeBlock, AlignedStorage, CodePointer, LazyPointer, CompactPointer, PackedPointer, JSString, PropertyTable, Optional, StringImpl, ObjectButterfly, StrongBlock, InlineWatchpointSet, ArraySegment, WeakBlock, ExpressionInfo, ArrayBufferView, ArrayBufferContents, Variant, HasOwnPropertyCache, ImmutableStyleProperties, InlineMap, UnlinkedFunctionExecutable, CSSSelector, JSValue, StringImplShape, HashTableValue, PropertyCondition, InlineCacheHandler, CellButterfly, CSSPrimitiveValue, CSSPrimitiveData, MarkedSpace, TypeField, CompactPointerTuple, StructureID, Function, StructureChain };
+    enum class Reader : uint8_t { None, Vector, HashTable, RobinHoodHashTable, TrailingArray, ButterflyArray, SegmentedVector, ConcurrentBufferArray, SymbolTableEntry, CodeBlock, AlignedStorage, CodePointer, LazyPointer, CompactPointer, PackedPointer, JSString, PropertyTable, Optional, StringImpl, ObjectButterfly, StrongBlock, InlineWatchpointSet, ArraySegment, WeakBlock, ExpressionInfo, ArrayBufferView, ArrayBufferContents, Variant, HasOwnPropertyCache, ImmutableStyleProperties, InlineMap, UnlinkedFunctionExecutable, CSSSelector, JSValue, StringImplShape, HashTableValue, PropertyCondition, InlineCacheHandler, CellButterfly, CSSPrimitiveValue, CSSPrimitiveData, MarkedSpace, TypeField, CompactPointerTuple, StructureID, Function, StructureChain, WeakPointer, CallableWrapper, ShareableElementData, Atomic, Span, UnlinkedMetadataTable, CodeOrigin, InferredValue, IncomingReferences };
     Reader readerFor(const TargetType&);
     static Reader readerNamed(std::string_view qualifiedName);
     void walkVector(const TargetValue&);
@@ -872,6 +905,20 @@ private:
     void walkStructureID(const TargetValue&);
     void walkFunction(const TargetValue&);
     void walkStructureChain(const TargetValue&);
+    void walkWeakPointer(const TargetValue&);
+    void walkCallableWrapper(const TargetValue&);
+    void walkShareableElementData(const TargetValue&);
+    void walkAtomic(const TargetValue&);
+    void walkSpan(const TargetValue&);
+    void walkUnlinkedMetadataTable(const TargetValue&);
+    void walkCodeOrigin(const TargetValue&);
+    void walkInferredValue(const TargetValue&);
+    void walkIncomingReferences(const TargetValue&);
+    // JavaScriptCore's class `name`, once per name.
+    const TargetType* javaScriptCoreClass(const char* name);
+    HashMap<String, const TargetType*> m_javaScriptCoreClasses;
+    HashMap<const TargetType*, std::optional<WeakPointerLayout>> m_weakPointerLayouts;
+    const WeakPointerLayout* weakPointerLayout(const TargetType&);
     // The cell at `address`, which the walk reads as a live cell of its own, is referred to.
     void referenceCell(Address);
     // By the base class and the value of its type field; null if it names no subclass.
@@ -1051,6 +1098,17 @@ void ReachWalk::run()
         return IterationStatus::Continue;
     });
     std::ranges::sort(m_auxiliaryCells, { }, &HeapWalk::Cell::address);
+    m_liveCells = cells;
+    std::ranges::sort(m_liveCells, { }, &HeapWalk::Cell::address);
+    m_heap.forEachBlock([&](Address block) {
+        if (auto index = allocationOf(block, MarkedBlock::blockSize))
+            m_jsHeapBlockHeaders.add(m_allocations[*index].address.toTargetVMAddress(), HeapWalk::Allocation { block + MarkedBlock::headerAtom * MarkedBlock::atomSize, m_heap.m_blockHeaderClass->byteSize() });
+        return IterationStatus::Continue;
+    });
+    for (const HeapWalk::PreciseAllocationState& precise : m_heap.preciseAllocations()) {
+        if (auto index = allocationOf(precise.header, 1))
+            m_jsHeapBlockHeaders.add(m_allocations[*index].address.toTargetVMAddress(), HeapWalk::Allocation { precise.header, precise.cell - precise.header });
+    }
     // The roots' VM is the test's description of it. The cells reach the VM as
     // JavaScriptCore describes it, with every type it owns complete.
     m_rootKind = m_heap.m_roots ? "the roots" : "the VM";
@@ -1625,12 +1683,60 @@ void ReachWalk::followUntyped(Address address)
         enqueue(TargetValue::at(m_snapshot, allocation, *dynamicType), IsObject::Yes);
 }
 
+bool ReachWalk::isFreeInJSHeap(size_t index, Address address) const
+{
+    auto header = m_jsHeapBlockHeaders.find(m_allocations[index].address.toTargetVMAddress());
+    if (header == m_jsHeapBlockHeaders.end())
+        return false;
+    if (address >= header->value.address && address - header->value.address < header->value.size)
+        return false;
+    auto cells = m_liveCells.span();
+    auto after = std::ranges::upper_bound(cells, address, { }, &HeapWalk::Cell::address);
+    return after == cells.begin() || address - (after - 1)->address >= (after - 1)->size;
+}
+
+// A polymorphic object in system malloc's memory, such as a WebPage in the
+// storage of the Objective-C object that wraps it, is read as its dynamic type,
+// as a global variable is: its bytes are not counted (A3), but what it holds is.
+void ReachWalk::followInSystemMalloc(Address address, const TargetType& type)
+{
+#if OS(DARWIN)
+    auto* klass = std::get_if<TargetType::Class>(&type.layout());
+    if (!klass || !klass->isPolymorphic)
+        return;
+    auto region = Region::findContaining(m_snapshot.regions(), address);
+    if (!region || type.byteSize() > region->end() - address)
+        return;
+    switch (region->userTag()) {
+    case VM_MEMORY_MALLOC:
+    case VM_MEMORY_MALLOC_SMALL:
+    case VM_MEMORY_MALLOC_LARGE:
+    case VM_MEMORY_MALLOC_HUGE:
+    case VM_MEMORY_MALLOC_TINY:
+    case VM_MEMORY_MALLOC_NANO:
+    case VM_MEMORY_MALLOC_MEDIUM:
+        break;
+    default:
+        return;
+    }
+    Address completeObject;
+    if (m_heap.m_debugInfo->dynamicTypeIfAnyAt(m_snapshot, address, completeObject) != &type || completeObject != address)
+        return;
+    enqueue(TargetValue::at(m_snapshot, address, type), IsObject::Yes);
+#else
+    UNUSED_PARAM(address);
+    UNUSED_PARAM(type);
+#endif
+}
+
 void ReachWalk::follow(Address address, const TargetType& type)
 {
     // Only into an allocation, so that a pointer into static data leads nowhere.
     auto index = allocationOf(address, 1);
-    if (!index)
+    if (!index) {
+        followInSystemMalloc(address, type);
         return;
+    }
     // A pointee that runs past the end of its allocation is not an object of
     // its type, such as the other member of a union: it is listed as an
     // overrun, and neither reached nor read.
@@ -1644,6 +1750,9 @@ void ReachWalk::follow(Address address, const TargetType& type)
         return;
     }
     markReached(*index, address);
+    // A pointer to a cell that has died, which JSC may keep where only a check reads it, holds nothing.
+    if (isFreeInJSHeap(*index, address))
+        return;
     // A pointer to an integer at the start of an allocation is a buffer of them, such as a malloc'ed string's characters.
     if (allocation.address == address && type.byteSize() && std::holds_alternative<TargetType::Integer>(type.layout())) {
         if (m_visited.add({ address.toTargetVMAddress(), std::bit_cast<uint64_t>(&type) }).isNewEntry)
@@ -1755,6 +1864,24 @@ auto ReachWalk::readerNamed(std::string_view name) -> Reader
         return Reader::Function;
     if (name == "JSC::StructureChain")
         return Reader::StructureChain;
+    if (name.starts_with("WTF::WeakPtr<") || name.starts_with("WTF::WeakRef<"))
+        return Reader::WeakPointer;
+    if (name.starts_with("WTF::Detail::CallableWrapper<"))
+        return Reader::CallableWrapper;
+    if (name == "WebCore::ShareableElementData")
+        return Reader::ShareableElementData;
+    if (name.starts_with("std::__1::__cxx_atomic_base_impl<"))
+        return Reader::Atomic;
+    if (name.starts_with("std::__1::span<"))
+        return Reader::Span;
+    if (name == "JSC::UnlinkedMetadataTable")
+        return Reader::UnlinkedMetadataTable;
+    if (name == "JSC::CodeOrigin")
+        return Reader::CodeOrigin;
+    if (name.starts_with("JSC::InferredValue<"))
+        return Reader::InferredValue;
+    if (name.starts_with("JSC::GCIncomingRefCounted<"))
+        return Reader::IncomingReferences;
     for (const HeapWalk::TypeFieldHierarchy& hierarchy : typeFieldHierarchyTable) {
         if (name == hierarchy.base)
             return Reader::TypeField;
@@ -1906,6 +2033,33 @@ bool ReachWalk::walkByName(const TargetValue& value)
         return true;
     case Reader::StructureChain:
         walkStructureChain(value);
+        return true;
+    case Reader::WeakPointer:
+        walkWeakPointer(value);
+        return true;
+    case Reader::CallableWrapper:
+        walkCallableWrapper(value);
+        return true;
+    case Reader::ShareableElementData:
+        walkShareableElementData(value);
+        return true;
+    case Reader::Atomic:
+        walkAtomic(value);
+        return true;
+    case Reader::Span:
+        walkSpan(value);
+        return true;
+    case Reader::UnlinkedMetadataTable:
+        walkUnlinkedMetadataTable(value);
+        return true;
+    case Reader::CodeOrigin:
+        walkCodeOrigin(value);
+        return true;
+    case Reader::InferredValue:
+        walkInferredValue(value);
+        return true;
+    case Reader::IncomingReferences:
+        walkIncomingReferences(value);
         return true;
     case Reader::MarkedSpace: {
         // MarkedSpace::prepareForMarking points these into m_preciseAllocations for a collection,
@@ -2840,6 +2994,363 @@ void ReachWalk::walkStructureChain(const TargetValue& chain)
 
 static constexpr unsigned compactPointerTupleBitsInPointer = 48; // CompactPointerTuple::maxNumberOfBitsInPointer.
 
+// Where the class liblldb names `name` is in a `type`: `type` itself or one of its non-virtual bases.
+static std::optional<uint64_t> offsetOfClassNamed(const TargetType& type, const String& name, unsigned depth = 0)
+{
+    if (type.name() == name)
+        return 0;
+    auto* klass = std::get_if<TargetType::Class>(&type.layout());
+    if (!klass || depth > 32)
+        return std::nullopt;
+    for (const TargetType::Base& base : klass->bases) {
+        if (auto offset = offsetOfClassNamed(base.type, name, depth + 1))
+            return base.offset + *offset;
+    }
+    return std::nullopt;
+}
+
+// Every CanMakeWeakPtrBase that `type`, at `offset` in a T, derives from, as a factory of `layout`.
+static void addWeakPointerFactories(WeakPointerLayout& layout, const TargetType& type, uint64_t offset, unsigned depth = 0)
+{
+    auto* klass = std::get_if<TargetType::Class>(&type.layout());
+    if (!klass || depth > 32)
+        return;
+    for (const TargetType::Base& base : klass->bases) {
+        auto name = base.type.name();
+        if (!std::string_view { name.legacyCStringPointer() }.starts_with("WTF::CanMakeWeakPtrBase<")) {
+            addWeakPointerFactories(layout, base.type, offset + base.offset, depth + 1);
+            continue;
+        }
+        const TargetType* factory = base.type.templateArgument(0);
+        const TargetType* objectType = factory ? factory->templateArgument(0) : nullptr;
+        uint64_t factoryOffset = 0;
+        const TargetType::Field* factoryField = findField(base.type, "m_weakPtrFactory", factoryOffset);
+        uint64_t implOffset = 0;
+        const TargetType::Field* implField = factoryField ? findField(factoryField->type, "m_impl", implOffset) : nullptr;
+        auto objectTypeOffset = objectType ? offsetOfClassNamed(*layout.object, objectType->name()) : std::nullopt;
+        if (!implField || !objectTypeOffset)
+            continue;
+        auto factoryName = factory->name();
+        layout.factories.append({ offset + base.offset + factoryOffset + factoryField->offset + implOffset + implField->offset, *objectTypeOffset,
+            std::string_view { factoryName.legacyCStringPointer() }.starts_with("WTF::WeakPtrFactoryWithBitField<") });
+    }
+}
+
+auto ReachWalk::weakPointerLayout(const TargetType& weak) -> const WeakPointerLayout*
+{
+    auto& layout = m_weakPointerLayouts.ensure(&weak, [&]() -> std::optional<WeakPointerLayout> {
+        const TargetType* object = weak.templateArgument(0);
+        const TargetType* impl = weak.templateArgument(1);
+        if (!object || !impl)
+            return std::nullopt;
+        if (!object->byteSize())
+            object = object->debugInfo().definitionInItsImage(*object);
+        uint64_t declaringClassOffset = 0;
+        const TargetType::Field* pointer = findField(*impl, "m_ptr", declaringClassOffset);
+        if (!object || !pointer)
+            return std::nullopt;
+        WeakPointerLayout result { declaringClassOffset + pointer->offset, { }, object };
+        addWeakPointerFactories(result, *object, 0);
+        if (result.factories.isEmpty())
+            return std::nullopt;
+        return result;
+    }).iterator->value;
+    return layout ? &*layout : nullptr;
+}
+
+// WeakPtr::get and WeakRef::get: the impl's m_ptr, a void* to the object as its
+// T::WeakValueType, which is T or one of its bases.
+void ReachWalk::walkWeakPointer(const TargetValue& weak)
+{
+    walkMembers(weak, IsComplete::No);
+    auto impl = rawPointer(weak.properField("m_impl"), "m_ptr");
+    if (!impl)
+        return;
+    const WeakPointerLayout* layout = weakPointerLayout(weak.type());
+    if (!layout) {
+        notFollowed(NotFollowed::TypeNotReached);
+        return;
+    }
+    auto pointer = m_snapshot.memory().ptr<uint64_t>(*impl + layout->implPointerOffset);
+    if (!pointer || !*pointer)
+        return;
+    Address weakValue = Address { *pointer }.stripped();
+    for (const WeakPointerLayout::Factory& factory : layout->factories) {
+        Address object = weakValue - factory.objectTypeOffset;
+        auto factoryImpl = m_snapshot.memory().ptr<uint64_t>(object + factory.implOffset);
+        if (!factoryImpl)
+            continue;
+        uint64_t factoryImplAddress = factory.isCompact ? *factoryImpl & ((1ull << compactPointerTupleBitsInPointer) - 1) : *factoryImpl;
+        if (Address { factoryImplAddress }.stripped() == *impl) {
+            followPointer(object, *layout->object);
+            return;
+        }
+    }
+}
+
+// A CallableWrapper's m_callable, as the closure type its vtable names: liblldb's
+// class for a CallableWrapper of an unnamed closure type may be the one it gives
+// the CallableWrapper of another closure of the same size.
+void ReachWalk::walkCallableWrapper(const TargetValue& wrapper)
+{
+    auto vptr = m_snapshot.memory().ptr<uint64_t>(wrapper.address());
+    bool isUnnamed = false;
+    const TargetType* closure = vptr ? m_heap.m_debugInfo->closureOfCallableWrapper(m_snapshot, Address { *vptr }.stripped(), isUnnamed) : nullptr;
+    if (!isUnnamed) {
+        walkMembers(wrapper, IsComplete::Yes);
+        return;
+    }
+    walkMembers(wrapper, IsComplete::Yes, "m_callable");
+    uint64_t offset = 0;
+    const TargetType::Field* field = findField(wrapper.type(), "m_callable", offset);
+    if (!closure || !field) {
+        notFollowed(NotFollowed::NoDynamicType);
+        return;
+    }
+    walkInPlace(wrapper.address() + offset + field->offset, *closure, &wrapper.type(), field);
+}
+
+// ShareableElementData::attributes(): arraySize() Attributes in m_attributeArray, a
+// flexible array member, which starts where the class ends.
+void ReachWalk::walkShareableElementData(const TargetValue& data)
+{
+    walkMembers(data, IsComplete::Yes);
+    auto bits = integerField(data, "m_arraySizeAndFlags");
+    auto* attribute = classBeside(data.type(), "WebCore::Attribute");
+    auto index = allocationOf(data.address(), 1);
+    if (!bits || !attribute || !index) {
+        notFollowed(NotFollowed::TypeNotReached);
+        return;
+    }
+    Address attributes = data.address() + data.type().byteSize();
+    uint64_t count = static_cast<uint32_t>(*bits) >> elementDataFlagCount;
+    const HeapWalk::Allocation& allocation = m_allocations[*index];
+    if (attributes > allocation.address + allocation.size || count > ((allocation.address + allocation.size) - attributes) / attribute->byteSize()) {
+        notFollowed(NotFollowed::DoesNotFit);
+        m_overruns.append(makeString("the "_s, count, " attributes of the 'WebCore::ShareableElementData' at 0x"_s, hex(data.address().toTargetVMAddress()),
+            ", reached through "_s, context(), ", run past the end of its "_s, allocation.size, "-byte allocation"_s));
+        return;
+    }
+    walkElements(attributes, *attribute, count);
+}
+
+// libc++'s std::atomic<T> keeps its value in __a_value, a C11 _Atomic(T), which
+// liblldb describes as no type the walk reads: it is read as T.
+void ReachWalk::walkAtomic(const TargetValue& atomic)
+{
+    uint64_t offset = 0;
+    const TargetType::Field* value = findField(atomic.type(), "__a_value", offset);
+    const TargetType* type = atomic.type().templateArgument(0);
+    if (!value || !type) {
+        notFollowed(NotFollowed::TypeNotReached);
+        return;
+    }
+    if (type->byteSize() != value->type.byteSize())
+        return;
+    walkInPlace(atomic.address() + offset + value->offset, *type, &atomic.type(), value);
+}
+
+// libc++'s std::span: __size_ elements at __data_, or, for a static extent, as
+// many as the extent, its second template argument, says.
+void ReachWalk::walkSpan(const TargetValue& span)
+{
+    TargetValue data = span.properField("__data_");
+    auto* pointer = data ? std::get_if<TargetType::Pointer>(&data.type().layout()) : nullptr;
+    auto address = data ? data.pointerValue() : std::nullopt;
+    if (!pointer || !address || !*address)
+        return;
+    std::optional<uint64_t> count;
+    if (TargetValue size = span.properField("__size_")) {
+        if (auto value = size.integer())
+            count = static_cast<uint64_t>(*value);
+    } else if (auto extent = span.type().templateIntegerArgument(1); extent && *extent != std::dynamic_extent)
+        count = *extent;
+    const TargetType& element = pointer->pointee;
+    auto index = allocationOf(*address, 1);
+    if (!count || !index || !element.byteSize()) {
+        if (index)
+            markReached(*index, *address);
+        return;
+    }
+    const HeapWalk::Allocation& allocation = m_allocations[*index];
+    if (*count > ((allocation.address + allocation.size) - *address) / element.byteSize()) {
+        notFollowed(NotFollowed::DoesNotFit);
+        m_overruns.append(makeString("the "_s, *count, " elements of a '"_s, span.type().name(), "' at 0x"_s, hex(address->toTargetVMAddress()),
+            ", reached through "_s, context(), ", run past the end of its "_s, allocation.size, "-byte allocation"_s));
+        return;
+    }
+    markReached(*index, *address);
+    walkElements(*address, element, *count);
+}
+
+const TargetType* ReachWalk::javaScriptCoreClass(const char* name)
+{
+    return m_javaScriptCoreClasses.ensure(String::fromLatin1(name), [&] {
+        return m_heap.m_javaScriptCoreImage ? m_heap.m_debugInfo->classNamed(m_heap.m_javaScriptCoreImage, name) : nullptr;
+    }).iterator->value;
+}
+
+// The Metadata class of each bytecode with metadata, in the order of their
+// OpcodeIDs, which is their entries' in a metadata table's offset table.
+#define JSC_CORPSE_METADATA_SIZE_EXPRESSION(size) #size,
+static constexpr std::array<std::string_view, NUMBER_OF_BYTECODE_WITH_METADATA> metadataSizeExpressions { FOR_EACH_BYTECODE_METADATA_SIZE(JSC_CORPSE_METADATA_SIZE_EXPRESSION) };
+#undef JSC_CORPSE_METADATA_SIZE_EXPRESSION
+
+// UnlinkedMetadataTable::s_offset16TableSize and s_offset32TableSize, private.
+static constexpr unsigned metadataOffsetTableEntries = NUMBER_OF_BYTECODE_WITH_METADATA + 1;
+static constexpr unsigned metadataOffset16TableSize = roundUpToMultipleOf<sizeof(uint32_t)>(metadataOffsetTableEntries * sizeof(uint16_t));
+static constexpr unsigned metadataOffset32TableSize = roundUpToMultipleOf<UnlinkedMetadataTable::s_maxMetadataAlignment>(metadataOffsetTableEntries * sizeof(uint32_t));
+
+// A finalized UnlinkedMetadataTable's m_rawBuffer: m_numValueProfiles
+// ValueProfiles, its LinkingData, then the MetadataTable a CodeBlock links:
+// the offset of each bytecode's Metadata, as MetadataTable::getOffset reads
+// them, then the Metadata (MetadataTable::forEach).
+void ReachWalk::walkUnlinkedMetadataTable(const TargetValue& table)
+{
+    walkMembers(table, IsComplete::Yes, "m_rawBuffer");
+    auto buffer = rawPointer(table, "m_rawBuffer");
+    auto isFinalized = integerField(table, "m_isFinalized");
+    auto hasMetadata = integerField(table, "m_hasMetadata");
+    auto is32Bit = integerField(table, "m_is32Bit");
+    auto valueProfileCount = integerField(table, "m_numValueProfiles");
+    if (!buffer)
+        return;
+    auto index = allocationOf(*buffer, 1);
+    if (!index)
+        return;
+    markReached(*index, *buffer);
+    auto* valueProfile = javaScriptCoreClass("JSC::ValueProfile");
+    auto* linkingData = javaScriptCoreClass("JSC::UnlinkedMetadataTable::LinkingData");
+    if (!isFinalized || !*isFinalized || !hasMetadata || !*hasMetadata || !is32Bit || !valueProfileCount || *valueProfileCount < 0 || !valueProfile || !linkingData) {
+        if (isFinalized && *isFinalized && hasMetadata && *hasMetadata)
+            notFollowed(NotFollowed::TypeNotReached);
+        return;
+    }
+    const HeapWalk::Allocation& allocation = m_allocations[*index];
+    Address end = allocation.address + allocation.size;
+    auto fits = [&](Address start, uint64_t size) {
+        return start >= *buffer && start <= end && size <= end - start;
+    };
+    uint64_t profiles = static_cast<uint64_t>(*valueProfileCount);
+    Address linking = *buffer + profiles * valueProfile->byteSize();
+    Address metadata = linking + linkingData->byteSize();
+    if (!fits(*buffer, profiles * valueProfile->byteSize() + linkingData->byteSize() + metadataOffset16TableSize + (*is32Bit ? metadataOffset32TableSize : 0))) {
+        notFollowed(NotFollowed::DoesNotFit);
+        return;
+    }
+    walkElements(*buffer, *valueProfile, profiles);
+    enqueue(TargetValue::at(m_snapshot, linking, *linkingData), IsObject::Yes);
+
+    auto offsets16 = m_snapshot.memory().span<uint16_t>(metadata, metadataOffsetTableEntries);
+    auto offsets32 = *is32Bit ? m_snapshot.memory().span<uint32_t>(metadata + metadataOffset16TableSize, metadataOffsetTableEntries) : decltype(m_snapshot.memory().span<uint32_t>(metadata, 0)) { };
+    if (!offsets16 || (*is32Bit && !offsets32))
+        return;
+    auto offset = [&](unsigned entry) -> uint64_t {
+        if (uint16_t value = std::span<const uint16_t> { offsets16 }[entry])
+            return value;
+        return *is32Bit ? std::span<const uint32_t> { offsets32 }[entry] : 0;
+    };
+    if (m_heap.m_byteType)
+        typed(metadata, *is32Bit ? metadataOffset16TableSize + metadataOffset32TableSize : metadataOffset16TableSize, *m_heap.m_byteType);
+    for (unsigned entry = 0; entry < NUMBER_OF_BYTECODE_WITH_METADATA; ++entry) {
+        std::string_view expression = metadataSizeExpressions[entry];
+        if (!expression.starts_with("sizeof(") || !expression.ends_with(")"))
+            continue;
+        std::string name = "JSC::" + std::string { expression.substr(7, expression.size() - 8) };
+        const TargetType* type = javaScriptCoreClass(name.c_str());
+        if (!type || !type->byteSize()) {
+            notFollowed(NotFollowed::TypeNotReached);
+            continue;
+        }
+        Address first = metadata + roundUpToMultipleOf(type->alignment(), offset(entry));
+        Address last = metadata + offset(entry + 1);
+        if (last <= first)
+            continue;
+        if (!fits(first, last - first)) {
+            notFollowed(NotFollowed::DoesNotFit);
+            m_overruns.append(makeString("the '"_s, type->name(), "'s of the metadata table at 0x"_s, hex(metadata.toTargetVMAddress()),
+                " run past the end of its "_s, allocation.size, "-byte allocation"_s));
+            continue;
+        }
+        walkElements(first, *type, (last - first) / type->byteSize());
+    }
+}
+
+// CodeOrigin::inlineCallFrame: m_compositeValue holds an OutOfLineCodeOrigin*
+// with s_maskIsOutOfLine set, or else an InlineCallFrame* in its pointer bits.
+void ReachWalk::walkCodeOrigin(const TargetValue& origin)
+{
+#if CPU(ADDRESS64)
+    constexpr uint64_t isOutOfLine = 1; // CodeOrigin::s_maskIsOutOfLine, private.
+    constexpr uint64_t outOfLinePointer = ~static_cast<uint64_t>(7); // CodeOrigin::s_maskCompositeValueForOutOfLinePointer, private.
+    constexpr uint64_t pointer = ((1ull << OS_CONSTANT(EFFECTIVE_ADDRESS_WIDTH)) - 1) & outOfLinePointer; // CodeOrigin::s_maskCompositeValueForPointer, private.
+    auto bits = origin.properField("m_compositeValue").integer();
+    if (!bits)
+        return;
+    uint64_t value = static_cast<uint64_t>(*bits);
+    const TargetType* pointee = (value & isOutOfLine) ? classBeside(origin.type(), "JSC::CodeOrigin::OutOfLineCodeOrigin") : classBeside(origin.type(), "JSC::InlineCallFrame");
+    Address address { value & ((value & isOutOfLine) ? outOfLinePointer : pointer) };
+    if (!address)
+        return;
+    if (!pointee) {
+        notFollowed(NotFollowed::TypeNotReached);
+        return;
+    }
+    followPointer(address, *pointee);
+#else
+    walkMembers(origin, IsComplete::Yes);
+#endif
+}
+
+// InferredValue::m_data: an InferredValueWatchpointSet* without IsThinFlag; or,
+// with it, the cell, in the bits of ValueMask.
+void ReachWalk::walkInferredValue(const TargetValue& inferred)
+{
+    constexpr uint64_t isThin = 1; // InferredValue::IsThinFlag, private.
+    constexpr uint64_t valueMask = ~static_cast<uint64_t>(7); // InferredValue::ValueMask, private.
+    auto bits = inferred.properField("m_data").integer();
+    if (!bits || !*bits)
+        return;
+    uint64_t data = static_cast<uint64_t>(*bits);
+    if (data & isThin) {
+        if (data & valueMask)
+            referenceCell(Address { data & valueMask });
+        return;
+    }
+    auto name = inferred.type().name();
+    std::string fatName = std::string { name.legacyCStringPointer() } + "::InferredValueWatchpointSet";
+    const TargetType* fat = m_heap.m_debugInfo->classNamedBeside(inferred.type(), fatName.c_str());
+    if (!fat) {
+        notFollowed(NotFollowed::TypeNotReached);
+        return;
+    }
+    followPointer(Address { data }, *fat);
+}
+
+// GCIncomingRefCounted::m_encodedPointer: with singletonFlag, the one cell that
+// refers to it; otherwise a Vector<JSCell*>* of them.
+void ReachWalk::walkIncomingReferences(const TargetValue& counted)
+{
+    walkMembers(counted, IsComplete::No, "m_encodedPointer");
+    constexpr uint64_t singletonFlag = 1; // GCIncomingRefCounted::singletonFlag(), private.
+    auto bits = counted.properField("m_encodedPointer").integer();
+    if (!bits || !*bits)
+        return;
+    uint64_t encoded = static_cast<uint64_t>(*bits);
+    if (encoded & singletonFlag) {
+        referenceCell(Address { encoded & ~singletonFlag });
+        return;
+    }
+    const TargetType* vectorPointer = counted.type().returnTypeOfMemberFunction("vectorOfCells");
+    auto* pointer = vectorPointer ? std::get_if<TargetType::Pointer>(&vectorPointer->layout()) : nullptr;
+    const TargetType* vector = pointer ? &pointer->pointee : nullptr;
+    if (!vector) {
+        notFollowed(NotFollowed::TypeNotReached);
+        return;
+    }
+    followPointer(Address { encoded }, *vector);
+}
+
 // CompactPointerTuple::pointer: the low bits of m_data, as the first template argument, a pointer type.
 void ReachWalk::walkCompactPointerTuple(const TargetValue& tuple)
 {
@@ -2948,6 +3459,8 @@ void ReachWalk::walkTypeField(const TargetValue& value)
         notFollowed(NotFollowed::TypeNotReached);
         return;
     }
+    if (hierarchy->mask)
+        typeField = !!(static_cast<uint64_t>(*typeField) & hierarchy->mask);
     const TargetType* subclass = m_typeFieldSubclasses.ensure({ &value.type(), *typeField }, [&]() -> const TargetType* {
         UTF8CString enumeratorName { *typeField ? "true"_s : "false"_s };
         if (hierarchy->enumeration) {

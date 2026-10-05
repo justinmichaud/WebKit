@@ -66,6 +66,7 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
 #include <bmalloc/pas_root.h>
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 #include <algorithm>
+#include <atomic>
 #include <bit>
 #include <dlfcn.h>
 #include <optional>
@@ -75,8 +76,10 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 #include <string_view>
 #include <unistd.h>
 #include <utility>
+#include <wtf/CanMakeWeakPtr.h>
 #include <wtf/CodePtr.h>
 #include <wtf/CompactPtr.h>
+#include <wtf/Function.h>
 #include <wtf/HashMap.h>
 #include <wtf/HashSet.h>
 #include <wtf/HexNumber.h>
@@ -89,6 +92,7 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
 #include <wtf/StdLibExtras.h>
 #include <wtf/TZoneMallocInlines.h>
 #include <wtf/Vector.h>
+#include <wtf/WeakPtr.h>
 #include <wtf/text/ASCIILiteral.h>
 #include <wtf/text/MakeString.h>
 #include <wtf/text/StringToIntegerConversion.h>
@@ -134,6 +138,9 @@ constexpr ASCIILiteral targetScript = "globalThis.fixture = {\n"
     "for (let i = 0; i < 4; ++i)\n"
     "    fixture.children.push({ index: i, parent: fixture, label: \"child-\" + i });\n"
     "fixture.children[0].sibling = fixture.children[1];\n"
+    // An ArrayBuffer two views refer to keeps the cells that refer to it in a Vector, after a collection.
+    "fixture.buffer = new ArrayBuffer(64);\n"
+    "fixture.views = [new Uint8Array(fixture.buffer), new Uint8Array(fixture.buffer)];\n"
     "fixture;\n"_s;
 
 // Evaluated after the collection, so that its cells are live only through the
@@ -182,6 +189,10 @@ struct alignas(16) ReachableObject {
 // so that the fixture, which holds them, is not what holds them.
 constexpr uint64_t hiddenAddressMask = 0x5a5a5a5a5a5a5a5a;
 
+struct ReachableObjectHolder {
+    ReachableObject* held { nullptr };
+};
+
 // Objects behind a value the debug info cannot describe as a pointer to
 // them, one for each way the walk reads such a value (patch 11).
 enum class Planted : uint8_t {
@@ -195,8 +206,29 @@ enum class Planted : uint8_t {
     NeverDestroyedPointer, // A NeverDestroyed<T*>, whose storage is bytes.
     CodePointer, // A CodePtr, a void* into JIT code: the JIT allocation it points into.
     PropertyTableIndex, // A PropertyTable's m_indexVector, an integer: the index buffer.
+    WeakPointer, // A WeakPtr<T>, whose impl holds the T as a void*: what the T holds.
+    WeakPointerToBase, // A WeakPtr<T> whose impl points to a base of T: what T itself holds.
+    ClosureOfOneFunction, // A Function's closure, of the same size as those below.
+    SecondClosureOfOneFunction, // Of the same function, capturing another type: what the captured object holds.
+    ClosureOfTemplate, // Of one instance of a function template.
+    ClosureOfAnotherInstance, // Of another instance of it, capturing another type: liblldb gives both closures' CallableWrappers one class.
+    SystemMallocObject, // A polymorphic object in system malloc's memory, which libpas does not enumerate.
+    AtomicPointer, // A std::atomic<T*>, which libc++ keeps as a C11 _Atomic(T*).
+    SpanElement, // The last element of a std::span, past its first.
 };
-constexpr size_t numberOfPlanted = static_cast<size_t>(Planted::PropertyTableIndex) + 1;
+constexpr size_t numberOfPlanted = static_cast<size_t>(Planted::SpanElement) + 1;
+// The walk reads objects in system malloc's memory where it knows that memory by its VM tag.
+#if OS(DARWIN)
+constexpr bool readsSystemMallocObjects = true;
+#else
+constexpr bool readsSystemMallocObjects = false;
+#endif
+// The walk reads libc++'s std::span.
+#if defined(_LIBCPP_VERSION)
+constexpr bool readsSpans = true;
+#else
+constexpr bool readsSpans = false;
+#endif
 constexpr std::array<ASCIILiteral, numberOfPlanted> plantedNames {
     "the last element of a Vector"_s,
     "a HashSet's value"_s,
@@ -208,6 +240,15 @@ constexpr std::array<ASCIILiteral, numberOfPlanted> plantedNames {
     "a NeverDestroyed<T*>"_s,
     "a CodePtr"_s,
     "a PropertyTable's index vector"_s,
+    "a WeakPtr's impl"_s,
+    "a WeakPtr's impl that points to a base"_s,
+    "a closure's capture"_s,
+    "a capture of a closure of the same size, of the same function"_s,
+    "a capture of a closure of a function template"_s,
+    "a capture of a closure of another instance of the function template"_s,
+    "a polymorphic object in system malloc's memory"_s,
+    "a std::atomic<T*>"_s,
+    "the last element of a std::span"_s,
 };
 // The planted objects that are ReachableObjects, which the walk reads whole as their class.
 constexpr bool isPlantedObject(Planted planted)
@@ -251,6 +292,50 @@ constexpr std::array<ASCIILiteral, numberOfMissed> missedHolders {
 // Enough alignment for PackedAlignedPtr to store the pointer shifted, in a byte less.
 constexpr size_t shiftedPackedAlignment = 256;
 
+// An object a WeakPtr reaches only through its impl's void*, which holds a planted object.
+struct WeakHolder : ReachableObjectHolder, CanMakeWeakPtr<WeakHolder> {
+    WTF_DEPRECATED_MAKE_STRUCT_FAST_ALLOCATED(WeakHolder);
+};
+
+struct WeakBase : CanMakeWeakPtr<WeakBase> {
+    uint64_t notAPointer { 0 };
+};
+
+// A WeakPtr<WeakDerived>'s impl points to its WeakBase, which does not start it.
+struct WeakDerived : ReachableObjectHolder, WeakBase {
+    WTF_DEPRECATED_MAKE_STRUCT_FAST_ALLOCATED(WeakDerived);
+};
+
+// What a closure captures, through a pointer of the size of a ReachableObject*, which holds a planted object.
+struct CapturedHolder : ReachableObjectHolder {
+    WTF_DEPRECATED_MAKE_STRUCT_FAST_ALLOCATED(CapturedHolder);
+    uint64_t notAPointer { 0 };
+};
+
+// Closures of one size, of two lambdas of one function, each capturing one pointer.
+std::pair<Function<void()>, Function<void()>> closuresOfOneFunction(ReachableObject* object, CapturedHolder* holder)
+{
+    auto first = [object] {
+        RELEASE_ASSERT(object);
+    };
+    auto second = [holder] {
+        RELEASE_ASSERT(holder);
+    };
+    return { WTF::move(first), WTF::move(second) };
+}
+
+template<typename T>
+Function<void()> closureOfTemplate(T* captured)
+{
+    return [captured] {
+        RELEASE_ASSERT(captured);
+    };
+}
+
+struct SystemMallocHolder : ReachableObjectHolder {
+    virtual ~SystemMallocHolder() = default;
+};
+
 // Where HeapWalk starts. Its vtable gives its type, and its fields give the VM.
 class MyaRoots {
     WTF_MAKE_NONCOPYABLE(MyaRoots);
@@ -282,6 +367,15 @@ public:
     CodePtr<NoPtrTag> code;
     // Reset after holding an object nothing else does, which its stale payload still holds.
     std::optional<ReachableObject*> staleOptional;
+    WeakPtr<WeakHolder> weak;
+    WeakPtr<WeakDerived> weakToBase;
+    Function<void()> closure;
+    Function<void()> secondClosure;
+    Function<void()> closureOfTemplate;
+    Function<void()> closureOfAnotherInstance;
+    SystemMallocHolder* systemMallocHolder { nullptr };
+    std::atomic<ReachableObject*> atomic { nullptr };
+    std::span<ReachableObject*> span;
 };
 
 MyaRoots::~MyaRoots() = default;
@@ -453,6 +547,28 @@ Address createFixture()
     myaRoots.shiftedPacked = shifted;
     static_assert(decltype(myaRoots.shiftedPacked)::isAlignmentShiftProfitable);
     myaRoots.neverDestroyed.get() = plant(Planted::NeverDestroyedPointer);
+    // Held only by their impls, which their WeakPtrs and their own factories hold.
+    auto* weakHolder = new WeakHolder;
+    weakHolder->held = plant(Planted::WeakPointer);
+    myaRoots.weak = *weakHolder;
+    auto* weakDerived = new WeakDerived;
+    weakDerived->held = plant(Planted::WeakPointerToBase);
+    myaRoots.weakToBase = *weakDerived;
+    RELEASE_ASSERT(std::bit_cast<uintptr_t>(static_cast<WeakBase*>(weakDerived)) != std::bit_cast<uintptr_t>(weakDerived));
+    myaRoots.systemMallocHolder = new (NotNull, SystemMallocBase<SystemMallocHolder>::malloc(sizeof(SystemMallocHolder))) SystemMallocHolder;
+    myaRoots.systemMallocHolder->held = plant(Planted::SystemMallocObject);
+    myaRoots.atomic = plant(Planted::AtomicPointer);
+    myaRoots.span = MallocSpan<ReachableObject*>::malloc(3 * sizeof(ReachableObject*)).leakSpan();
+    myaRoots.span[0] = new ReachableObject;
+    myaRoots.span[1] = new ReachableObject;
+    myaRoots.span[2] = plant(Planted::SpanElement);
+    myaRoots.closureOfTemplate = closureOfTemplate(plant(Planted::ClosureOfTemplate));
+    auto* instanceCapturedHolder = new CapturedHolder;
+    instanceCapturedHolder->held = plant(Planted::ClosureOfAnotherInstance);
+    myaRoots.closureOfAnotherInstance = closureOfTemplate(instanceCapturedHolder);
+    auto* secondCapturedHolder = new CapturedHolder;
+    secondCapturedHolder->held = plant(Planted::SecondClosureOfOneFunction);
+    std::tie(myaRoots.closure, myaRoots.secondClosure) = closuresOfOneFunction(plant(Planted::ClosureOfOneFunction), secondCapturedHolder);
 
     // A CodePtr into JIT code, whose ExecutableMemoryHandle is held only as an integer, so that only the CodePtr reaches the code.
     // ExecutableAllocator::allocate is not exported; createImpl allocates the same way, without its accounting.
@@ -911,8 +1027,11 @@ void checkReach(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFixture&
     // Patch 11: each planted object is behind a value the walk reads by its C++ source's logic.
     std::array<uint64_t, numberOfPlanted> planted = fixture.planted;
     planted[static_cast<size_t>(Planted::PropertyTableIndex)] = propertyTableIndexBuffer(snapshot, heap, Address { fixture.wideStructure });
-    for (size_t index = 0; index < numberOfPlanted; ++index)
+    for (size_t index = 0; index < numberOfPlanted; ++index) {
+        if ((index == static_cast<size_t>(Planted::SystemMallocObject) && !readsSystemMallocObjects) || (index == static_cast<size_t>(Planted::SpanElement) && !readsSpans))
+            continue;
         TEST_ASSERT(planted[index] && isReached(planted[index]), makeString("the walk reaches the object behind "_s, plantedNames[index]));
+    }
 
     // Patch 9: the walk says what holds each object planted to be missed.
     for (size_t index = 0; index < numberOfMissed; ++index) {
@@ -929,7 +1048,8 @@ void checkReach(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFixture&
 
     // Patch 12: the walk reads each planted object as its class.
     for (size_t index = 0; index < numberOfPlanted; ++index) {
-        if (!isPlantedObject(static_cast<Planted>(index)))
+        if (!isPlantedObject(static_cast<Planted>(index)) || (index == static_cast<size_t>(Planted::SystemMallocObject) && !readsSystemMallocObjects)
+            || (index == static_cast<size_t>(Planted::SpanElement) && !readsSpans))
             continue;
         auto allocation = indexOf(planted[index]);
         TEST_ASSERT(allocation && reach.bytesTypedIn[*allocation] == sizeof(ReachableObject), makeString("the walk types the whole object behind "_s, plantedNames[index]));
@@ -943,6 +1063,9 @@ void checkReach(Snapshot& snapshot, const HeapWalk& heap, const HeapWalkFixture&
     TEST_ASSERT(reach.bytesTyped && reach.bytesTyped <= reach.bytesAllocated - reach.bytesExcluded - reach.bytesFreeInBlocks, "the walk types part of the heap");
     TEST_ASSERT(reach.overruns.isEmpty(), "the walk reads no value as a type bigger than its allocation");
     TEST_ASSERT_EQ(reach.notFollowed[static_cast<size_t>(HeapWalk::NotFollowed::DoesNotFit)], 0u, "the walk follows no pointer to a type bigger than its pointee's allocation");
+    // A metadata table's buffer starts with its ValueProfiles, which a reader finds by its layout.
+    TEST_ASSERT(std::ranges::any_of(reach.typeAtStart, [](const TargetType* type) { return type && std::string_view { type->name().legacyCStringPointer() } == "JSC::ValueProfile"; }),
+        "the walk reads a metadata table's buffer as its ValueProfiles and Metadata");
     for (const String& array : reach.unreadableArrays)
         dataLogLn("    unreadable array: ", array);
     TEST_ASSERT(reach.unreadableArrays.isEmpty(), "the walk reads every array it meets within readable memory");

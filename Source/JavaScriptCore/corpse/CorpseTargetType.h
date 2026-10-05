@@ -60,7 +60,9 @@ public:
     // Read the first time it is asked for: liblldb completes a class to size
     // it, which a pointee the walk never follows does not need.
     size_t byteSize() const { return m_byteSize ? *m_byteSize : readByteSize(); }
-    size_t alignment() const; // alignof the type.
+    // alignof the type: liblldb's, or the largest of its members' if that is larger. liblldb
+    // gives a class whose member's class it only has declared too small an alignment.
+    size_t alignment() const;
 
     SnapshotDebugInfo& debugInfo() const { return m_debugInfo; }
 
@@ -102,7 +104,9 @@ public:
     const Layout& layout() const;
 
     // The type of the `index`th template argument of a class template
-    // specialization, or null if it has no such type argument.
+    // specialization, or null if it has no such type argument. Of an instance
+    // liblldb gives no template arguments, the class its name spells there, in
+    // the image that describes the instance.
     const TargetType* templateArgument(unsigned index) const;
     // The `index`th template argument, if it is an integer, such as PackedAlignedPtr's alignment.
     std::optional<uint64_t> templateIntegerArgument(unsigned index) const;
@@ -116,6 +120,8 @@ public:
     std::optional<int64_t> enumeratorValue(std::string_view name) const;
     // The type of the static data member `name` this class declares itself, or null.
     const TargetType* staticFieldType(const char* name) const;
+    // The return type of the member function `name` this class declares itself, or null.
+    const TargetType* returnTypeOfMemberFunction(const char* name) const;
 
 private:
     TargetType(SnapshotDebugInfo&, const lldb::SBType&);
@@ -127,6 +133,7 @@ private:
     const std::unique_ptr<lldb::SBType> m_type;
     mutable std::optional<size_t> m_byteSize;
     mutable std::optional<Layout> m_layout;
+    mutable std::optional<size_t> m_alignment;
 
     friend class SnapshotDebugInfo;
 };

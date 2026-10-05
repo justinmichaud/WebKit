@@ -77,8 +77,9 @@ enum class DiagnosticCounter : uint8_t {
     ImagesWithoutDebugInfo,
     VTableSlotsNotDestructors,
     VTablesWithoutSymbol,
+    ClosuresWithoutCallOperator,
 };
-constexpr size_t numberOfDiagnosticCounters = static_cast<size_t>(DiagnosticCounter::VTablesWithoutSymbol) + 1;
+constexpr size_t numberOfDiagnosticCounters = static_cast<size_t>(DiagnosticCounter::ClosuresWithoutCallOperator) + 1;
 
 // Mya may be used on corrupted target heaps; we must be able to
 // use and test it in these cases without crashing, and

@@ -128,6 +128,8 @@ static ASCIILiteral label(DiagnosticCounter counter)
         return "vtable slots that are not a destructor"_s;
     case DiagnosticCounter::VTablesWithoutSymbol:
         return "vtables without a symbol to check their class against"_s;
+    case DiagnosticCounter::ClosuresWithoutCallOperator:
+        return "closures of unnamed types whose call operator was not found"_s;
     }
     RELEASE_ASSERT_NOT_REACHED();
 }

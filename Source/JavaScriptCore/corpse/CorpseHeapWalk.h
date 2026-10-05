@@ -146,6 +146,7 @@ public:
         const char* typeField;
         const char* enumeration; // Null for a bool, whose subclasses are those of "false" and "true".
         std::span<const TypeFieldSubclass> subclasses;
+        uint64_t mask { 0 }; // For a flag among the type field's bits, which is read as a bool; 0 for the whole field.
     };
     static std::span<const TypeFieldHierarchy> typeFieldHierarchies();
 

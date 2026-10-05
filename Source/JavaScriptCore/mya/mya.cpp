@@ -228,6 +228,7 @@ private:
         fputs("  thread (th) ...           Inspect the threads in a snapshot\n", out);
         fputs("  heap [<vm>]               Walk the JS heap of the VM at <vm>, or of WebCore's main VM\n", out);
         fputs("  heapdump <file> [<vm>]    Write the heap as a GCDebugging heap snapshot Web Inspector reads\n", out);
+        fputs("  refs <start> <end>        List the words of writable memory that hold an address in [start, end)\n", out);
 #if OS(DARWIN)
         fputs("  memory [<vm>]             Account for the target's footprint by VM tag, and for libpas's pages\n", out);
 #endif
@@ -933,6 +934,68 @@ private:
 #endif
     }
 
+    // `refs <start> <end>`: every word of the snapshot's writable memory whose
+    // value lies in [start, end), such as what holds an allocation the heap
+    // walk reaches only inside it. Memory the target cannot write holds no
+    // address it allocated.
+    void handleRefs(Lexer lex)
+    {
+        using JSC::Corpse::Region;
+        Snapshot* snapshot = snapshotById(m_currentSnapshot);
+        if (!snapshot) {
+            SAFE_FPRINTF(stderr, "No snapshot in use. Capture one with `snapshot`, or select one with `snapshot <n>`.\n");
+            return;
+        }
+        std::array<uint64_t, 2> bounds { };
+        for (uint64_t& bound : bounds) {
+            std::string token { lex.atEnd() ? std::string_view { } : lex.nextToken() };
+            char* end = nullptr;
+            bound = strtoull(token.c_str(), &end, 16);
+            if (token.empty() || *end) {
+                fputs("Usage: refs <start, in hex> <end, in hex>\n", stderr);
+                return;
+            }
+        }
+        if (!lex.atEnd() || bounds[0] >= bounds[1]) {
+            fputs("Usage: refs <start, in hex> <end, in hex>\n", stderr);
+            return;
+        }
+        constexpr size_t maxReferences = 200;
+        constexpr size_t wordsPerRead = 64 * 1024;
+        size_t found = 0;
+        for (const Region& region : snapshot->regions()) {
+            if (!region.isReadable() || !region.isWritable())
+                continue;
+            for (auto [start, size] : region.residentParts(snapshot->corpsePort())) {
+                for (uint64_t offset = 0; offset + sizeof(uint64_t) <= size;) {
+                    size_t count = std::min<uint64_t>(wordsPerRead, (size - offset) / sizeof(uint64_t));
+                    Address chunk = start + offset;
+                    offset += count * sizeof(uint64_t);
+                    auto words = snapshot->memory().span<uint64_t>(chunk, count);
+                    if (!words)
+                        continue;
+                    std::span<const uint64_t> values { words };
+                    for (size_t index = 0; index < values.size(); ++index) {
+                        uint64_t value = Address { values[index] }.stripped().toTargetVMAddress();
+                        if (value < bounds[0] || value >= bounds[1])
+                            continue;
+                        if (found++ >= maxReferences)
+                            continue;
+#if OS(DARWIN)
+                        String tag = makeString(" ("_s, vmTagName(region.userTag()), ')');
+#else
+                        String tag;
+#endif
+                        SAFE_PRINTF("  0x%llx holds 0x%llx (+%llu), in the region 0x%llx-0x%llx%s\n", static_cast<unsigned long long>((chunk + index * sizeof(uint64_t)).toTargetVMAddress()),
+                            static_cast<unsigned long long>(value), static_cast<unsigned long long>(value - bounds[0]),
+                            static_cast<unsigned long long>(region.base().toTargetVMAddress()), static_cast<unsigned long long>(region.end().toTargetVMAddress()), tag.utf8());
+                    }
+                }
+            }
+        }
+        SAFE_PRINTF("%zu words hold an address in [0x%llx, 0x%llx)\n", found, static_cast<unsigned long long>(bounds[0]), static_cast<unsigned long long>(bounds[1]));
+    }
+
     void handleHeap(Lexer lex)
     {
         using JSC::Corpse::HeapWalk;
@@ -1001,6 +1064,52 @@ private:
             SAFE_PRINTF("  miss: %llu bytes at 0x%llx, %llu with what only it holds, %s: %s%s%s\n", static_cast<unsigned long long>(miss.allocation.size),
                 static_cast<unsigned long long>(miss.allocation.address.toTargetVMAddress()), static_cast<unsigned long long>(miss.bytesHeld),
                 causes[static_cast<size_t>(miss.cause)], string(miss.holder), miss.content.isEmpty() ? ""_s : "; it holds "_s, string(miss.content));
+        }
+        // Every miss, grouped by what holds it, with its addresses and sizes left out.
+        auto pattern = [](const String& holder) {
+            StringBuilder result;
+            for (unsigned index = 0; index < holder.length();) {
+                char16_t character = holder[index];
+                bool startsNumber = isASCIIDigit(character) && (!index || holder[index - 1] == ' ' || holder[index - 1] == '(');
+                if (character == '0' && index + 1 < holder.length() && holder[index + 1] == 'x') {
+                    result.append("0x?"_s);
+                    for (index += 2; index < holder.length() && isASCIIHexDigit(holder[index]); ++index) { }
+                    continue;
+                }
+                if (startsNumber) {
+                    result.append('#');
+                    while (index < holder.length() && isASCIIDigit(holder[index]))
+                        ++index;
+                    continue;
+                }
+                result.append(character);
+                ++index;
+            }
+            return result.toString();
+        };
+        struct Group {
+            uint64_t bytes { 0 };
+            size_t count { 0 };
+            HeapWalk::MissCause cause;
+            String example; // The holder of its largest miss, with its addresses.
+        };
+        HashMap<String, Group> groups;
+        for (const HeapWalk::Miss& miss : reach.misses) {
+            if (miss.isExcluded)
+                continue;
+            auto& group = groups.add(pattern(miss.holder), Group { 0, 0, miss.cause, miss.holder }).iterator->value;
+            group.bytes += miss.allocation.size;
+            ++group.count;
+        }
+        Vector<std::pair<String, Group>> sortedGroups;
+        for (auto& [holder, group] : groups)
+            sortedGroups.append({ holder, group });
+        std::ranges::sort(sortedGroups, std::ranges::greater { }, [](auto& entry) { return entry.second.bytes; });
+        constexpr size_t groupCount = 15;
+        for (size_t index = 0; index < std::min(groupCount, sortedGroups.size()); ++index) {
+            auto& [holder, group] = sortedGroups[index];
+            SAFE_PRINTF("  missed by holder: %llu bytes in %zu allocations, %s: %s; such as %s\n", static_cast<unsigned long long>(group.bytes), group.count,
+                causes[static_cast<size_t>(group.cause)], string(holder), string(group.example));
         }
         for (auto& [kind, bytes] : reach.untypedByKind)
             SAFE_PRINTF("  untyped bytes: %llu in allocations with %s\n", static_cast<unsigned long long>(bytes), string(kind));
@@ -1707,6 +1816,11 @@ private:
         if (is("heapdump")) {
             recordCommand(line);
             handleHeapDump(lex);
+            return;
+        }
+        if (is("refs")) {
+            recordCommand(line);
+            handleRefs(lex);
             return;
         }
 #if OS(DARWIN)

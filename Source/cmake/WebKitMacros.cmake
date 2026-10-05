@@ -290,7 +290,13 @@ function(_WEBKIT_ADD_PCH_OBJECT _target)
         return ()
     endif ()
     cmake_parse_arguments(PARSE_ARGV 1 _PO "PREFIX_NO_CODEGEN" "" "PREFIX_LANGUAGES")
-    set(_stub_flags "-fpch-debuginfo;-Xclang;-building-pch-with-obj")
+    set(_stub_flags "-Xclang;-building-pch-with-obj")
+    # With the prefix header's types described only in its object, every other
+    # compile unit declares them, and liblldb gives the declared instances of a
+    # class template no template arguments.
+    if (NOT ENABLE_MYA_HEAP)
+        list(PREPEND _stub_flags "-fpch-debuginfo")
+    endif ()
     if (NOT _PO_PREFIX_NO_CODEGEN AND USE_PCH_CODEGEN)
         list(PREPEND _stub_flags "-fpch-codegen")
     endif ()
@@ -505,12 +511,14 @@ macro(_WEBKIT_TARGET_SETUP _target _logical_name)
     endif ()
 
     # liblldb finds the compile unit that defines a global variable only in a
-    # dSYM, not through the debug map, and finds a dSYM next to its image.
+    # dSYM, not through the debug map, and finds a dSYM next to its image, or a
+    # framework's next to its bundle, which is Foo.framework/Versions/A/Foo.
     if (APPLE AND ENABLE_MYA_HEAP)
         get_target_property(_webkit_target_type ${_target} TYPE)
         if (_webkit_target_type STREQUAL "SHARED_LIBRARY" OR _webkit_target_type STREQUAL "EXECUTABLE")
+            # A port marks a target a framework after this, so the generator decides.
             add_custom_command(TARGET ${_target} POST_BUILD
-                COMMAND dsymutil $<TARGET_FILE:${_target}> -o $<TARGET_FILE:${_target}>.dSYM
+                COMMAND dsymutil $<TARGET_FILE:${_target}> -o $<IF:$<BOOL:$<TARGET_PROPERTY:${_target},FRAMEWORK>>,$<TARGET_FILE_DIR:${_target}>/../../../$<TARGET_FILE_NAME:${_target}>.framework.dSYM,$<TARGET_FILE:${_target}>.dSYM>
                 VERBATIM)
         endif ()
     endif ()
