@@ -1,0 +1,90 @@
+From 4b96ff27e98aaea496e896681ec516bc29180bc1 Mon Sep 17 00:00:00 2001
+From: Justin Michaud <jmichaud@igalia.com>
+Date: Tue, 6 Oct 2026 10:19:56 -0600
+Subject: [PATCH 06/23] [mya] Turn off split DWARF (DEBUG_FISSION) in MYA_HEAP
+ CMake builds Need the bug URL (OOPS!).
+
+Reviewed by NOBODY (OOPS!).
+
+Build flags. Touches the CMake logic every CMake build runs (see below).
+
+DEBUG_FISSION (-gsplit-dwarf, plus --gdb-index) is on by default in developer
+Debug and RelWithDebInfo builds. This patch forces it off when
+ENABLE_MYA_HEAP is on. To do that, the code that applies DEBUG_FISSION moves
+from OptionsCommon.cmake into WebKitCommon.cmake, after Options${PORT}: the
+option is still declared in OptionsCommon.cmake, but ENABLE_MYA_HEAP is only
+known once the port's options have run, which is later.
+
+Why it is needed: liblldb indexes an image through .debug_names, not
+.gdb_index. With split DWARF there is no .debug_names in the image, so each
+time liblldb loads an image it opens and indexes every .dwo file by hand.
+That is one file per compile unit, read every time a heap walk (or a
+test) opens a snapshot's debug info.
+
+Effect on other builds: none intended. Builds without ENABLE_MYA_HEAP get the
+same -gsplit-dwarf and --gdb-index flags, but they are now added after
+Options${PORT} rather than before it, so they come later in CMAKE_C_FLAGS /
+CMAKE_CXX_FLAGS. That order does not matter to these flags, but it is a
+change to the shared build logic that GTK, WPE and JSCOnly release
+configurations also run, so it is kept in its own patch.
+
+What we lose if it is not taken: on Linux developer builds, opening debug
+info for a heap walk, and every testLibJSCTools suite that does, is slower
+by the cost of indexing every .dwo file. The heap walk still works.
+
+* Source/cmake/OptionsCommon.cmake:
+* Source/cmake/WebKitCommon.cmake:
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/cmake/OptionsCommon.cmake |  9 +--------
+ Source/cmake/WebKitCommon.cmake  | 11 +++++++++++
+ 2 files changed, 12 insertions(+), 8 deletions(-)
+
+diff --git a/Source/cmake/OptionsCommon.cmake b/Source/cmake/OptionsCommon.cmake
+index 121e64b01bce..fbe6ff354637 100644
+--- a/Source/cmake/OptionsCommon.cmake
++++ b/Source/cmake/OptionsCommon.cmake
+@@ -179,16 +179,9 @@ if (ENABLE_DEVELOPER_MODE AND (CMAKE_BUILD_TYPE STREQUAL "Debug" OR CMAKE_BUILD_
+     endif ()
+ endif ()
+ 
++# Applied in WebKitCommon.cmake, once the port's options say whether ENABLE_MYA_HEAP turns it off.
+ option(DEBUG_FISSION "Use Debug Fission support" ${ENABLE_DEBUG_FISSION_DEFAULT})
+ 
+-if (DEBUG_FISSION)
+-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -gsplit-dwarf")
+-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -gsplit-dwarf")
+-    if (LD_SUPPORTS_GDB_INDEX)
+-        add_link_options("LINKER:--gdb-index")
+-    endif ()
+-endif ()
+-
+ option(CLANG_TIME_TRACE "Generate Clang time trace profiling output" OFF)
+ if (CLANG_TIME_TRACE AND COMPILER_IS_CLANG)
+     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -ftime-trace")
+diff --git a/Source/cmake/WebKitCommon.cmake b/Source/cmake/WebKitCommon.cmake
+index 8af7f1dbe8a9..d70e80d7e878 100644
+--- a/Source/cmake/WebKitCommon.cmake
++++ b/Source/cmake/WebKitCommon.cmake
+@@ -367,6 +367,17 @@ if (NOT HAS_RUN_WEBKIT_COMMON)
+             string(REPLACE "-mllvm -dwarf-linkage-names=Abstract" "" ${_flags} "${${_flags}}")
+             string(REPLACE "-gsimple-template-names" "" ${_flags} "${${_flags}}")
+         endforeach ()
++        # liblldb reads .debug_names but not .gdb_index, so with split DWARF it
++        # indexes every .dwo file by hand whenever it loads an image.
++        set(DEBUG_FISSION OFF)
++    endif ()
++
++    if (DEBUG_FISSION)
++        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -gsplit-dwarf")
++        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -gsplit-dwarf")
++        if (LD_SUPPORTS_GDB_INDEX)
++            add_link_options("LINKER:--gdb-index")
++        endif ()
+     endif ()
+ 
+     # This has to come after Options${PORT} to see any ENABLE_THREAD_SAFETY_WARNING.
+-- 
+2.54.0 (Apple Git-157)
+

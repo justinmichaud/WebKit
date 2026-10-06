@@ -1,0 +1,90 @@
+From d0ae1d2e126ce4857a2875a6927b2d30c24bb3d3 Mon Sep 17 00:00:00 2001
+From: Justin Michaud <jmichaud@igalia.com>
+Date: Tue, 6 Oct 2026 10:19:56 -0600
+Subject: [PATCH 05/23] [mya] Keep complete type and linkage names in MYA_HEAP
+ CMake debug info Need the bug URL (OOPS!).
+
+Reviewed by NOBODY (OOPS!).
+
+Build flags only. CMake builds with ENABLE_MYA_HEAP on; nothing else changes.
+
+WebKitCompilerFlags.cmake shrinks debug info for every clang/gcc build with
+-gsimple-template-names and -mllvm -dwarf-linkage-names=Abstract, and
+_WEBKIT_ADD_PCH_OBJECT builds precompiled headers with -fpch-debuginfo. Under
+ENABLE_MYA_HEAP, this patch takes the first two back out of the global flags
+and drops -fpch-debuginfo.
+
+Why each is needed:
+- -dwarf-linkage-names=Abstract: only abstract subprograms keep a linkage
+  name, so an implicitly defined destructor has none. The heap walk names an
+  object's dynamic type by matching the destructor in its vtable against the
+  destructors' linkage names; a class with an implicit destructor would have
+  no dynamic type, and every polymorphic pointer to one would go unfollowed.
+- -gsimple-template-names: a class template instance is named without its
+  arguments (Vector, not Vector<int, 0, ...>). liblldb then merges the
+  instances of one template that have the same size into a single class whose
+  members are only one instance's, so a value of one instance is read with
+  another instance's member types.
+- -fpch-debuginfo: the prefix header's types are described once, in the PCH's
+  object, and every other compile unit only declares them. liblldb resolves a
+  declared class template instance without its template arguments, which
+  fails as above.
+
+Cost: larger debug info and slower links in MYA_HEAP builds: these flags
+exist to shrink debug info, and MYA_HEAP builds give that up.
+
+What we lose if it is not taken: on Linux (and macOS CMake builds) a
+large share of polymorphic objects have no dynamic type and template
+containers are read with the wrong element types, so the heap walk reaches
+and types much less of the heap, and DebugInfo/HeapWalk tests fail.
+
+* Source/cmake/WebKitCommon.cmake:
+* Source/cmake/WebKitMacros.cmake:
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/cmake/WebKitCommon.cmake | 8 ++++++++
+ Source/cmake/WebKitMacros.cmake | 8 +++++++-
+ 2 files changed, 15 insertions(+), 1 deletion(-)
+
+diff --git a/Source/cmake/WebKitCommon.cmake b/Source/cmake/WebKitCommon.cmake
+index bf696e467dce..8af7f1dbe8a9 100644
+--- a/Source/cmake/WebKitCommon.cmake
++++ b/Source/cmake/WebKitCommon.cmake
+@@ -359,6 +359,14 @@ if (NOT HAS_RUN_WEBKIT_COMMON)
+     if (ENABLE_MYA_HEAP)
+         # So that each image describes the types it uses.
+         WEBKIT_APPEND_GLOBAL_COMPILER_FLAGS(-fstandalone-debug)
++        # The vtable check needs every destructor's linkage name, and with
++        # Abstract linkage names an implicit destructor has none.
++        # With simple template names, liblldb gives the instances of one class
++        # template of one size one class, whose members are only one's.
++        foreach (_flags CMAKE_C_FLAGS CMAKE_OBJC_FLAGS CMAKE_CXX_FLAGS CMAKE_OBJCXX_FLAGS)
++            string(REPLACE "-mllvm -dwarf-linkage-names=Abstract" "" ${_flags} "${${_flags}}")
++            string(REPLACE "-gsimple-template-names" "" ${_flags} "${${_flags}}")
++        endforeach ()
+     endif ()
+ 
+     # This has to come after Options${PORT} to see any ENABLE_THREAD_SAFETY_WARNING.
+diff --git a/Source/cmake/WebKitMacros.cmake b/Source/cmake/WebKitMacros.cmake
+index ccf125c57455..33c32ec7476c 100644
+--- a/Source/cmake/WebKitMacros.cmake
++++ b/Source/cmake/WebKitMacros.cmake
+@@ -290,7 +290,13 @@ function(_WEBKIT_ADD_PCH_OBJECT _target)
+         return ()
+     endif ()
+     cmake_parse_arguments(PARSE_ARGV 1 _PO "PREFIX_NO_CODEGEN" "" "PREFIX_LANGUAGES")
+-    set(_stub_flags "-fpch-debuginfo;-Xclang;-building-pch-with-obj")
++    set(_stub_flags "-Xclang;-building-pch-with-obj")
++    # With the prefix header's types described only in its object, every other
++    # compile unit declares them, and liblldb gives the declared instances of a
++    # class template no template arguments.
++    if (NOT ENABLE_MYA_HEAP)
++        list(PREPEND _stub_flags "-fpch-debuginfo")
++    endif ()
+     if (NOT _PO_PREFIX_NO_CODEGEN AND USE_PCH_CODEGEN)
+         list(PREPEND _stub_flags "-fpch-codegen")
+     endif ()
+-- 
+2.54.0 (Apple Git-157)
+

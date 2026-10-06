@@ -1,0 +1,1442 @@
+From ae9254db4d5a6324374bc97bb811921428269726 Mon Sep 17 00:00:00 2001
+From: Justin Michaud <jmichaud@igalia.com>
+Date: Tue, 6 Oct 2026 10:52:48 -0600
+Subject: [PATCH 04/17] [mya] Extend error handling and testing to make future
+ additions easier https://bugs.webkit.org/show_bug.cgi?id=325303
+
+Reviewed by NOBODY (OOPS!).
+
+Some cleanups to make future tests + linux support easier.
+---
+ Source/JavaScriptCore/CMakeLists.txt          |   1 +
+ .../JavaScriptCore.xcodeproj/project.pbxproj  |   8 +
+ Source/JavaScriptCore/corpse/CorpseError.cpp  |  99 ++++++-
+ Source/JavaScriptCore/corpse/CorpseError.h    |  79 +++++
+ Source/JavaScriptCore/corpse/CorpseLimits.h   |  64 ++++
+ .../JavaScriptCore/corpse/CorpseSnapshot.cpp  |  20 +-
+ Source/JavaScriptCore/corpse/CorpseSymbol.cpp | 278 ++++++------------
+ Source/JavaScriptCore/corpse/CorpseSymbol.h   |  37 +--
+ Source/JavaScriptCore/corpse/CorpseThread.cpp |  53 ++--
+ Source/JavaScriptCore/corpse/CorpseThread.h   |   1 +
+ .../corpse/tests/CorpseDiagnosticsTest.cpp    |  89 ++++++
+ .../corpse/tests/CorpseProcessTest.cpp        |   2 +-
+ .../corpse/tests/CorpseSnapshotTest.cpp       |   9 +-
+ .../corpse/tests/CorpseSymbolTest.cpp         |  13 +-
+ .../corpse/tests/LibJSCToolsTestUtilities.cpp |  31 ++
+ .../corpse/tests/LibJSCToolsTestUtilities.h   |  15 +
+ .../corpse/tests/testLibJSCTools.cpp          |   1 +
+ Source/JavaScriptCore/mya/mya.cpp             |   7 +-
+ Source/JavaScriptCore/shell/CMakeLists.txt    |   1 +
+ 19 files changed, 536 insertions(+), 272 deletions(-)
+ create mode 100644 Source/JavaScriptCore/corpse/CorpseLimits.h
+ create mode 100644 Source/JavaScriptCore/corpse/tests/CorpseDiagnosticsTest.cpp
+
+diff --git a/Source/JavaScriptCore/CMakeLists.txt b/Source/JavaScriptCore/CMakeLists.txt
+index 64884fe5ec5b..7a677091d3b8 100644
+--- a/Source/JavaScriptCore/CMakeLists.txt
++++ b/Source/JavaScriptCore/CMakeLists.txt
+@@ -1662,6 +1662,7 @@ if (ENABLE_MYA)
+         corpse/CorpseClient.h
+         corpse/CorpseError.h
+         corpse/CorpseExportsTrie.h
++        corpse/CorpseLimits.h
+         corpse/CorpseMemory.h
+         corpse/CorpseMemoryPtr.h
+         corpse/CorpseMemorySpan.h
+diff --git a/Source/JavaScriptCore/JavaScriptCore.xcodeproj/project.pbxproj b/Source/JavaScriptCore/JavaScriptCore.xcodeproj/project.pbxproj
+index 799b50f87e26..d6ac754b7c62 100644
+--- a/Source/JavaScriptCore/JavaScriptCore.xcodeproj/project.pbxproj
++++ b/Source/JavaScriptCore/JavaScriptCore.xcodeproj/project.pbxproj
+@@ -1863,9 +1863,11 @@
+ 		7E83C40A17D785F3003DC41B /* testLibJSCTools.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 7E83C40017D785F3003DC41B /* testLibJSCTools.cpp */; };
+ 		1AB0DEAD00000006000D0001 /* CorpseVMTest.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000007000D0001 /* CorpseVMTest.cpp */; };
+ 		1AB0DEAD00000004000D0001 /* TypeinfoTest.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000005000D0001 /* TypeinfoTest.cpp */; };
++		D68DA6DA907546EFA429D8D2 /* CorpseDiagnosticsTest.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 203DFA350D3248B0A8E7376B /* CorpseDiagnosticsTest.cpp */; };
+ 		7E83C43717D785F3003DC41B /* CorpseExportsTrie.h in Headers */ = {isa = PBXBuildFile; fileRef = 7E83C43517D785F3003DC41B /* CorpseExportsTrie.h */; settings = {ATTRIBUTES = (Private, ); }; };
+ 		56C6C2B7EBDCC63B6ECEA9AD /* CorpseThread.h in Headers */ = {isa = PBXBuildFile; fileRef = 211E3D6CA97F31CEB385A75A /* CorpseThread.h */; settings = {ATTRIBUTES = (Private, ); }; };
+ 		EF648B9EEAF54C44048B416A /* CorpseThread.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 960BD2B783EAEBE3233F91BF /* CorpseThread.cpp */; };
++		4C1E8A7D2B5F4E0F9A3D6C2B /* CorpseLimits.h in Headers */ = {isa = PBXBuildFile; fileRef = 7E2F9B3C4D5A6E7F8091A2B3 /* CorpseLimits.h */; settings = {ATTRIBUTES = (Private, ); }; };
+ 		CA47D093D003440A28D15924 /* CorpseSnapshot.h in Headers */ = {isa = PBXBuildFile; fileRef = 94711688984F16F71D615DE5 /* CorpseSnapshot.h */; settings = {ATTRIBUTES = (Private, ); }; };
+ 		A3B4C5D6E7F8091A2B3C4D5E /* CorpseMemory.h in Headers */ = {isa = PBXBuildFile; fileRef = 92A3B4C5D6E7F8091A2B3C4D /* CorpseMemory.h */; settings = {ATTRIBUTES = (Private, ); }; };
+ 		2C3D4E5F60718293A4B5C6D7 /* CorpseMemoryPtr.h in Headers */ = {isa = PBXBuildFile; fileRef = 1B2C3D4E5F60718293A4B5C6 /* CorpseMemoryPtr.h */; settings = {ATTRIBUTES = (Private, ); }; };
+@@ -4114,6 +4116,7 @@
+ 		7E83C43517D785F3003DC41B /* CorpseExportsTrie.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseExportsTrie.h; sourceTree = "<group>"; };
+ 		211E3D6CA97F31CEB385A75A /* CorpseThread.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseThread.h; sourceTree = "<group>"; };
+ 		960BD2B783EAEBE3233F91BF /* CorpseThread.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseThread.cpp; sourceTree = "<group>"; };
++		7E2F9B3C4D5A6E7F8091A2B3 /* CorpseLimits.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseLimits.h; sourceTree = "<group>"; };
+ 		1482B7E10A43076000517CFC /* JSObjectRef.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = JSObjectRef.h; sourceTree = "<group>"; };
+ 		1482B7E20A43076000517CFC /* JSObjectRef.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = JSObjectRef.cpp; sourceTree = "<group>"; };
+ 		148521D526EAEBDF00CC1D1A /* WasmHandlerInfo.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = WasmHandlerInfo.cpp; sourceTree = "<group>"; };
+@@ -4532,6 +4535,7 @@
+ 		7E83C40017D785F3003DC41B /* testLibJSCTools.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = testLibJSCTools.cpp; sourceTree = "<group>"; };
+ 		7E83C40917D785F3003DC41B /* testLibJSCTools */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = testLibJSCTools; sourceTree = BUILT_PRODUCTS_DIR; };
+ 		1AB0DEAD00000007000D0001 /* CorpseVMTest.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseVMTest.cpp; sourceTree = "<group>"; };
++		203DFA350D3248B0A8E7376B /* CorpseDiagnosticsTest.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseDiagnosticsTest.cpp; sourceTree = "<group>"; };
+ 		1AB0DEAD00000005000D0001 /* TypeinfoTest.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = TypeinfoTest.cpp; sourceTree = "<group>"; };
+ 		44F93E0D2AE71F9F00FFA37C /* JavaScriptCoreFramework.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = JavaScriptCoreFramework.cpp; sourceTree = "<group>"; };
+ 		451539B812DC994500EF7AC4 /* Yarr.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = Yarr.h; path = yarr/Yarr.h; sourceTree = "<group>"; };
+@@ -6957,6 +6961,7 @@
+ 			children = (
+ 				7E83C42917D785F3003DC41B /* CorpseAddressTest.cpp */,
+ 				7E83C42617D785F3003DC41B /* CorpseByteParserTest.cpp */,
++				203DFA350D3248B0A8E7376B /* CorpseDiagnosticsTest.cpp */,
+ 				7E83C40217D785F3003DC41B /* CorpseExportsTrieTest.cpp */,
+ 				6F708192A3B4C5D6E7F8091A /* CorpseMemoryTest.cpp */,
+ 				7E83C42C17D785F3003DC41B /* CorpseProcessTest.cpp */,
+@@ -6986,6 +6991,7 @@
+ 				8DDA7A78AD90B64B97AE329C /* CorpseError.h */,
+ 				7E83C43617D785F3003DC41B /* CorpseExportsTrie.cpp */,
+ 				7E83C43517D785F3003DC41B /* CorpseExportsTrie.h */,
++				7E2F9B3C4D5A6E7F8091A2B3 /* CorpseLimits.h */,
+ 				5E6F708192A3B4C5D6E7F809 /* CorpseMachVMSPI.h */,
+ 				B4C5D6E7F8091A2B3C4D5E6F /* CorpseMemory.cpp */,
+ 				92A3B4C5D6E7F8091A2B3C4D /* CorpseMemory.h */,
+@@ -11719,6 +11725,7 @@
+ 				80B96670131FB9EBB9AD49CC /* CorpseClient.h in Headers */,
+ 				85428E7BE0B3557DD2988043 /* CorpseError.h in Headers */,
+ 				7E83C43717D785F3003DC41B /* CorpseExportsTrie.h in Headers */,
++				4C1E8A7D2B5F4E0F9A3D6C2B /* CorpseLimits.h in Headers */,
+ 				A3B4C5D6E7F8091A2B3C4D5E /* CorpseMemory.h in Headers */,
+ 				2C3D4E5F60718293A4B5C6D7 /* CorpseMemoryPtr.h in Headers */,
+ 				4E5F60718293A4B5C6D7E8F9 /* CorpseMemorySpan.h in Headers */,
+@@ -14779,6 +14786,7 @@
+ 			files = (
+ 				7E83C42B17D785F3003DC41B /* CorpseAddressTest.cpp in Sources */,
+ 				7E83C42717D785F3003DC41B /* CorpseByteParserTest.cpp in Sources */,
++				D68DA6DA907546EFA429D8D2 /* CorpseDiagnosticsTest.cpp in Sources */,
+ 				7E83C40B17D785F3003DC41B /* CorpseExportsTrieTest.cpp in Sources */,
+ 				708192A3B4C5D6E7F8091A2B /* CorpseMemoryTest.cpp in Sources */,
+ 				7E83C42E17D785F3003DC41B /* CorpseProcessTest.cpp in Sources */,
+diff --git a/Source/JavaScriptCore/corpse/CorpseError.cpp b/Source/JavaScriptCore/corpse/CorpseError.cpp
+index f948a6a2181d..ba4be4b0fa47 100644
+--- a/Source/JavaScriptCore/corpse/CorpseError.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseError.cpp
+@@ -32,22 +32,115 @@
+ 
+ #include <stdarg.h>
+ #include <stdio.h>
++#include <wtf/StdLibExtras.h>
++#include <wtf/StringPrintStream.h>
+ 
+ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
+ 
+ namespace JSC {
+ namespace Corpse {
+ 
++thread_local unsigned Error::s_reportCount = 0;
++thread_local Diagnostics* Diagnostics::s_current = nullptr;
++
+ void Error::report(const char* format, ...)
+ {
+-    fprintf(stderr, "%s: ", Client::name().characters());
++    ++s_reportCount;
+ 
++    StringPrintStream out;
++    out.print(Client::name(), ": ");
+     va_list args;
+     va_start(args, format);
+-    vfprintf(stderr, format, args);
++    out.vprintf(format, args);
+     va_end(args);
++    out.print("\n", Diagnostics::context());
+ 
+-    fputc('\n', stderr);
++    SAFE_FPRINTF(stderr, "%s", out.toUTF8CString());
++}
++
++UTF8CString Diagnostics::describe(const char* format, ...)
++{
++    StringPrintStream out;
++    va_list args;
++    va_start(args, format);
++    out.vprintf(format, args);
++    va_end(args);
++    return out.toUTF8CString();
++}
++
++Diagnostics::Diagnostics(UTF8CString&& operation)
++    : m_operation(WTF::move(operation))
++    , m_parent(s_current)
++{
++    s_current = this;
++}
++
++Diagnostics::~Diagnostics()
++{
++    ASSERT(s_current == this);
++    s_current = m_parent;
++}
++
++static ASCIILiteral label(DiagnosticCounter counter)
++{
++    switch (counter) {
++    case DiagnosticCounter::ImagesListed:
++        return "images listed"_s;
++    case DiagnosticCounter::ImageHeadersRead:
++        return "image headers read"_s;
++    case DiagnosticCounter::ImagesInSharedCache:
++        return "images in the shared cache"_s;
++    case DiagnosticCounter::ExportsTriesSearched:
++        return "exports tries searched"_s;
++    case DiagnosticCounter::UnreadableImageHeaders:
++        return "unreadable image headers"_s;
++    case DiagnosticCounter::ImplausibleLoadCommandSizes:
++        return "implausible load command sizes"_s;
++    case DiagnosticCounter::UnreadableLoadCommands:
++        return "unreadable load commands"_s;
++    case DiagnosticCounter::ImagesWithoutExportsTrie:
++        return "images without an exports trie"_s;
++    case DiagnosticCounter::ImplausibleExportsTrieSizes:
++        return "implausible exports trie sizes"_s;
++    case DiagnosticCounter::ExportsTriesOutsideLinkedit:
++        return "exports tries outside __LINKEDIT"_s;
++    case DiagnosticCounter::UnreadableExportsTries:
++        return "unreadable exports tries"_s;
++    case DiagnosticCounter::ImagesSkippedForReadBudget:
++        return "images skipped for the read budget"_s;
++    case DiagnosticCounter::ReExports:
++        return "re-exports, which are not followed"_s;
++    case DiagnosticCounter::ExportsWithoutSingleAddress:
++        return "exports without a single address"_s;
++    case DiagnosticCounter::ThreadsListed:
++        return "threads listed"_s;
++    case DiagnosticCounter::ThreadStatesRead:
++        return "thread states read"_s;
++    case DiagnosticCounter::UnreadableThreadStates:
++        return "threads with unreadable state"_s;
++    }
++    RELEASE_ASSERT_NOT_REACHED();
++}
++
++UTF8CString Diagnostics::context()
++{
++    StringPrintStream out;
++    for (const Diagnostics* scope = s_current; scope; scope = scope->m_parent)
++        scope->print(out);
++    return out.toUTF8CString();
++}
++
++void Diagnostics::print(PrintStream& out) const
++{
++    out.print(Client::name(), ":   while ", m_operation);
++    ASCIILiteral separator = ": "_s;
++    for (size_t i = 0; i < numberOfDiagnosticCounters; ++i) {
++        if (!m_counts[i])
++            continue;
++        out.print(separator, label(static_cast<DiagnosticCounter>(i)), " ", m_counts[i]);
++        separator = ", "_s;
++    }
++    out.print("\n");
+ }
+ 
+ } // namespace Corpse
+diff --git a/Source/JavaScriptCore/corpse/CorpseError.h b/Source/JavaScriptCore/corpse/CorpseError.h
+index 3076b0bcdf67..8286939f5363 100644
+--- a/Source/JavaScriptCore/corpse/CorpseError.h
++++ b/Source/JavaScriptCore/corpse/CorpseError.h
+@@ -1,5 +1,6 @@
+ /*
+  * Copyright (C) 2026 Apple Inc. All rights reserved.
++ * Copyright (C) 2026 Igalia S.L.
+  *
+  * Redistribution and use in source and binary forms, with or without
+  * modification, are permitted provided that the following conditions
+@@ -29,7 +30,14 @@
+ 
+ #if ENABLE(MYA)
+ 
++#include <array>
++#include <stdint.h>
+ #include <wtf/Assertions.h>
++#include <wtf/Noncopyable.h>
++#include <wtf/Nonmovable.h>
++#include <wtf/PrintStream.h>
++#include <wtf/text/ASCIILiteral.h>
++#include <wtf/text/CString.h>
+ 
+ namespace JSC {
+ namespace Corpse {
+@@ -39,9 +47,80 @@ namespace Corpse {
+ class Error {
+ public:
+     static void report(const char* format, ...) WTF_ATTRIBUTE_PRINTF(1, 2);
++
++    static unsigned reportCount() { return s_reportCount; }
++
++private:
++    static thread_local unsigned s_reportCount;
++};
++
++enum class DiagnosticCounter : uint8_t {
++    ImagesListed,
++    ImageHeadersRead,
++    ImagesInSharedCache,
++    ExportsTriesSearched,
++    UnreadableImageHeaders,
++    ImplausibleLoadCommandSizes,
++    UnreadableLoadCommands,
++    ImagesWithoutExportsTrie,
++    ImplausibleExportsTrieSizes,
++    ExportsTriesOutsideLinkedit,
++    UnreadableExportsTries,
++    ImagesSkippedForReadBudget,
++    ReExports,
++    ExportsWithoutSingleAddress,
++    ThreadsListed,
++    ThreadStatesRead,
++    UnreadableThreadStates,
++};
++constexpr size_t numberOfDiagnosticCounters = static_cast<size_t>(DiagnosticCounter::UnreadableThreadStates) + 1;
++
++// Mya may be used on corrupted target heaps; we must be able to
++// use and test it in these cases without crashing, and
++// let the operator see what is going on.
++class Diagnostics {
++    WTF_MAKE_NONCOPYABLE(Diagnostics);
++    WTF_MAKE_NONMOVABLE(Diagnostics);
++public:
++    explicit Diagnostics(UTF8CString&& operation);
++    ~Diagnostics();
++
++    static UTF8CString describe(const char* format, ...) WTF_ATTRIBUTE_PRINTF(1, 2);
++
++    static void count(DiagnosticCounter counter, uint64_t by = 1)
++    {
++        if (s_current)
++            s_current->m_counts[static_cast<size_t>(counter)] += by;
++    }
++
++    uint64_t value(DiagnosticCounter counter) const { return m_counts[static_cast<size_t>(counter)]; }
++
++    static UTF8CString context();
++
++private:
++    void print(PrintStream&) const;
++
++    UTF8CString m_operation;
++    std::array<uint64_t, numberOfDiagnosticCounters> m_counts { };
++    Diagnostics* const m_parent;
++
++    static thread_local Diagnostics* s_current;
+ };
+ 
+ } // namespace Corpse
+ } // namespace JSC
+ 
++#define CORPSE_REPORT(format, ...) \
++    WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN \
++    ::JSC::Corpse::Error::report(format __VA_OPT__(, LOG_PRINTF_TYPE(__VA_ARGS__))) \
++    WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
++
++#define CORPSE_DESCRIBE(format, ...) \
++    WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN \
++    ::JSC::Corpse::Diagnostics::describe(format __VA_OPT__(, LOG_PRINTF_TYPE(__VA_ARGS__))) \
++    WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
++
++#define CORPSE_DIAGNOSTICS(name, format, ...) \
++    ::JSC::Corpse::Diagnostics name(CORPSE_DESCRIBE(format __VA_OPT__(, __VA_ARGS__)))
++
+ #endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseLimits.h b/Source/JavaScriptCore/corpse/CorpseLimits.h
+new file mode 100644
+index 000000000000..7544089e7739
+--- /dev/null
++++ b/Source/JavaScriptCore/corpse/CorpseLimits.h
+@@ -0,0 +1,64 @@
++/*
++ * Copyright (C) 2026 Apple Inc. All rights reserved.
++ * Copyright (C) 2026 Igalia S.L.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#pragma once
++
++#include <JavaScriptCore/CorpsePlatform.h>
++
++#if ENABLE(MYA)
++
++#include <stddef.h>
++#include <stdint.h>
++#include <wtf/StdLibExtras.h>
++
++namespace JSC {
++namespace Corpse {
++
++// Sizes and counts read out of a corpse are used to bound loops and to size
++// allocations, so they are checked against these limits first. Each one is a
++// sanity check on a single value: it says the struct we read was not what we
++// thought it was, in which case the addresses in it are not worth chasing. They
++// are not a bound on the work a lookup can do, because the per-image limits
++// multiply by the image count. maxTotalBytesRead below is that bound.
++//
++// The values sit above what was empirically measured: across every Mach-O image
++// installed on a sample system the largest load commands were 7.4 KB and the
++// largest exports trie 2.1 MB, and a process that dlopens every framework on the
++// system reaches about 2,800 images.
++constexpr size_t maxLoadCommandsSize = 128 * KB; // About 17× the measured maximum.
++constexpr size_t maxExportsTrieSize = 16 * MB; // About 8× the measured maximum.
++constexpr uint32_t maxImageCount = 16 * 1024; // About 6× the measured maximum.
++
++// A lookup that finds nothing will read every image's load commands and exports
++// trie, which measured 101 MB for the ~2,800 image process above and 0.4 MB for
++// a small one. This caps the total for one lookup, so a corpse claiming many
++// large images cannot turn a single symbol lookup into unbounded mapping.
++constexpr size_t maxTotalBytesRead = 256 * MB; // About 2.5× the measured maximum.
++
++} // namespace Corpse
++} // namespace JSC
++
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseSnapshot.cpp b/Source/JavaScriptCore/corpse/CorpseSnapshot.cpp
+index 5d5c4e9c2fa0..667bcced429a 100644
+--- a/Source/JavaScriptCore/corpse/CorpseSnapshot.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseSnapshot.cpp
+@@ -1,5 +1,6 @@
+ /*
+  * Copyright (C) 2026 Apple Inc. All rights reserved.
++ * Copyright (C) 2026 Igalia S.L.
+  *
+  * Redistribution and use in source and binary forms, with or without
+  * modification, are permitted provided that the following conditions
+@@ -59,14 +60,23 @@ const Vector<Thread>& Snapshot::threads()
+ 
+ Address Snapshot::symbol(const char* name)
+ {
+-    if (!name || !*name)
++    if (!name || !*name) {
++        CORPSE_REPORT("A symbol lookup needs a name");
+         return { };
++    }
+ 
+     auto entry = m_symbols.ensure<StringViewHashTranslator>(StringView::fromLatin1(name), [&] {
+         return WTF::makeUnique<Symbol>(*this, name);
+     });
+ 
+-    return entry.iterator->value->address();
++    Address address = entry.iterator->value->address();
++    if (!address && !entry.isNewEntry) {
++        if (!isValid())
++            CORPSE_REPORT("Cannot look up '%s' in an invalid snapshot", name);
++        else
++            CORPSE_REPORT("No symbol '%s' in pid %d, as an earlier lookup found", name, static_cast<int>(process()->pid()));
++    }
++    return address;
+ }
+ 
+ #if OS(DARWIN)
+@@ -75,10 +85,12 @@ Address Snapshot::symbol(const char* name)
+ static OwnedTaskHandle takeSnapshot(Process* process)
+ {
+     if (!process || !process->isAttached()) {
+-        Error::report("Could not snapshot: No process attached");
++        CORPSE_REPORT("Could not snapshot: No process attached");
+         return { };
+     }
+ 
++    // Snapshot the target into a corpse; only a read port is required from here
++    // on, and the corpse is independent of the live target.
+     mach_port_t corpsePort = MACH_PORT_NULL;
+     kern_return_t kr = task_generate_corpse(process->taskPort(), &corpsePort);
+     if (kr == KERN_SUCCESS)
+@@ -100,7 +112,7 @@ static OwnedTaskHandle takeSnapshot(Process* process)
+ static OwnedTaskHandle takeSnapshot(Process* process)
+ {
+     if (!process || !process->isAttached()) {
+-        Error::report("Could not snapshot: No process attached");
++        CORPSE_REPORT("Could not snapshot: No process attached");
+         return { };
+     }
+     return OwnedTaskHandle::adopt(process->taskPort());
+diff --git a/Source/JavaScriptCore/corpse/CorpseSymbol.cpp b/Source/JavaScriptCore/corpse/CorpseSymbol.cpp
+index a611aec73458..28ebee845d2d 100644
+--- a/Source/JavaScriptCore/corpse/CorpseSymbol.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseSymbol.cpp
+@@ -31,12 +31,14 @@
+ 
+ #include "CorpseError.h"
+ #include "CorpseExportsTrie.h"
++#include "CorpseLimits.h"
+ #include "CorpseSnapshot.h"
+ 
+ #if OS(DARWIN)
+ #include <mach-o/dyld_images.h>
+ #include <mach-o/loader.h>
+ #include <mach/mach.h>
++#include <mach/mach_error.h>
+ #include <mach/task_info.h>
+ #endif
+ #include <optional>
+@@ -48,12 +50,6 @@
+ #include <wtf/TZoneMallocInlines.h>
+ #include <wtf/text/StringCommon.h>
+ 
+-#if CORPSE_SYMBOL_LOOKUP_DIAGNOSTICS
+-#define CORPSE_DIAGNOSTIC_DO(statement) statement
+-#else
+-#define CORPSE_DIAGNOSTIC_DO(statement) ((void)0)
+-#endif
+-
+ namespace JSC {
+ namespace Corpse {
+ 
+@@ -70,27 +66,6 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(Symbol);
+ 
+ namespace {
+ 
+-// Sizes and counts read out of a corpse are used to bound loops and to size
+-// allocations, so they are checked against these limits first. Each one is a
+-// sanity check on a single value: it says the struct we read was not what we
+-// thought it was, in which case the addresses in it are not worth chasing. They
+-// are not a bound on the work a lookup can do, because the per-image limits
+-// multiply by the image count. maxTotalBytesRead below is that bound.
+-//
+-// The values sit above what was empirically measured: across every Mach-O image
+-// installed on a sample system the largest load commands were 7.4 KB and the
+-// largest exports trie 2.1 MB, and a process that dlopens every framework on the
+-// system reaches about 2,800 images.
+-constexpr size_t maxLoadCommandsSize = 128 * KB; // About 17× the measured maximum.
+-constexpr size_t maxExportsTrieSize = 16 * MB; // About 8× the measured maximum.
+-constexpr uint32_t maxImageCount = 16 * 1024; // About 6× the measured maximum.
+-
+-// A lookup that finds nothing will read every image's load commands and exports
+-// trie, which measured 101 MB for the ~2,800 image process above and 0.4 MB for
+-// a small one. This caps the total for one lookup, so a corpse claiming many
+-// large images cannot turn a single symbol lookup into unbounded mapping.
+-constexpr size_t maxTotalBytesRead = 256 * MB; // About 2.5× the measured maximum.
+-
+ template<typename T>
+ std::optional<T> readCommand(std::span<const uint8_t> commands, size_t offset)
+ {
+@@ -119,7 +94,7 @@ bool segmentNameIs(const char (&name)[16], std::string_view expected)
+ bool Symbol::hasReadBudget(size_t length)
+ {
+     if (length > m_readBudget) {
+-        CORPSE_DIAGNOSTIC_DO(++m_diagnostics.readBudgetExhausted);
++        Diagnostics::count(DiagnosticCounter::ImagesSkippedForReadBudget);
+         return false;
+     }
+     m_readBudget -= length;
+@@ -132,22 +107,22 @@ Address Symbol::resolveInImage(Memory& memory, Address imageAddress, std::string
+ {
+     auto header = memory.ptr<mach_header_64>(imageAddress);
+     if (!header || header->magic != MH_MAGIC_64) {
+-        CORPSE_DIAGNOSTIC_DO(++m_diagnostics.unreadableHeader);
++        Diagnostics::count(DiagnosticCounter::UnreadableImageHeaders);
+         return { };
+     }
+-    CORPSE_DIAGNOSTIC_DO(++m_diagnostics.examined);
++    Diagnostics::count(DiagnosticCounter::ImageHeadersRead);
+     if (header->flags & MH_DYLIB_IN_CACHE)
+-        CORPSE_DIAGNOSTIC_DO(++m_diagnostics.inSharedCache);
++        Diagnostics::count(DiagnosticCounter::ImagesInSharedCache);
+ 
+     if (header->sizeofcmds > maxLoadCommandsSize) {
+-        CORPSE_DIAGNOSTIC_DO(++m_diagnostics.implausibleCommandsSize);
++        Diagnostics::count(DiagnosticCounter::ImplausibleLoadCommandSizes);
+         return { };
+     }
+     if (!hasReadBudget(header->sizeofcmds))
+         return { };
+     auto commands = memory.span<uint8_t>(imageAddress + sizeof(mach_header_64), header->sizeofcmds);
+     if (!commands) {
+-        CORPSE_DIAGNOSTIC_DO(++m_diagnostics.unreadableCommands);
++        Diagnostics::count(DiagnosticCounter::UnreadableLoadCommands);
+         return { };
+     }
+ 
+@@ -217,11 +192,11 @@ Address Symbol::resolveInImage(Memory& memory, Address imageAddress, std::string
+     }
+ 
+     if (!textVMAddress || !linkeditVMAddress || !linkeditFileOffset || !linkeditFileSize || !exportSize) {
+-        CORPSE_DIAGNOSTIC_DO(++m_diagnostics.withoutTrie);
++        Diagnostics::count(DiagnosticCounter::ImagesWithoutExportsTrie);
+         return { };
+     }
+     if (exportSize > maxExportsTrieSize) {
+-        CORPSE_DIAGNOSTIC_DO(++m_diagnostics.implausibleTrieSize);
++        Diagnostics::count(DiagnosticCounter::ImplausibleExportsTrieSizes);
+         return { };
+     }
+ 
+@@ -229,12 +204,12 @@ Address Symbol::resolveInImage(Memory& memory, Address imageAddress, std::string
+     // be less than the start of __LINKEDIT, cannot exceed the end of __LINKEDIT, and
+     // the whole trie must fit inside it.
+     if (exportOffset < *linkeditFileOffset) {
+-        CORPSE_DIAGNOSTIC_DO(++m_diagnostics.trieOutsideLinkedit);
++        Diagnostics::count(DiagnosticCounter::ExportsTriesOutsideLinkedit);
+         return { };
+     }
+     uint64_t trieSegmentOffset = exportOffset - *linkeditFileOffset;
+     if (trieSegmentOffset > *linkeditFileSize || exportSize > *linkeditFileSize - trieSegmentOffset) {
+-        CORPSE_DIAGNOSTIC_DO(++m_diagnostics.trieOutsideLinkedit);
++        Diagnostics::count(DiagnosticCounter::ExportsTriesOutsideLinkedit);
+         return { };
+     }
+ 
+@@ -248,19 +223,17 @@ Address Symbol::resolveInImage(Memory& memory, Address imageAddress, std::string
+         return { };
+     auto trie = memory.span<uint8_t>(trieAddress, exportSize);
+     if (!trie) {
+-        CORPSE_DIAGNOSTIC_DO(++m_diagnostics.unreadableTrie);
++        Diagnostics::count(DiagnosticCounter::UnreadableExportsTries);
+         return { };
+     }
+-    CORPSE_DIAGNOSTIC_DO(++m_diagnostics.searched);
++    Diagnostics::count(DiagnosticCounter::ExportsTriesSearched);
+ 
+     auto found = ExportsTrie::lookUp(trie, name);
+     if (!found) {
+-#if CORPSE_SYMBOL_LOOKUP_DIAGNOSTICS
+         if (found.error() == ExportsTrie::Failure::ReExport)
+-            ++m_diagnostics.reExports;
++            Diagnostics::count(DiagnosticCounter::ReExports);
+         else if (found.error() == ExportsTrie::Failure::UnsupportedKind)
+-            ++m_diagnostics.unsupportedKind;
+-#endif
++            Diagnostics::count(DiagnosticCounter::ExportsWithoutSingleAddress);
+         return { };
+     }
+     if (found->kind == ExportsTrie::Export::Kind::Absolute)
+@@ -270,179 +243,96 @@ Address Symbol::resolveInImage(Memory& memory, Address imageAddress, std::string
+ 
+ Address Symbol::lookUpName(Snapshot& snapshot)
+ {
+-    if (!snapshot.isValid() || m_name.empty())
++    if (!snapshot.isValid()) {
++        CORPSE_REPORT("Cannot look up '%s' in an invalid snapshot", m_name.c_str());
+         return { };
++    }
++    int pid = static_cast<int>(snapshot.process()->pid());
++    CORPSE_DIAGNOSTICS(diagnostics, "looking up the symbol '_%s' in pid %d", m_name.c_str(), pid);
+ 
+     m_readBudget = maxTotalBytesRead;
+ 
+-    auto doLookUp = [&] () -> Address {
+-        std::string name = "_" + m_name; // Use Mach-O symbol name for look up.
++    std::string name = "_" + m_name; // Use Mach-O symbol name for look up.
+ 
+-        mach_port_t task = snapshot.corpsePort();
+-        Memory& memory = snapshot.memory();
+-
+-        // dyld publishes the list of loaded images; search each one in turn.
+-        task_dyld_info_data_t dyldInfo;
+-        mach_msg_type_number_t count = TASK_DYLD_INFO_COUNT;
+-        if (task_info(task, TASK_DYLD_INFO, reinterpret_cast<task_info_t>(&dyldInfo), &count) != KERN_SUCCESS)
+-            return { };
+-        CORPSE_DIAGNOSTIC_DO(m_diagnostics.readDyldInfo = true);
+-
+-        Address allImageInfosAddress { dyldInfo.all_image_info_addr };
+-        CORPSE_DIAGNOSTIC_DO(m_diagnostics.allImageInfosAddress = allImageInfosAddress);
+-        if (!allImageInfosAddress)
+-            return { };
+-
+-        auto allImages = memory.ptr<dyld_all_image_infos>(allImageInfosAddress);
+-        if (!allImages)
+-            return { };
+-        CORPSE_DIAGNOSTIC_DO(m_diagnostics.readAllImageInfos = true);
+-        CORPSE_DIAGNOSTIC_DO(m_diagnostics.version = allImages->version);
+-
+-        Address rawArrayAddress { allImages->infoArray };
+-        Address arrayAddress = rawArrayAddress.stripped();
+-        uint32_t imageCount = allImages->infoArrayCount;
+-        CORPSE_DIAGNOSTIC_DO(m_diagnostics.rawImageArrayAddress = rawArrayAddress);
+-        CORPSE_DIAGNOSTIC_DO(m_diagnostics.imageArrayAddress = arrayAddress);
+-        CORPSE_DIAGNOSTIC_DO(m_diagnostics.images = imageCount);
+-        if (!arrayAddress || !imageCount)
+-            return { };
+-        // Each image below costs a Mach round-trip and two buffer reads, so an
+-        // implausible count is a lot of work to be talked into doing.
+-        if (imageCount > maxImageCount) {
+-            CORPSE_DIAGNOSTIC_DO(m_diagnostics.implausibleImageCount = true);
+-            return { };
+-        }
+-
+-        size_t imageArrayBytes = static_cast<size_t>(imageCount) * sizeof(dyld_image_info);
+-        if (!hasReadBudget(imageArrayBytes))
+-            return { };
+-        auto images = memory.span<dyld_image_info>(arrayAddress, imageCount);
+-        if (!images) {
+-            CORPSE_DIAGNOSTIC_DO(m_diagnostics.unreadableInfo = imageCount);
+-            return { };
+-        }
+-
+-        for (uint32_t i = 0; i < imageCount; ++i) {
+-            auto imageAddress = Address(images[i].imageLoadAddress).stripped();
+-            auto symbolAddress = resolveInImage(memory, imageAddress, name);
+-            if (symbolAddress)
+-                return symbolAddress;
+-        }
++    Memory& memory = snapshot.memory();
+ 
++    // dyld publishes the list of loaded images; search each one in turn.
++    task_dyld_info_data_t dyldInfo;
++    mach_msg_type_number_t count = TASK_DYLD_INFO_COUNT;
++    kern_return_t kr = task_info(snapshot.corpsePort(), TASK_DYLD_INFO, reinterpret_cast<task_info_t>(&dyldInfo), &count);
++    if (kr != KERN_SUCCESS) {
++        CORPSE_REPORT("Could not read dyld information: %s (0x%x)", mach_error_string(kr), kr);
+         return { };
+-    };
++    }
+ 
+-    Address address = doLookUp();
+-#if CORPSE_SYMBOL_LOOKUP_DIAGNOSTICS
+-    if (!address)
+-        reportFailure(snapshot);
+-#endif
+-    return address;
++    Address allImageInfosAddress { dyldInfo.all_image_info_addr };
++    if (!allImageInfosAddress) {
++        CORPSE_REPORT("dyld reports no image list");
++        return { };
++    }
++    auto allImages = memory.ptr<dyld_all_image_infos>(allImageInfosAddress);
++    if (!allImages) {
++        CORPSE_REPORT("Could not read dyld_all_image_infos at 0x%llx", allImageInfosAddress.toTargetVMAddress());
++        return { };
++    }
++
++    Address arrayAddress = Address { allImages->infoArray }.stripped();
++    uint32_t imageCount = allImages->infoArrayCount;
++    if (!arrayAddress || !imageCount) {
++        CORPSE_REPORT("dyld_all_image_infos v%u at 0x%llx lists no images",
++            allImages->version, allImageInfosAddress.toTargetVMAddress());
++        return { };
++    }
++    // Each image below costs a Mach round-trip and two buffer reads, so an
++    // implausible count is a lot of work to be talked into doing.
++    if (imageCount > maxImageCount) {
++        CORPSE_REPORT("%u images is too many to be a real image list", imageCount);
++        return { };
++    }
++
++    if (!hasReadBudget(static_cast<size_t>(imageCount) * sizeof(dyld_image_info)))
++        return { };
++    auto infos = memory.span<dyld_image_info>(arrayAddress, imageCount);
++    if (!infos) {
++        CORPSE_REPORT("Could not read the %u image entries at 0x%llx", imageCount, arrayAddress.toTargetVMAddress());
++        return { };
++    }
++    Diagnostics::count(DiagnosticCounter::ImagesListed, imageCount);
++
++    for (const dyld_image_info& info : infos) {
++        if (Address address = resolveInImage(memory, Address(info.imageLoadAddress).stripped(), name))
++            return address;
++    }
++
++    if (diagnostics.value(DiagnosticCounter::ImagesSkippedForReadBudget))
++        CORPSE_REPORT("No symbol '%s' in pid %d: the lookup gave up after reading %zu MB, so some images were not searched", m_name.c_str(), pid, maxTotalBytesRead / MB);
++    else if (!diagnostics.value(DiagnosticCounter::ExportsTriesSearched))
++        CORPSE_REPORT("No symbol '%s' in pid %d: no exports trie could be read, so this is a memory access problem", m_name.c_str(), pid);
++    else
++        CORPSE_REPORT("No symbol '%s' in pid %d: only exported symbols are in an exports trie, so a symbol the linker hid is invisible here", m_name.c_str(), pid);
++    return { };
+ }
+ 
+-#if CORPSE_SYMBOL_LOOKUP_DIAGNOSTICS
+-
+-// Says how a failed search went, so a caller can tell "the symbol is not
+-// exported" from "the corpse could not be read".
+-void Symbol::reportFailure(const Snapshot& snapshot) const
+-{
+-    const Diagnostics& d = m_diagnostics;
+-
+-    Error::report("No symbol '_%s' in pid %d", m_name.c_str(),
+-        static_cast<int>(snapshot.process()->pid()));
+-
+-    if (!d.readDyldInfo) {
+-        Error::report("  could not read dyld information (task_info TASK_DYLD_INFO failed)");
+-        return;
+-    }
+-    if (!d.allImageInfosAddress) {
+-        Error::report("  dyld reports no image list (all_image_info_addr is 0)");
+-        return;
+-    }
+-    if (!d.readAllImageInfos) {
+-        Error::report("  could not read dyld_all_image_infos at 0x%llx",
+-            d.allImageInfosAddress.toTargetVMAddress());
+-        return;
+-    }
+-
+-    // A sane version says the struct read probably landed on real data, which is what
+-    // makes the image count and array address below worth printing.
+-    Error::report("  dyld_all_image_infos v%u at 0x%llx lists %u images at 0x%llx",
+-        d.version, d.allImageInfosAddress.toTargetVMAddress(),
+-        d.images, d.imageArrayAddress.toTargetVMAddress());
+-    if (d.rawImageArrayAddress != d.imageArrayAddress) {
+-        Error::report("  that address was ptrauth-signed as 0x%llx; the signature was stripped",
+-            d.rawImageArrayAddress.toTargetVMAddress());
+-    }
+-    if (!d.imageArrayAddress || !d.images) {
+-        Error::report("  that list is empty, so there was nothing to search");
+-        return;
+-    }
+-    if (d.implausibleImageCount) {
+-        Error::report("  that count is too large to be a real image list, so the struct read"
+-            " was not dyld_all_image_infos and was not searched");
+-        return;
+-    }
+-
+-    Error::report("  read %u of %u image headers (%u in the shared cache), walked %u exports tries",
+-        d.examined, d.images, d.inSharedCache, d.searched);
+-    if (d.unreadableInfo)
+-        Error::report("  %u image list entries were unreadable", d.unreadableInfo);
+-    if (d.unreadableHeader)
+-        Error::report("  %u image headers were unreadable or not 64-bit Mach-O", d.unreadableHeader);
+-    if (d.implausibleCommandsSize)
+-        Error::report("  %u images had implausible load command sizes", d.implausibleCommandsSize);
+-    if (d.unreadableCommands)
+-        Error::report("  %u images had unreadable load commands", d.unreadableCommands);
+-    if (d.withoutTrie)
+-        Error::report("  %u images had no exports trie", d.withoutTrie);
+-    if (d.implausibleTrieSize)
+-        Error::report("  %u images had implausible exports trie sizes", d.implausibleTrieSize);
+-    if (d.trieOutsideLinkedit)
+-        Error::report("  %u images placed their exports trie outside __LINKEDIT", d.trieOutsideLinkedit);
+-    if (d.unreadableTrie)
+-        Error::report("  %u exports tries were not readable", d.unreadableTrie);
+-    if (d.readBudgetExhausted) {
+-        Error::report("  gave up after reading %u MB from the corpse; %u images were skipped",
+-            static_cast<unsigned>(maxTotalBytesRead / MB), d.readBudgetExhausted);
+-    }
+-    if (d.reExports)
+-        Error::report("  %u images re-export the name from elsewhere, which is not followed", d.reExports);
+-    if (d.unsupportedKind)
+-        Error::report("  %u images export the name in a form that has no single address, such as a thread-local", d.unsupportedKind);
+-
+-    if (d.searched) {
+-        Error::report(
+-            "  only exported symbols appear in an exports trie: a symbol hidden"
+-            " by the linker is invisible here even though lldb can still find"
+-            " it in the symbol table");
+-    } else {
+-        Error::report(
+-            "  no trie was searched, so this is a memory-access problem rather"
+-            " than the symbol being absent");
+-    }
+-}
+-
+-#endif // CORPSE_SYMBOL_LOOKUP_DIAGNOSTICS
+-
+ #else
+ 
+-Address Symbol::resolveInImage(Memory&, Address, std::string_view) { return { }; }
+-Address Symbol::lookUpName(Snapshot&) { return { }; }
++Address Symbol::lookUpName(Snapshot&)
++{
++    CORPSE_REPORT("Symbol lookup is not supported on this platform");
++    return { };
++}
+ 
+ #endif // OS(DARWIN)
+ 
+ Symbol::Symbol(Snapshot& snapshot, const char* name)
+     : m_name(name ? name : "")
+ {
+-    if (!m_name.empty())
++    if (m_name.empty())
++        CORPSE_REPORT("A symbol lookup needs a name");
++    else
+         m_address = lookUpName(snapshot);
+ }
+ 
+ } // namespace Corpse
+ } // namespace JSC
+ 
+-#undef CORPSE_DIAGNOSTIC_DO
+-
+ #endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseSymbol.h b/Source/JavaScriptCore/corpse/CorpseSymbol.h
+index ad6cd49cd891..3765ea17d34e 100644
+--- a/Source/JavaScriptCore/corpse/CorpseSymbol.h
++++ b/Source/JavaScriptCore/corpse/CorpseSymbol.h
+@@ -36,9 +36,6 @@
+ #include <string_view>
+ #include <wtf/TZoneMalloc.h>
+ 
+-// Enable for more detailed error messages on what may have caused a symbol lookup failure.
+-#define CORPSE_SYMBOL_LOOKUP_DIAGNOSTICS 0
+-
+ namespace JSC {
+ namespace Corpse {
+ 
+@@ -68,43 +65,11 @@ public:
+ 
+ private:
+     Address lookUpName(Snapshot&);
+-    Address resolveInImage(Memory&, Address loadAddress, std::string_view name);
+ #if OS(DARWIN)
++    Address resolveInImage(Memory&, Address loadAddress, std::string_view name);
+     bool hasReadBudget(size_t length);
+ #endif
+ 
+-#if CORPSE_SYMBOL_LOOKUP_DIAGNOSTICS
+-    // How far a search got, so a failure can name the stage that fell short.
+-    struct Diagnostics {
+-        bool readDyldInfo { false };
+-        Address allImageInfosAddress;
+-        bool readAllImageInfos { false };
+-        uint32_t version { 0 };                 // dyld_all_image_infos::version.
+-        Address rawImageArrayAddress;           // As stored, possibly signed.
+-        Address imageArrayAddress;              // ...with any signature stripped.
+-        unsigned images { 0 };                  // Images dyld reported.
+-        bool implausibleImageCount { false };   // ...but too many to be believed.
+-        unsigned examined { 0 };                // ...whose Mach header we read.
+-        unsigned inSharedCache { 0 };           // ...of those, in the shared cache.
+-        unsigned unreadableInfo { 0 };          // dyld_image_info unreadable.
+-        unsigned unreadableHeader { 0 };        // Header missing or not 64-bit.
+-        unsigned implausibleCommandsSize { 0 }; // sizeofcmds too large to believe.
+-        unsigned unreadableCommands { 0 };      // Load commands unreadable.
+-        unsigned withoutTrie { 0 };             // No trie, or no __TEXT/__LINKEDIT.
+-        unsigned implausibleTrieSize { 0 };     // Trie size too large to believe.
+-        unsigned trieOutsideLinkedit { 0 };     // Trie not within __LINKEDIT.
+-        unsigned unreadableTrie { 0 };          // Trie located but not readable.
+-        unsigned readBudgetExhausted { 0 };     // Gave up: the lookup hit its read budget.
+-        unsigned searched { 0 };                // Tries actually walked.
+-        unsigned reExports { 0 };               // Matched, but re-exported.
+-        unsigned unsupportedKind { 0 };         // Matched, but not an export kind with one address.
+-    };
+-
+-    void reportFailure(const Snapshot&) const;
+-
+-    Diagnostics m_diagnostics;
+-#endif
+-
+     std::string m_name;
+     Address m_address;
+ 
+diff --git a/Source/JavaScriptCore/corpse/CorpseThread.cpp b/Source/JavaScriptCore/corpse/CorpseThread.cpp
+index a974cc416c94..c0ad1490ffe1 100644
+--- a/Source/JavaScriptCore/corpse/CorpseThread.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseThread.cpp
+@@ -94,25 +94,20 @@ const char* Thread::runStateDescription() const
+     }
+ }
+ 
+-Vector<Thread> Thread::collect(const Snapshot& snapshot)
++Vector<Thread> Thread::platformCollect(const Snapshot& snapshot)
+ {
+     Vector<Thread> result;
+-
+-    if (!snapshot.isValid()) {
+-        Error::report("Cannot read threads from an invalid snapshot");
+-        return result;
+-    }
+     mach_port_t task = snapshot.corpsePort();
++    Process* process = snapshot.process();
+ 
+     thread_act_array_t threads = nullptr;
+     mach_msg_type_number_t threadCount = 0;
+     kern_return_t kr = task_threads(task, &threads, &threadCount);
+     if (kr != KERN_SUCCESS) {
+-        pid_t pid = snapshot.process()->pid();
+-        Error::report("Could not read the thread list for pid %d: %s (0x%x)",
+-            static_cast<int>(pid), mach_error_string(kr), kr);
++        CORPSE_REPORT("Could not read the thread list: %s (0x%x)", mach_error_string(kr), kr);
+         return result;
+     }
++    Diagnostics::count(DiagnosticCounter::ThreadsListed, threadCount);
+ 
+     result.reserveCapacity(threadCount);
+ 
+@@ -120,15 +115,11 @@ Vector<Thread> Thread::collect(const Snapshot& snapshot)
+     // threads' stack pointers belong to Rosetta's runtime rather than to the program.
+     // Those addresses do land in real mappings, so reporting the region around one
+     // would name a plausible but wrong stack; report no stack instead.
+-    Process* process = snapshot.process();
+     bool isTranslated = process->isTranslated();
+     if (isTranslated) {
+-        Error::report("Thread stacks for pid %d are not available: the process runs"
+-            " under Rosetta translation, whose thread state does not describe the program",
+-            static_cast<int>(process->pid()));
++        CORPSE_REPORT("Thread stacks are not available: the process runs under Rosetta"
++            " translation, whose thread state does not describe the program");
+     }
+-
+-    unsigned unreadableStates = 0;
+     for (mach_msg_type_number_t i = 0; i < threadCount; ++i) {
+         Thread thread;
+ 
+@@ -159,25 +150,17 @@ Vector<Thread> Thread::collect(const Snapshot& snapshot)
+         // The stack is the region the stack pointer points into.
+         if (!isTranslated) {
+             if (auto stackPointer = readStackPointer(threads[i])) {
++                Diagnostics::count(DiagnosticCounter::ThreadStatesRead);
+                 thread.m_stackPointer = *stackPointer;
+                 if (auto region = Region::findContaining(task, thread.m_stackPointer))
+                     thread.m_stackRegion = *region;
+             } else
+-                ++unreadableStates;
++                Diagnostics::count(DiagnosticCounter::UnreadableThreadStates);
+         }
+ 
+         result.append(thread);
+     }
+ 
+-    // Failing to read the thread state leaves a thread with no stack, which on its
+-    // own looks the same as a thread that has none. Say which it was.
+-    if (unreadableStates) {
+-        Error::report("Could not read the thread state of %u of %u threads in pid %d:"
+-            " this build cannot read the target's architecture",
+-            unreadableStates, static_cast<unsigned>(threadCount),
+-            static_cast<int>(process->pid()));
+-    }
+-
+     // task_threads hands us a right to each thread plus the array itself.
+     for (mach_msg_type_number_t i = 0; i < threadCount; ++i)
+         mach_port_deallocate(mach_task_self(), threads[i]);
+@@ -186,14 +169,32 @@ Vector<Thread> Thread::collect(const Snapshot& snapshot)
+ 
+     return result;
+ }
++
+ #else
+ 
+ const char* Thread::runStateDescription() const { return "unknown"; }
+ 
+-Vector<Thread> Thread::collect(const Snapshot&) { return { }; }
++Vector<Thread> Thread::platformCollect(const Snapshot&) { return { }; }
+ 
+ #endif // OS(DARWIN)
+ 
++Vector<Thread> Thread::collect(const Snapshot& snapshot)
++{
++    if (!snapshot.isValid()) {
++        CORPSE_REPORT("Cannot read threads from an invalid snapshot");
++        return { };
++    }
++    CORPSE_DIAGNOSTICS(diagnostics, "listing the threads of pid %d", static_cast<int>(snapshot.process()->pid()));
++    Vector<Thread> threads = platformCollect(snapshot);
++
++    if (uint64_t unreadableStates = diagnostics.value(DiagnosticCounter::UnreadableThreadStates)) {
++        CORPSE_REPORT("Could not read the thread state of %llu of %llu threads:"
++            " this build cannot read the target's architecture",
++            static_cast<unsigned long long>(unreadableStates), static_cast<unsigned long long>(diagnostics.value(DiagnosticCounter::ThreadsListed)));
++    }
++    return threads;
++}
++
+ } // namespace Corpse
+ } // namespace JSC
+ 
+diff --git a/Source/JavaScriptCore/corpse/CorpseThread.h b/Source/JavaScriptCore/corpse/CorpseThread.h
+index c0a2c480415c..cbd1c03758ad 100644
+--- a/Source/JavaScriptCore/corpse/CorpseThread.h
++++ b/Source/JavaScriptCore/corpse/CorpseThread.h
+@@ -64,6 +64,7 @@ public:
+ 
+ private:
+     static Vector<Thread> collect(const Snapshot&);
++    static Vector<Thread> platformCollect(const Snapshot&);
+ 
+     uint64_t m_id { 0 };
+     std::string m_name;
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseDiagnosticsTest.cpp b/Source/JavaScriptCore/corpse/tests/CorpseDiagnosticsTest.cpp
+new file mode 100644
+index 000000000000..b310d01cb229
+--- /dev/null
++++ b/Source/JavaScriptCore/corpse/tests/CorpseDiagnosticsTest.cpp
+@@ -0,0 +1,89 @@
++/*
++ * Copyright (C) 2026 Apple Inc. All rights reserved.
++ * Copyright (C) 2026 Igalia S.L.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "config.h"
++
++#if ENABLE(MYA)
++
++#include "LibJSCToolsTestUtilities.h"
++
++#include <JavaScriptCore/CorpseClient.h>
++#include <JavaScriptCore/CorpseError.h>
++#include <wtf/StringPrintStream.h>
++
++namespace JSCToolsTest {
++
++using JSC::Corpse::Client;
++using JSC::Corpse::DiagnosticCounter;
++using JSC::Corpse::Diagnostics;
++
++namespace {
++
++void readHeader()
++{
++    Diagnostics::count(DiagnosticCounter::ImageHeadersRead);
++}
++
++} // anonymous namespace
++
++void testDiagnostics()
++{
++    SuiteTracer tracer("Diagnostics");
++    if (!tracer.shouldRun())
++        return;
++
++    readHeader(); // With no scope open, a count goes nowhere.
++
++    CORPSE_DIAGNOSTICS(outer, "running the %s suite", "Diagnostics");
++    TEST_ASSERT_EQ(outer.value(DiagnosticCounter::ImageHeadersRead), uint64_t { 0 }, "a count made before the scope opened is not in it");
++    readHeader();
++    Diagnostics::count(DiagnosticCounter::ImagesListed, 40);
++    Diagnostics::count(DiagnosticCounter::ExportsTriesSearched);
++    TEST_ASSERT_EQ(outer.value(DiagnosticCounter::ImageHeadersRead), uint64_t { 1 }, "a count reaches its scope from a callee");
++    TEST_ASSERT_EQ(outer.value(DiagnosticCounter::ImagesListed), uint64_t { 40 }, "a count adds what it is given");
++
++    {
++        CORPSE_DIAGNOSTICS(middle, "doing something in between");
++        CORPSE_DIAGNOSTICS(inner, "reading more headers");
++        readHeader();
++        TEST_ASSERT_EQ(inner.value(DiagnosticCounter::ImageHeadersRead), uint64_t { 1 }, "the innermost scope takes a count");
++        TEST_ASSERT_EQ(middle.value(DiagnosticCounter::ImageHeadersRead), uint64_t { 0 }, "an enclosing scope does not also take it");
++        TEST_ASSERT_EQ(outer.value(DiagnosticCounter::ImageHeadersRead), uint64_t { 1 }, "nor does the outermost one");
++
++        TEST_ASSERT_EQ(Diagnostics::context(), toUTF8CString(
++            Client::name(), ":   while reading more headers: image headers read 1\n"_s,
++            Client::name(), ":   while doing something in between\n"_s,
++            Client::name(), ":   while running the Diagnostics suite: images listed 40, image headers read 1, exports tries searched 1\n"_s),
++            "the context names every open scope, innermost first, with the counts that are not zero");
++    }
++
++    readHeader();
++    TEST_ASSERT_EQ(outer.value(DiagnosticCounter::ImageHeadersRead), uint64_t { 2 }, "counting goes back to the outer scope once the inner ones close");
++}
++
++} // namespace JSCToolsTest
++
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseProcessTest.cpp b/Source/JavaScriptCore/corpse/tests/CorpseProcessTest.cpp
+index 9ff5dca14f58..debb2efda7f8 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseProcessTest.cpp
++++ b/Source/JavaScriptCore/corpse/tests/CorpseProcessTest.cpp
+@@ -169,7 +169,7 @@ void testProcess()
+         if (!gone)
+             TEST_ASSERT(gone, "a child could be forked and reaped");
+         else {
+-            dataLogLn("    (the next line is the failure this test asks for)");
++            ExpectedErrors expectedErrors;
+ #if OS(DARWIN)
+             unsigned namesBefore = machPortNameCount();
+ #endif
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.cpp b/Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.cpp
+index 3f13c53892af..bb8913d98844 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.cpp
++++ b/Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.cpp
+@@ -47,8 +47,6 @@ void testSnapshot()
+     SuiteTracer tracer("Snapshot");
+     if (!tracer.shouldRun())
+         return;
+-    if (linuxSkip("Snapshot", "corpses are not implemented on Linux yet"))
+-        return;
+ 
+     RefPtr<Process> process = Process::create(getpid());
+     if (!process->attach()) {
+@@ -71,8 +69,10 @@ void testSnapshot()
+         Snapshot second(process);
+         TEST_ASSERT(second.isValid(), "a second snapshot of the same process is valid");
+         TEST_ASSERT(second.id() > firstId, "identifiers increase");
++#if OS(DARWIN) // FIXME: linux
+         TEST_ASSERT(second.corpsePort() != snapshot.corpsePort(),
+             "two snapshots hold two different corpses");
++#endif
+         secondCorpsePort = second.corpsePort();
+     }
+ #if OS(DARWIN)
+@@ -90,6 +90,7 @@ void testSnapshot()
+         TEST_ASSERT(later.id() > firstId + 1, "identifiers are not reused after a snapshot is destroyed");
+     }
+     {
++        ExpectedErrors expectedErrors(3);
+         RefPtr<Process> unattached = Process::create(getpid());
+         Snapshot snapshot(unattached);
+         TEST_ASSERT(!snapshot.isValid(), "a snapshot of an unattached process is invalid");
+@@ -97,12 +98,16 @@ void testSnapshot()
+         TEST_ASSERT(!snapshot.symbol("g_config"), "an invalid snapshot resolves no symbol");
+     }
+     {
++        ExpectedErrors expectedErrors(3);
+         RefPtr<Process> none;
+         Snapshot snapshot(none);
+         TEST_ASSERT(!snapshot.isValid(), "a snapshot with no process is invalid");
++        TEST_ASSERT(!snapshot.symbol("g_config"), "a snapshot with no process resolves no symbol");
++        TEST_ASSERT(!snapshot.symbol("g_config"), "nor does it the second time, from the cache");
+     }
+     {
+         Snapshot snapshot(process);
++        ExpectedErrors expectedErrors(2);
+         TEST_ASSERT(!snapshot.symbol(nullptr), "an unnamed symbol resolves to nothing");
+         TEST_ASSERT(!snapshot.symbol(""), "an empty symbol name resolves to nothing");
+     }
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseSymbolTest.cpp b/Source/JavaScriptCore/corpse/tests/CorpseSymbolTest.cpp
+index cd050699c368..8c01cb0d1868 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseSymbolTest.cpp
++++ b/Source/JavaScriptCore/corpse/tests/CorpseSymbolTest.cpp
+@@ -34,9 +34,6 @@
+ #include <JavaScriptCore/CorpseSnapshot.h>
+ #include <JavaScriptCore/CorpseSymbol.h>
+ #include <dlfcn.h>
+-#if OS(DARWIN)
+-#include <mach/mach.h>
+-#endif
+ #include <stdlib.h>
+ #include <unistd.h>
+ #include <wtf/MonotonicTime.h>
+@@ -106,14 +103,21 @@ void testSymbol()
+         }
+     }
+     {
++        ExpectedErrors expectedErrors(3);
+         TEST_ASSERT(!snapshot.symbol("jscToolsTestNoSuchSymbolAnywhere"),
+             "a name that is not exported anywhere is not found");
+         TEST_ASSERT(!snapshot.symbol(nullptr), "no name resolves to nothing");
+         TEST_ASSERT(!snapshot.symbol(""), "an empty name resolves to nothing");
+     }
++    {
++        ExpectedErrors expectedErrors;
++        TEST_ASSERT(!snapshot.symbol("jscToolsTestNoSuchSymbolAnywhere"),
++            "a name that was not found before is still not found");
++    }
+     {
+         // Only exported symbols appear in a trie. This one is in the binary, and
+         // still must not be found: saying so is the honest answer.
++        ExpectedErrors expectedErrors;
+         TEST_ASSERT(jscToolsTestHiddenGlobal == 42, "the hidden global is in this binary");
+         TEST_ASSERT(!snapshot.symbol("jscToolsTestHiddenGlobal"),
+             "a symbol hidden from the linker is not found");
+@@ -121,6 +125,7 @@ void testSymbol()
+     {
+         // A look up prepends the underscore that a Mach-O symbol name carries, so a
+         // name that already has one is asking for a different symbol.
++        ExpectedErrors expectedErrors;
+         TEST_ASSERT(!snapshot.symbol("_malloc"),
+             "a name given with its underscore already attached is not found");
+     }
+@@ -137,6 +142,7 @@ void testSymbol()
+         TEST_ASSERT(symbol.address() == snapshot.symbol("g_config"),
+             "a Symbol resolves to what the snapshot reports");
+ 
++        ExpectedErrors expectedErrors(2);
+         Symbol missing(snapshot, "jscToolsTestNoSuchSymbolAnywhere");
+         TEST_ASSERT(!missing.isValid(), "a Symbol that did not resolve is not valid");
+         TEST_ASSERT(!missing.address(), "a Symbol that did not resolve has no address");
+@@ -150,6 +156,7 @@ void testSymbol()
+     {
+         // A name that is nowhere walks every image in the corpse, which is the most
+         // work a look up can be asked to do. It has to stay bounded.
++        ExpectedErrors expectedErrors;
+         static constexpr double budgetSeconds = 60;
+         MonotonicTime start = MonotonicTime::now();
+         TEST_ASSERT(!snapshot.symbol("jscToolsTestAnotherNameThatIsNowhere"),
+diff --git a/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.cpp b/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.cpp
+index 30cb593380f0..da066d3b0377 100644
+--- a/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.cpp
++++ b/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.cpp
+@@ -31,6 +31,7 @@
+ #include <wtf/StdLibExtras.h>
+ 
+ #if ENABLE(MYA)
++#include <JavaScriptCore/CorpseError.h>
+ #include <JavaScriptCore/CorpseProcess.h>
+ #include <JavaScriptCore/CorpseSnapshot.h>
+ #if OS(DARWIN)
+@@ -67,6 +68,17 @@ bool verbose = false;
+ 
+ static Seconds s_totalSuiteTime;
+ 
++static thread_local unsigned s_expectedReports = 0;
++
++static unsigned reportCount()
++{
++#if ENABLE(MYA)
++    return JSC::Corpse::Error::reportCount();
++#else
++    return 0;
++#endif
++}
++
+ SuiteTracer::SuiteTracer(const char* name)
+     : m_name(name)
+     , m_shouldRun(!suiteFilter || std::string_view(name).contains(std::string_view(suiteFilter)))
+@@ -75,6 +87,8 @@ SuiteTracer::SuiteTracer(const char* name)
+         return;
+     dataLogLn("--- ", m_name);
+     m_start = MonotonicTime::now();
++    m_reportsAtStart = reportCount();
++    s_expectedReports = 0;
+ }
+ 
+ SuiteTracer::~SuiteTracer()
+@@ -82,6 +96,9 @@ SuiteTracer::~SuiteTracer()
+     if (!m_shouldRun)
+         return;
+ 
++    unsigned reported = reportCount() - m_reportsAtStart;
++    TEST_ASSERT_EQ(reported, s_expectedReports, "the library reported only the errors the suite asked for");
++
+     Seconds elapsed = MonotonicTime::now() - m_start;
+     s_totalSuiteTime += elapsed;
+     if (!verbose)
+@@ -98,6 +115,20 @@ Seconds totalSuiteTime()
+     return s_totalSuiteTime;
+ }
+ 
++ExpectedErrors::ExpectedErrors(unsigned count)
++    : m_count(count)
++    , m_reportsAtStart(reportCount())
++{
++    dataLogLn("    (the next ", count, count == 1 ? " error is one" : " errors are ones", " this test asks for)");
++}
++
++ExpectedErrors::~ExpectedErrors()
++{
++    unsigned reported = reportCount() - m_reportsAtStart;
++    TEST_ASSERT_EQ(reported, m_count, "the library reported exactly the errors this test asked for");
++    s_expectedReports += reported;
++}
++
+ void skipSuite(const char* name, const char* why)
+ {
+     ++suitesSkipped;
+diff --git a/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h b/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h
+index 2f48381eb513..7188ba5fdff8 100644
+--- a/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h
++++ b/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h
+@@ -72,6 +72,7 @@ bool linuxSkip(const char* name, const char* why);
+ 
+ void testAddress();
+ void testByteParser();
++void testDiagnostics();
+ void testExportsTrie();
+ void testProcess();
+ void testSymbol();
+@@ -100,9 +101,23 @@ public:
+ private:
+     const char* m_name;
+     MonotonicTime m_start;
++    unsigned m_reportsAtStart { 0 };
+     bool m_shouldRun;
+ };
+ 
++class ExpectedErrors {
++public:
++    explicit ExpectedErrors(unsigned count = 1);
++    ~ExpectedErrors();
++
++    ExpectedErrors(const ExpectedErrors&) = delete;
++    ExpectedErrors& operator=(const ExpectedErrors&) = delete;
++
++private:
++    unsigned m_count;
++    unsigned m_reportsAtStart;
++};
++
+ Seconds totalSuiteTime();
+ 
+ // Nothing is printed for a passing assertion: a passing run should be quiet, and
+diff --git a/Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp b/Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp
+index f6728c555b23..fef7ddd93612 100644
+--- a/Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp
++++ b/Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp
+@@ -72,6 +72,7 @@ bool parseUint64(std::string_view text, uint64_t& out)
+ void runCorpseSuite()
+ {
+     JSCToolsTest::testByteParser();
++    JSCToolsTest::testDiagnostics();
+     JSCToolsTest::testExportsTrie();
+     JSCToolsTest::testAddress();
+     JSCToolsTest::testProcess();
+diff --git a/Source/JavaScriptCore/mya/mya.cpp b/Source/JavaScriptCore/mya/mya.cpp
+index 35d7ebdd7d7c..4d6c91ef425a 100644
+--- a/Source/JavaScriptCore/mya/mya.cpp
++++ b/Source/JavaScriptCore/mya/mya.cpp
+@@ -31,6 +31,7 @@
+ 
+ #include <JavaScriptCore/CorpseAddress.h>
+ #include <JavaScriptCore/CorpseClient.h>
++#include <JavaScriptCore/CorpseError.h>
+ #include <JavaScriptCore/CorpseProcess.h>
+ #include <JavaScriptCore/CorpseRegion.h>
+ #include <JavaScriptCore/CorpseSnapshot.h>
+@@ -58,6 +59,7 @@
+ #include <wtf/HashMap.h>
+ #include <wtf/Ref.h>
+ #include <wtf/RefPtr.h>
++#include <wtf/StdLibExtras.h>
+ #include <wtf/Vector.h>
+ #include <wtf/text/CString.h>
+ 
+@@ -714,10 +716,8 @@ private:
+ 
+         CString name = UTF8CString { byteCast<char8_t>(std::span { token }) };
+         Address address = snapshot->symbol(name.legacyCStringPointer());
+-        if (!address) {
+-            SAFE_FPRINTF(stderr, "mya: No symbol '%s' in snapshot #%u\n", name, snapshot->id());
++        if (!address)
+             return;
+-        }
+         if (hex)
+             SAFE_PRINTF("&%s = 0x%llx\n", name, static_cast<unsigned long long>(address.toTargetVMAddress()));
+         else
+@@ -1268,6 +1268,7 @@ private:
+         Lexer lex(line);
+         if (lex.atEnd())
+             return; // Blank line: not a command, not an error.
++        CORPSE_DIAGNOSTICS(diagnostics, "running the command '%s'", line);
+ 
+         // History replay ("!!" / "!<n>") is expanded before command dispatch.
+         if (lex.consumeChar('!'))
+diff --git a/Source/JavaScriptCore/shell/CMakeLists.txt b/Source/JavaScriptCore/shell/CMakeLists.txt
+index 202efa74fa2d..3e02492207ba 100644
+--- a/Source/JavaScriptCore/shell/CMakeLists.txt
++++ b/Source/JavaScriptCore/shell/CMakeLists.txt
+@@ -112,6 +112,7 @@ if (DEVELOPER_MODE)
+         set(testLibJSCTools_SOURCES
+             ../corpse/tests/CorpseAddressTest.cpp
+             ../corpse/tests/CorpseByteParserTest.cpp
++            ../corpse/tests/CorpseDiagnosticsTest.cpp
+             ../corpse/tests/CorpseExportsTrieTest.cpp
+             ../corpse/tests/CorpseMemoryTest.cpp
+             ../corpse/tests/CorpseProcessTest.cpp
+-- 
+2.54.0 (Apple Git-157)
+

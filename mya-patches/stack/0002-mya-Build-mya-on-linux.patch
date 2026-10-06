@@ -1,0 +1,3147 @@
+From eccb9cfd9f7a58bb84254b244430ef993eade7ef Mon Sep 17 00:00:00 2001
+From: Justin Michaud <jmichaud@igalia.com>
+Date: Tue, 6 Oct 2026 10:52:48 -0600
+Subject: [PATCH 02/17] [mya] Build mya on linux
+ https://bugs.webkit.org/show_bug.cgi?id=325094
+
+Reviewed by NOBODY (OOPS!).
+
+This patch is the first step to getting mya working on linux. We add a stub implementation
+that does almost nothing, but it confirms that mya can bulid and run on linux.
+
+mya on macOS with cmake and with xcodebuild still work as expected.
+
+We also re-work the testing code a bit to make it easier to add new tests out-of-process.
+
+* Source/JavaScriptCore/CMakeLists.txt:
+* Source/JavaScriptCore/JavaScriptCore.xcodeproj/project.pbxproj:
+* Source/JavaScriptCore/corpse/CorpseAddress.h:
+(JSC::Corpse::Address::Address):
+(JSC::Corpse::Address::toTargetVMAddress const):
+(JSC::Corpse::Address::deletedValue):
+(WTF::DefaultHash<JSC::Corpse::Address>::hash):
+(JSC::Corpse::Address::toMachVMAddress const): Deleted.
+* Source/JavaScriptCore/corpse/CorpseByteParser.cpp:
+* Source/JavaScriptCore/corpse/CorpseByteParser.h:
+* Source/JavaScriptCore/corpse/CorpseClient.cpp:
+* Source/JavaScriptCore/corpse/CorpseClient.h:
+* Source/JavaScriptCore/corpse/CorpseError.h:
+* Source/JavaScriptCore/corpse/CorpseExportsTrie.cpp:
+* Source/JavaScriptCore/corpse/CorpseExportsTrie.h:
+* Source/JavaScriptCore/corpse/CorpseMachVMSPI.h:
+* Source/JavaScriptCore/corpse/CorpseMemory.cpp:
+(JSC::Corpse::Memory::Region::create):
+(JSC::Corpse::Memory::Region::~Region):
+(JSC::Corpse::Memory::pageSize):
+(JSC::Corpse::Memory::Memory):
+(JSC::Corpse::Memory::map):
+(JSC::Corpse::Memory::dump const):
+* Source/JavaScriptCore/corpse/CorpseMemory.h:
+* Source/JavaScriptCore/corpse/CorpseMemoryPtr.h:
+(JSC::Corpse::Memory::Ptr::kernResult const):
+* Source/JavaScriptCore/corpse/CorpseMemorySpan.h:
+(JSC::Corpse::Memory::Span::kernResult const):
+* Source/JavaScriptCore/corpse/CorpsePlatform.h: Added.
+(JSC::Corpse::isValidTaskHandle):
+(JSC::Corpse::OwnedTaskHandle::adopt):
+(JSC::Corpse::OwnedTaskHandle::OwnedTaskHandle):
+(JSC::Corpse::OwnedTaskHandle::operator=):
+(JSC::Corpse::OwnedTaskHandle::~OwnedTaskHandle):
+(JSC::Corpse::OwnedTaskHandle::release):
+(JSC::Corpse::OwnedTaskHandle::taskHandle):
+* Source/JavaScriptCore/corpse/CorpseProcess.cpp:
+(JSC::Corpse::reportIfNoProcess):
+(JSC::Corpse::Process::holdsLiveTask const):
+(JSC::Corpse::Process::attach):
+(JSC::Corpse::Process::executablePath const):
+(JSC::Corpse::Process::isTranslated const):
+(JSC::Corpse::Process::detach): Deleted.
+* Source/JavaScriptCore/corpse/CorpseProcess.h:
+* Source/JavaScriptCore/corpse/CorpseRegion.cpp:
+(JSC::Corpse::Region::findContaining):
+(JSC::Corpse::Region::pageCount const):
+* Source/JavaScriptCore/corpse/CorpseRegion.h:
+* Source/JavaScriptCore/corpse/CorpseSnapshot.cpp:
+(JSC::Corpse::takeSnapshot):
+(JSC::Corpse::Snapshot::Snapshot):
+(JSC::Corpse::Snapshot::~Snapshot): Deleted.
+* Source/JavaScriptCore/corpse/CorpseSnapshot.h:
+(JSC::Corpse::Snapshot::isValid const):
+(JSC::Corpse::Snapshot::corpsePort const):
+* Source/JavaScriptCore/corpse/CorpseSymbol.cpp:
+(JSC::Corpse::Symbol::reportFailure const):
+(JSC::Corpse::Symbol::resolveInImage):
+(JSC::Corpse::Symbol::lookUpName):
+* Source/JavaScriptCore/corpse/CorpseSymbol.h:
+* Source/JavaScriptCore/corpse/CorpseThread.cpp:
+(JSC::Corpse::Thread::runStateDescription const):
+(JSC::Corpse::Thread::collect):
+* Source/JavaScriptCore/corpse/CorpseThread.h:
+* Source/JavaScriptCore/corpse/tests/CorpseAddressTest.cpp:
+(JSCToolsTest::testAddress):
+* Source/JavaScriptCore/corpse/tests/CorpseAddressTest.h: Removed.
+* Source/JavaScriptCore/corpse/tests/CorpseByteParserTest.cpp:
+* Source/JavaScriptCore/corpse/tests/CorpseByteParserTest.h: Removed.
+* Source/JavaScriptCore/corpse/tests/CorpseExportsTrieTest.cpp:
+(JSCToolsTest::testExportsTrie):
+(JSCToolsTest::fuzzExportsTrie):
+* Source/JavaScriptCore/corpse/tests/CorpseExportsTrieTest.h: Removed.
+* Source/JavaScriptCore/corpse/tests/CorpseMemoryTest.cpp:
+(JSCToolsTest::testMemory):
+* Source/JavaScriptCore/corpse/tests/CorpseMemoryTest.h: Removed.
+* Source/JavaScriptCore/corpse/tests/CorpseProcessTest.cpp:
+(JSCToolsTest::testProcess):
+* Source/JavaScriptCore/corpse/tests/CorpseProcessTest.h: Removed.
+* Source/JavaScriptCore/corpse/tests/CorpseRegionTest.cpp:
+(JSCToolsTest::testRegion):
+* Source/JavaScriptCore/corpse/tests/CorpseRegionTest.h: Removed.
+* Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.cpp:
+(JSCToolsTest::testSnapshot):
+* Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.h: Removed.
+* Source/JavaScriptCore/corpse/tests/CorpseSymbolTest.cpp:
+(JSCToolsTest::testSymbol):
+* Source/JavaScriptCore/corpse/tests/CorpseSymbolTest.h: Removed.
+* Source/JavaScriptCore/corpse/tests/CorpseThreadTest.cpp:
+(JSCToolsTest::testThreads):
+* Source/JavaScriptCore/corpse/tests/CorpseThreadTest.h: Removed.
+* Source/JavaScriptCore/corpse/tests/CorpseVMTest.cpp: Added.
+(JSCToolsTest::testVM):
+* Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.cpp:
+(JSCToolsTest::linuxSkip):
+(JSCToolsTest::parkThread):
+(JSCToolsTest::executableBase):
+(JSCToolsTest::runCorpseTarget):
+(JSCToolsTest::takeSnapshot):
+(JSCToolsTest::spawnAndAnalyze):
+(JSCToolsTest::analyzeInAndOutOfProcess):
+* Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h:
+* Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp:
+(main):
+* Source/JavaScriptCore/mya/mya.cpp:
+(Mya::Shell::listThreads):
+(Mya::Shell::handlePrint):
+(main):
+* Source/JavaScriptCore/shell/CMakeLists.txt:
+* Source/cmake/WebKitFeatures.cmake:
+---
+ Source/JavaScriptCore/CMakeLists.txt          |   1 +
+ .../JavaScriptCore.xcodeproj/project.pbxproj  |  26 +--
+ Source/JavaScriptCore/corpse/CorpseAddress.h  |  21 +-
+ .../corpse/CorpseByteParser.cpp               |   1 +
+ .../JavaScriptCore/corpse/CorpseByteParser.h  |   3 +
+ Source/JavaScriptCore/corpse/CorpseClient.cpp |   1 +
+ Source/JavaScriptCore/corpse/CorpseClient.h   |   2 +
+ Source/JavaScriptCore/corpse/CorpseError.h    |   2 +
+ .../corpse/CorpseExportsTrie.cpp              |   4 +-
+ .../JavaScriptCore/corpse/CorpseExportsTrie.h |   6 +-
+ .../JavaScriptCore/corpse/CorpseMachVMSPI.h   |   8 +-
+ Source/JavaScriptCore/corpse/CorpseMemory.cpp |  76 ++++++--
+ Source/JavaScriptCore/corpse/CorpseMemory.h   |  11 +-
+ .../JavaScriptCore/corpse/CorpseMemoryPtr.h   |   7 +-
+ .../JavaScriptCore/corpse/CorpseMemorySpan.h  |   7 +-
+ Source/JavaScriptCore/corpse/CorpsePlatform.h | 103 ++++++++++
+ .../JavaScriptCore/corpse/CorpseProcess.cpp   |  60 +++++-
+ Source/JavaScriptCore/corpse/CorpseProcess.h  |  16 +-
+ Source/JavaScriptCore/corpse/CorpseRegion.cpp |  15 +-
+ Source/JavaScriptCore/corpse/CorpseRegion.h   |   5 +-
+ .../JavaScriptCore/corpse/CorpseSnapshot.cpp  |  88 +++++----
+ Source/JavaScriptCore/corpse/CorpseSnapshot.h |   9 +-
+ Source/JavaScriptCore/corpse/CorpseSymbol.cpp |  20 +-
+ Source/JavaScriptCore/corpse/CorpseSymbol.h   |   8 +-
+ Source/JavaScriptCore/corpse/CorpseThread.cpp |  13 ++
+ Source/JavaScriptCore/corpse/CorpseThread.h   |   3 +-
+ .../corpse/tests/CorpseAddressTest.cpp        |  43 ++---
+ .../corpse/tests/CorpseAddressTest.h          |  36 ----
+ .../corpse/tests/CorpseByteParserTest.cpp     |   1 -
+ .../corpse/tests/CorpseByteParserTest.h       |  36 ----
+ .../corpse/tests/CorpseExportsTrieTest.cpp    |  30 ++-
+ .../corpse/tests/CorpseExportsTrieTest.h      |  43 -----
+ .../corpse/tests/CorpseMemoryTest.cpp         |  22 ++-
+ .../corpse/tests/CorpseMemoryTest.h           |  39 ----
+ .../corpse/tests/CorpseProcessTest.cpp        |  15 +-
+ .../corpse/tests/CorpseProcessTest.h          |  36 ----
+ .../corpse/tests/CorpseRegionTest.cpp         |  32 ++--
+ .../corpse/tests/CorpseRegionTest.h           |  39 ----
+ .../corpse/tests/CorpseSnapshotTest.cpp       |  19 +-
+ .../corpse/tests/CorpseSnapshotTest.h         |  39 ----
+ .../corpse/tests/CorpseSymbolTest.cpp         |  16 +-
+ .../corpse/tests/CorpseSymbolTest.h           |  36 ----
+ .../corpse/tests/CorpseThreadTest.cpp         |   3 +-
+ .../corpse/tests/CorpseThreadTest.h           |  39 ----
+ .../corpse/tests/CorpseVMTest.cpp             |  95 +++++++++
+ .../corpse/tests/LibJSCToolsTestUtilities.cpp | 180 +++++++++++++++++-
+ .../corpse/tests/LibJSCToolsTestUtilities.h   |  47 ++++-
+ .../corpse/tests/testLibJSCTools.cpp          |  45 +++--
+ Source/JavaScriptCore/mya/mya.cpp             |  25 +--
+ Source/JavaScriptCore/shell/CMakeLists.txt    |   1 +
+ Source/cmake/WebKitFeatures.cmake             |   2 +-
+ 51 files changed, 866 insertions(+), 569 deletions(-)
+ create mode 100644 Source/JavaScriptCore/corpse/CorpsePlatform.h
+ delete mode 100644 Source/JavaScriptCore/corpse/tests/CorpseAddressTest.h
+ delete mode 100644 Source/JavaScriptCore/corpse/tests/CorpseByteParserTest.h
+ delete mode 100644 Source/JavaScriptCore/corpse/tests/CorpseExportsTrieTest.h
+ delete mode 100644 Source/JavaScriptCore/corpse/tests/CorpseMemoryTest.h
+ delete mode 100644 Source/JavaScriptCore/corpse/tests/CorpseProcessTest.h
+ delete mode 100644 Source/JavaScriptCore/corpse/tests/CorpseRegionTest.h
+ delete mode 100644 Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.h
+ delete mode 100644 Source/JavaScriptCore/corpse/tests/CorpseSymbolTest.h
+ delete mode 100644 Source/JavaScriptCore/corpse/tests/CorpseThreadTest.h
+ create mode 100644 Source/JavaScriptCore/corpse/tests/CorpseVMTest.cpp
+
+diff --git a/Source/JavaScriptCore/CMakeLists.txt b/Source/JavaScriptCore/CMakeLists.txt
+index 31280592b8db..647d37fdd985 100644
+--- a/Source/JavaScriptCore/CMakeLists.txt
++++ b/Source/JavaScriptCore/CMakeLists.txt
+@@ -1648,6 +1648,7 @@ if (ENABLE_MYA)
+         corpse/CorpseMemory.h
+         corpse/CorpseMemoryPtr.h
+         corpse/CorpseMemorySpan.h
++        corpse/CorpsePlatform.h
+         corpse/CorpseProcess.h
+         corpse/CorpseRegion.h
+         corpse/CorpseSnapshot.h
+diff --git a/Source/JavaScriptCore/JavaScriptCore.xcodeproj/project.pbxproj b/Source/JavaScriptCore/JavaScriptCore.xcodeproj/project.pbxproj
+index d670f59e99ba..a9f65468bab0 100644
+--- a/Source/JavaScriptCore/JavaScriptCore.xcodeproj/project.pbxproj
++++ b/Source/JavaScriptCore/JavaScriptCore.xcodeproj/project.pbxproj
+@@ -1861,6 +1861,7 @@
+ 		7E83C40D17D785F3003DC41B /* CorpseSnapshotTest.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 7E83C40617D785F3003DC41B /* CorpseSnapshotTest.cpp */; };
+ 		7E83C40E17D785F3003DC41B /* CorpseSymbolTest.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 7E83C40817D785F3003DC41B /* CorpseSymbolTest.cpp */; };
+ 		7E83C40A17D785F3003DC41B /* testLibJSCTools.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 7E83C40017D785F3003DC41B /* testLibJSCTools.cpp */; };
++		1AB0DEAD00000006000D0001 /* CorpseVMTest.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000007000D0001 /* CorpseVMTest.cpp */; };
+ 		7E83C43717D785F3003DC41B /* CorpseExportsTrie.h in Headers */ = {isa = PBXBuildFile; fileRef = 7E83C43517D785F3003DC41B /* CorpseExportsTrie.h */; settings = {ATTRIBUTES = (Private, ); }; };
+ 		56C6C2B7EBDCC63B6ECEA9AD /* CorpseThread.h in Headers */ = {isa = PBXBuildFile; fileRef = 211E3D6CA97F31CEB385A75A /* CorpseThread.h */; settings = {ATTRIBUTES = (Private, ); }; };
+ 		EF648B9EEAF54C44048B416A /* CorpseThread.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 960BD2B783EAEBE3233F91BF /* CorpseThread.cpp */; };
+@@ -1870,6 +1871,7 @@
+ 		4E5F60718293A4B5C6D7E8F9 /* CorpseMemorySpan.h in Headers */ = {isa = PBXBuildFile; fileRef = 3D4E5F60718293A4B5C6D7E8 /* CorpseMemorySpan.h */; settings = {ATTRIBUTES = (Private, ); }; };
+ 		5601486802533982ACC870BE /* CorpseSymbol.h in Headers */ = {isa = PBXBuildFile; fileRef = 8F1FA0900D09DF06EE63F7D2 /* CorpseSymbol.h */; settings = {ATTRIBUTES = (Private, ); }; };
+ 		377C8C2416AE3DF90650C0E9 /* CorpseSymbol.cpp in Sources */ = {isa = PBXBuildFile; fileRef = E8D1735B28066A3B1D756ECC /* CorpseSymbol.cpp */; };
++		1AB0DEAD00000018000D0001 /* CorpsePlatform.h in Headers */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000019000D0001 /* CorpsePlatform.h */; settings = {ATTRIBUTES = (Private, ); }; };
+ 		BC18C3E60E16F5CD00B34460 /* ArrayConstructor.h in Headers */ = {isa = PBXBuildFile; fileRef = BC7952070E15E8A800A898AB /* ArrayConstructor.h */; settings = {ATTRIBUTES = (Private, ); }; };
+ 		BC18C3E70E16F5CD00B34460 /* ArrayPrototype.h in Headers */ = {isa = PBXBuildFile; fileRef = F692A84E0255597D01FF60F7 /* ArrayPrototype.h */; settings = {ATTRIBUTES = (Private, ); }; };
+ 		BC18C3EC0E16F5CD00B34460 /* BooleanObject.h in Headers */ = {isa = PBXBuildFile; fileRef = 704FD35305697E6D003DBED9 /* BooleanObject.h */; settings = {ATTRIBUTES = (Private, ); }; };
+@@ -4097,6 +4099,7 @@
+ 		3D4E5F60718293A4B5C6D7E8 /* CorpseMemorySpan.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseMemorySpan.h; sourceTree = "<group>"; };
+ 		8F1FA0900D09DF06EE63F7D2 /* CorpseSymbol.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseSymbol.h; sourceTree = "<group>"; };
+ 		E8D1735B28066A3B1D756ECC /* CorpseSymbol.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseSymbol.cpp; sourceTree = "<group>"; };
++		1AB0DEAD00000019000D0001 /* CorpsePlatform.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpsePlatform.h; sourceTree = "<group>"; };
+ 		68BBF9CBD85C8635B2B8385F /* CorpseProcess.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseProcess.cpp; sourceTree = "<group>"; };
+ 		C8503B7E641A29DF5B0E3742 /* CorpseRegion.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseRegion.cpp; sourceTree = "<group>"; };
+ 		5E906BE4CC29012A83A8F299 /* CorpseSnapshot.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseSnapshot.cpp; sourceTree = "<group>"; };
+@@ -4516,26 +4519,18 @@
+ 		7E83C42217D785F3003DC41B /* CorpseByteParser.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseByteParser.h; sourceTree = "<group>"; };
+ 		7E83C42617D785F3003DC41B /* CorpseByteParserTest.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseByteParserTest.cpp; sourceTree = "<group>"; };
+ 		7E83C42917D785F3003DC41B /* CorpseAddressTest.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseAddressTest.cpp; sourceTree = "<group>"; };
+-		7E83C42A17D785F3003DC41B /* CorpseAddressTest.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseAddressTest.h; sourceTree = "<group>"; };
+ 		7E83C42C17D785F3003DC41B /* CorpseProcessTest.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseProcessTest.cpp; sourceTree = "<group>"; };
+-		7E83C42D17D785F3003DC41B /* CorpseProcessTest.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseProcessTest.h; sourceTree = "<group>"; };
+ 		7E83C42F17D785F3003DC41B /* CorpseRegionTest.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseRegionTest.cpp; sourceTree = "<group>"; };
+-		7E83C43017D785F3003DC41B /* CorpseRegionTest.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseRegionTest.h; sourceTree = "<group>"; };
+ 		6F708192A3B4C5D6E7F8091A /* CorpseMemoryTest.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseMemoryTest.cpp; sourceTree = "<group>"; };
+-		8192A3B4C5D6E7F8091A2B3C /* CorpseMemoryTest.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseMemoryTest.h; sourceTree = "<group>"; };
+ 		7E83C43217D785F3003DC41B /* CorpseThreadTest.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseThreadTest.cpp; sourceTree = "<group>"; };
+-		7E83C43317D785F3003DC41B /* CorpseThreadTest.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseThreadTest.h; sourceTree = "<group>"; };
+-		7E83C42517D785F3003DC41B /* CorpseByteParserTest.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseByteParserTest.h; sourceTree = "<group>"; };
+ 		7E83C40217D785F3003DC41B /* CorpseExportsTrieTest.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseExportsTrieTest.cpp; sourceTree = "<group>"; };
+-		7E83C40117D785F3003DC41B /* CorpseExportsTrieTest.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseExportsTrieTest.h; sourceTree = "<group>"; };
+ 		7E83C40417D785F3003DC41B /* LibJSCToolsTestUtilities.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = LibJSCToolsTestUtilities.cpp; sourceTree = "<group>"; };
+ 		7E83C40317D785F3003DC41B /* LibJSCToolsTestUtilities.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = LibJSCToolsTestUtilities.h; sourceTree = "<group>"; };
+ 		7E83C40617D785F3003DC41B /* CorpseSnapshotTest.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseSnapshotTest.cpp; sourceTree = "<group>"; };
+-		7E83C40517D785F3003DC41B /* CorpseSnapshotTest.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseSnapshotTest.h; sourceTree = "<group>"; };
+ 		7E83C40817D785F3003DC41B /* CorpseSymbolTest.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseSymbolTest.cpp; sourceTree = "<group>"; };
+-		7E83C40717D785F3003DC41B /* CorpseSymbolTest.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseSymbolTest.h; sourceTree = "<group>"; };
+ 		7E83C40017D785F3003DC41B /* testLibJSCTools.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = testLibJSCTools.cpp; sourceTree = "<group>"; };
+ 		7E83C40917D785F3003DC41B /* testLibJSCTools */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = testLibJSCTools; sourceTree = BUILT_PRODUCTS_DIR; };
++		1AB0DEAD00000007000D0001 /* CorpseVMTest.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseVMTest.cpp; sourceTree = "<group>"; };
+ 		44F93E0D2AE71F9F00FFA37C /* JavaScriptCoreFramework.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = JavaScriptCoreFramework.cpp; sourceTree = "<group>"; };
+ 		451539B812DC994500EF7AC4 /* Yarr.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = Yarr.h; path = yarr/Yarr.h; sourceTree = "<group>"; };
+ 		45E12D8806A49B0F00E9DF84 /* jsc.cpp */ = {isa = PBXFileReference; fileEncoding = 30; indentWidth = 4; lastKnownFileType = sourcecode.cpp.cpp; path = jsc.cpp; sourceTree = "<group>"; tabWidth = 4; };
+@@ -6959,23 +6954,15 @@
+ 			isa = PBXGroup;
+ 			children = (
+ 				7E83C42917D785F3003DC41B /* CorpseAddressTest.cpp */,
+-				7E83C42A17D785F3003DC41B /* CorpseAddressTest.h */,
+ 				7E83C42617D785F3003DC41B /* CorpseByteParserTest.cpp */,
+-				7E83C42517D785F3003DC41B /* CorpseByteParserTest.h */,
+ 				7E83C40217D785F3003DC41B /* CorpseExportsTrieTest.cpp */,
+-				7E83C40117D785F3003DC41B /* CorpseExportsTrieTest.h */,
+ 				6F708192A3B4C5D6E7F8091A /* CorpseMemoryTest.cpp */,
+-				8192A3B4C5D6E7F8091A2B3C /* CorpseMemoryTest.h */,
+ 				7E83C42C17D785F3003DC41B /* CorpseProcessTest.cpp */,
+-				7E83C42D17D785F3003DC41B /* CorpseProcessTest.h */,
+ 				7E83C42F17D785F3003DC41B /* CorpseRegionTest.cpp */,
+-				7E83C43017D785F3003DC41B /* CorpseRegionTest.h */,
+ 				7E83C40617D785F3003DC41B /* CorpseSnapshotTest.cpp */,
+-				7E83C40517D785F3003DC41B /* CorpseSnapshotTest.h */,
+ 				7E83C40817D785F3003DC41B /* CorpseSymbolTest.cpp */,
+-				7E83C40717D785F3003DC41B /* CorpseSymbolTest.h */,
+ 				7E83C43217D785F3003DC41B /* CorpseThreadTest.cpp */,
+-				7E83C43317D785F3003DC41B /* CorpseThreadTest.h */,
++				1AB0DEAD00000007000D0001 /* CorpseVMTest.cpp */,
+ 				7E83C40417D785F3003DC41B /* LibJSCToolsTestUtilities.cpp */,
+ 				7E83C40317D785F3003DC41B /* LibJSCToolsTestUtilities.h */,
+ 				7E83C40017D785F3003DC41B /* testLibJSCTools.cpp */,
+@@ -7001,6 +6988,7 @@
+ 				92A3B4C5D6E7F8091A2B3C4D /* CorpseMemory.h */,
+ 				1B2C3D4E5F60718293A4B5C6 /* CorpseMemoryPtr.h */,
+ 				3D4E5F60718293A4B5C6D7E8 /* CorpseMemorySpan.h */,
++				1AB0DEAD00000019000D0001 /* CorpsePlatform.h */,
+ 				68BBF9CBD85C8635B2B8385F /* CorpseProcess.cpp */,
+ 				55D0F2DD9CA70132D5104B34 /* CorpseProcess.h */,
+ 				C8503B7E641A29DF5B0E3742 /* CorpseRegion.cpp */,
+@@ -11731,6 +11719,7 @@
+ 				A3B4C5D6E7F8091A2B3C4D5E /* CorpseMemory.h in Headers */,
+ 				2C3D4E5F60718293A4B5C6D7 /* CorpseMemoryPtr.h in Headers */,
+ 				4E5F60718293A4B5C6D7E8F9 /* CorpseMemorySpan.h in Headers */,
++				1AB0DEAD00000018000D0001 /* CorpsePlatform.h in Headers */,
+ 				0D9C2E68ACFF010D91916993 /* CorpseProcess.h in Headers */,
+ 				3A7C1E5D9B0F4A2681C34D07 /* CorpseRegion.h in Headers */,
+ 				CA47D093D003440A28D15924 /* CorpseSnapshot.h in Headers */,
+@@ -14794,6 +14783,7 @@
+ 				7E83C40D17D785F3003DC41B /* CorpseSnapshotTest.cpp in Sources */,
+ 				7E83C40E17D785F3003DC41B /* CorpseSymbolTest.cpp in Sources */,
+ 				7E83C43417D785F3003DC41B /* CorpseThreadTest.cpp in Sources */,
++				1AB0DEAD00000006000D0001 /* CorpseVMTest.cpp in Sources */,
+ 				7E83C40C17D785F3003DC41B /* LibJSCToolsTestUtilities.cpp in Sources */,
+ 				7E83C40A17D785F3003DC41B /* testLibJSCTools.cpp in Sources */,
+ 			);
+diff --git a/Source/JavaScriptCore/corpse/CorpseAddress.h b/Source/JavaScriptCore/corpse/CorpseAddress.h
+index fb52905a87d2..86e5d9f04398 100644
+--- a/Source/JavaScriptCore/corpse/CorpseAddress.h
++++ b/Source/JavaScriptCore/corpse/CorpseAddress.h
+@@ -25,13 +25,14 @@
+ 
+ #pragma once
+ 
++#include <JavaScriptCore/CorpsePlatform.h>
++
+ #if ENABLE(MYA)
+ 
+ #include <bit>
+ #include <compare>
+ #include <cstddef>
+ #include <limits>
+-#include <mach/mach.h>
+ #include <stdint.h>
+ #include <wtf/HashFunctions.h>
+ #include <wtf/HashTraits.h>
+@@ -43,22 +44,28 @@
+ namespace JSC {
+ namespace Corpse {
+ 
++#if OS(DARWIN)
++using target_address_t = mach_vm_address_t;
++#else
++using target_address_t = uint64_t;
++#endif
++
+ // An address in the target corpse process. A corpse address can never be dereferenced
+ // by accident.
+ class Address {
+ public:
+     Address() = default;
+-    explicit Address(mach_vm_address_t value)
++    explicit constexpr Address(target_address_t value)
+         : m_value(value)
+     {
+     }
+ 
+     explicit Address(const void* pointer)
+-        : m_value(reinterpret_cast<mach_vm_address_t>(pointer))
++        : m_value(reinterpret_cast<target_address_t>(pointer))
+     {
+     }
+ 
+-    mach_vm_address_t toMachVMAddress() const { return m_value; }
++    target_address_t toTargetVMAddress() const { return m_value; }
+     explicit operator bool() const { return m_value; }
+     template<typename T> explicit operator T() const = delete;
+ 
+@@ -94,10 +101,10 @@ public:
+ 
+     uint64_t operator-(Address other) const { return m_value - other.m_value; }
+ 
+-    static constexpr Address deletedValue() { return Address(std::numeric_limits<mach_vm_address_t>::max()); }
++    static constexpr Address deletedValue() { return Address(std::numeric_limits<target_address_t>::max()); }
+ 
+ private:
+-    mach_vm_address_t m_value { 0 };
++    target_address_t m_value { 0 };
+ };
+ 
+ } // namespace Corpse
+@@ -107,7 +114,7 @@ namespace WTF {
+ 
+ template<> struct DefaultHash<JSC::Corpse::Address> {
+     using Address = JSC::Corpse::Address;
+-    static unsigned hash(Address address) { return intHash(address.toMachVMAddress()); }
++    static unsigned hash(Address address) { return intHash(address.toTargetVMAddress()); }
+     static bool equal(Address a, Address b) { return a == b; }
+     static constexpr bool safeToCompareToEmptyOrDeleted = true;
+ };
+diff --git a/Source/JavaScriptCore/corpse/CorpseByteParser.cpp b/Source/JavaScriptCore/corpse/CorpseByteParser.cpp
+index a7be6c7c5422..2b3c75f266b2 100644
+--- a/Source/JavaScriptCore/corpse/CorpseByteParser.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseByteParser.cpp
+@@ -1,5 +1,6 @@
+ /*
+  * Copyright (C) 2026 Apple Inc. All rights reserved.
++ * Copyright (C) 2026 Igalia S.L.
+  *
+  * Redistribution and use in source and binary forms, with or without
+  * modification, are permitted provided that the following conditions
+diff --git a/Source/JavaScriptCore/corpse/CorpseByteParser.h b/Source/JavaScriptCore/corpse/CorpseByteParser.h
+index 9e7419a0c87f..73ccc862dc00 100644
+--- a/Source/JavaScriptCore/corpse/CorpseByteParser.h
++++ b/Source/JavaScriptCore/corpse/CorpseByteParser.h
+@@ -1,5 +1,6 @@
+ /*
+  * Copyright (C) 2026 Apple Inc. All rights reserved.
++ * Copyright (C) 2026 Igalia S.L.
+  *
+  * Redistribution and use in source and binary forms, with or without
+  * modification, are permitted provided that the following conditions
+@@ -25,6 +26,8 @@
+ 
+ #pragma once
+ 
++#include <JavaScriptCore/CorpsePlatform.h>
++
+ #if ENABLE(MYA)
+ 
+ #include <optional>
+diff --git a/Source/JavaScriptCore/corpse/CorpseClient.cpp b/Source/JavaScriptCore/corpse/CorpseClient.cpp
+index 1df7cccc406d..9660e7312afe 100644
+--- a/Source/JavaScriptCore/corpse/CorpseClient.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseClient.cpp
+@@ -1,5 +1,6 @@
+ /*
+  * Copyright (C) 2026 Apple Inc. All rights reserved.
++ * Copyright (C) 2026 Igalia S.L.
+  *
+  * Redistribution and use in source and binary forms, with or without
+  * modification, are permitted provided that the following conditions
+diff --git a/Source/JavaScriptCore/corpse/CorpseClient.h b/Source/JavaScriptCore/corpse/CorpseClient.h
+index 89ccc7b46824..9106c22ea96a 100644
+--- a/Source/JavaScriptCore/corpse/CorpseClient.h
++++ b/Source/JavaScriptCore/corpse/CorpseClient.h
+@@ -25,6 +25,8 @@
+ 
+ #pragma once
+ 
++#include <JavaScriptCore/CorpsePlatform.h>
++
+ #if ENABLE(MYA)
+ 
+ #include <wtf/text/ASCIILiteral.h>
+diff --git a/Source/JavaScriptCore/corpse/CorpseError.h b/Source/JavaScriptCore/corpse/CorpseError.h
+index 69f93adb0340..3076b0bcdf67 100644
+--- a/Source/JavaScriptCore/corpse/CorpseError.h
++++ b/Source/JavaScriptCore/corpse/CorpseError.h
+@@ -25,6 +25,8 @@
+ 
+ #pragma once
+ 
++#include <JavaScriptCore/CorpsePlatform.h>
++
+ #if ENABLE(MYA)
+ 
+ #include <wtf/Assertions.h>
+diff --git a/Source/JavaScriptCore/corpse/CorpseExportsTrie.cpp b/Source/JavaScriptCore/corpse/CorpseExportsTrie.cpp
+index 76494c072a51..6eb7b6b82f13 100644
+--- a/Source/JavaScriptCore/corpse/CorpseExportsTrie.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseExportsTrie.cpp
+@@ -26,7 +26,7 @@
+ #include "config.h"
+ #include "CorpseExportsTrie.h"
+ 
+-#if ENABLE(MYA)
++#if ENABLE(MYA) && OS(DARWIN)
+ 
+ #include <mach-o/loader.h>
+ #include <optional>
+@@ -141,4 +141,4 @@ std::expected<ExportsTrie::Export, ExportsTrie::Failure> ExportsTrie::lookUp(std
+ } // namespace Corpse
+ } // namespace JSC
+ 
+-#endif // ENABLE(MYA)
++#endif // ENABLE(MYA) && OS(DARWIN)
+diff --git a/Source/JavaScriptCore/corpse/CorpseExportsTrie.h b/Source/JavaScriptCore/corpse/CorpseExportsTrie.h
+index 0ea898aa27d3..a216ea60bee9 100644
+--- a/Source/JavaScriptCore/corpse/CorpseExportsTrie.h
++++ b/Source/JavaScriptCore/corpse/CorpseExportsTrie.h
+@@ -25,7 +25,9 @@
+ 
+ #pragma once
+ 
+-#if ENABLE(MYA)
++#include <JavaScriptCore/CorpsePlatform.h>
++
++#if ENABLE(MYA) && OS(DARWIN)
+ 
+ #include <JavaScriptCore/CorpseByteParser.h>
+ #include <expected>
+@@ -66,4 +68,4 @@ public:
+ } // namespace Corpse
+ } // namespace JSC
+ 
+-#endif // ENABLE(MYA)
++#endif // ENABLE(MYA) && OS(DARWIN)
+diff --git a/Source/JavaScriptCore/corpse/CorpseMachVMSPI.h b/Source/JavaScriptCore/corpse/CorpseMachVMSPI.h
+index 4c3befb11d86..bcc53b7dc4dd 100644
+--- a/Source/JavaScriptCore/corpse/CorpseMachVMSPI.h
++++ b/Source/JavaScriptCore/corpse/CorpseMachVMSPI.h
+@@ -29,12 +29,14 @@
+ // here so that what libJavaScriptCoreTools adds stays separate and distinct from
+ // wtf/spi/cocoa/MachVMSPI.h.
+ 
++#include <wtf/Platform.h>
++
++#if ENABLE(MYA) && OS(DARWIN)
++
+ DECLARE_SYSTEM_HEADER
+ 
+ #include <wtf/spi/cocoa/MachVMSPI.h>
+ 
+-#if ENABLE(MYA)
+-
+ WTF_EXTERN_C_BEGIN
+ 
+ kern_return_t mach_vm_remap_new(vm_map_t targetTask, mach_vm_address_t*, mach_vm_size_t, mach_vm_offset_t mask, int flags,
+@@ -42,4 +44,4 @@ kern_return_t mach_vm_remap_new(vm_map_t targetTask, mach_vm_address_t*, mach_vm
+ 
+ WTF_EXTERN_C_END
+ 
+-#endif // ENABLE(MYA)
++#endif // ENABLE(MYA) && OS(DARWIN)
+diff --git a/Source/JavaScriptCore/corpse/CorpseMemory.cpp b/Source/JavaScriptCore/corpse/CorpseMemory.cpp
+index 116888294b55..7e473ed4c8d5 100644
+--- a/Source/JavaScriptCore/corpse/CorpseMemory.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseMemory.cpp
+@@ -28,10 +28,16 @@
+ 
+ #if ENABLE(MYA)
+ 
++#if OS(DARWIN)
+ #include "CorpseMachVMSPI.h"
+-
+-#include <limits>
+ #include <mach/mach.h>
++#else
++#include <errno.h>
++#include <sys/mman.h>
++#include <sys/uio.h>
++#include <wtf/PageBlock.h>
++#endif
++#include <limits>
+ #include <wtf/DataLog.h>
+ #include <wtf/HexNumber.h>
+ #include <wtf/StdLibExtras.h>
+@@ -44,6 +50,8 @@ namespace Corpse {
+ 
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(Memory::Region);
+ 
++#if OS(DARWIN)
++
+ Memory::MapResult Memory::Region::create(Memory& memory, Address remoteBase, size_t pageCount, size_t offset)
+ {
+     mach_vm_address_t target = 0;
+@@ -52,7 +60,7 @@ Memory::MapResult Memory::Region::create(Memory& memory, Address remoteBase, siz
+     vm_prot_t maximumProtection = VM_PROT_READ;
+     boolean_t copyTheMemory = false; // i.e. share the corpse's pages instead of copying into new pages for this process.
+     kern_return_t kr = mach_vm_remap_new(mach_task_self(), &target, pageCount * pageSize(), 0, VM_FLAGS_ANYWHERE,
+-        memory.m_corpsePort, remoteBase.toMachVMAddress(), copyTheMemory, &currentProtection, &maximumProtection, VM_INHERIT_NONE);
++        memory.m_corpsePort, remoteBase.toTargetVMAddress(), copyTheMemory, &currentProtection, &maximumProtection, VM_INHERIT_NONE);
+ 
+     if (kr != KERN_SUCCESS) {
+         Error error;
+@@ -78,6 +86,42 @@ Memory::MapResult Memory::Region::create(Memory& memory, Address remoteBase, siz
+     return MapResult { WTF::move(region), localBase + offset };
+ }
+ 
++Memory::Region::~Region()
++{
++    auto localBase = reinterpret_cast<mach_vm_address_t>(m_localBase);
++    mach_vm_deallocate(mach_task_self(), localBase, m_pageCount * pageSize());
++}
++
++#else
++
++Memory::MapResult Memory::Region::create(Memory& memory, Address remoteBase, size_t pageCount, size_t offset)
++{
++    size_t size = pageCount * pageSize();
++    void* target = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++    if (target == MAP_FAILED)
++        return MapResult { .error = Error::OutOfAddressSpace, .kernResult = errno };
++
++    iovec local { target, size };
++    iovec remote { reinterpret_cast<void*>(remoteBase.toTargetVMAddress()), size };
++    ssize_t copied = process_vm_readv(memory.m_corpsePort, &local, 1, &remote, 1, 0);
++    if (copied != static_cast<ssize_t>(size)) {
++        KernelResult result = copied < 0 ? errno : EFAULT;
++        munmap(target, size);
++        return MapResult { .error = Error::Unknown, .kernResult = result };
++    }
++
++    auto* localBase = static_cast<const uint8_t*>(target);
++    RefPtr<Region> region = adoptRef(new Region(memory, remoteBase, pageCount, localBase));
++    return MapResult { WTF::move(region), localBase + offset };
++}
++
++Memory::Region::~Region()
++{
++    munmap(const_cast<uint8_t*>(m_localBase), m_pageCount * pageSize());
++}
++
++#endif // OS(DARWIN)
++
+ Memory::Region::Region(Memory& memory, Address remoteBase, size_t pageCount, const uint8_t* localBase)
+     : m_memory(memory)
+     , m_remoteBase(remoteBase)
+@@ -86,12 +130,6 @@ Memory::Region::Region(Memory& memory, Address remoteBase, size_t pageCount, con
+ {
+ }
+ 
+-Memory::Region::~Region()
+-{
+-    auto localBase = reinterpret_cast<mach_vm_address_t>(m_localBase);
+-    mach_vm_deallocate(mach_task_self(), localBase, m_pageCount * pageSize());
+-}
+-
+ void Memory::Region::deref()
+ {
+     RELEASE_ASSERT(m_refCount);
+@@ -114,10 +152,14 @@ void Memory::Region::deref()
+ 
+ size_t Memory::pageSize()
+ {
++#if OS(DARWIN)
+     return vm_kernel_page_size;
++#else
++    return WTF::pageSize();
++#endif
+ }
+ 
+-Memory::Memory(mach_port_t corpsePort)
++Memory::Memory(TaskHandle corpsePort)
+     : m_corpsePort(corpsePort)
+ {
+     // Placed here so we can assert this invariant only once on construction.
+@@ -138,20 +180,20 @@ Memory::MapResult Memory::map(Address objAddress, size_t objSizeInBytes)
+     if (!objSizeInBytes)
+         return MapResult { .error = Error::InvalidRequest };
+ 
+-    mach_vm_address_t objBase = objAddress.toMachVMAddress();
+-    mach_vm_address_t objEnd = objBase + objSizeInBytes;
++    target_address_t objBase = objAddress.toTargetVMAddress();
++    target_address_t objEnd = objBase + objSizeInBytes;
+     if (objEnd < objBase)
+         return MapResult { .error = Error::InvalidRequest }; // objEnd overflows.
+ 
+     size_t page = pageSize();
+-    mach_vm_address_t pageMask = static_cast<mach_vm_address_t>(page) - 1;
++    target_address_t pageMask = static_cast<target_address_t>(page) - 1;
+ 
+-    if (objEnd > std::numeric_limits<mach_vm_address_t>::max() - pageMask)
++    if (objEnd > std::numeric_limits<target_address_t>::max() - pageMask)
+         return MapResult { .error = Error::InvalidRequest };
+ 
+     // Compute Region that object resides in.
+-    mach_vm_address_t regionBase = objBase & ~pageMask;
+-    mach_vm_address_t regionEnd = (objEnd + pageMask) & ~pageMask;
++    target_address_t regionBase = objBase & ~pageMask;
++    target_address_t regionEnd = (objEnd + pageMask) & ~pageMask;
+ 
+     // Reject "Page 0". A null Address is reserved as the empty value in the m_regions map.
+     if (!regionBase)
+@@ -230,7 +272,7 @@ void Memory::dump(const char* indent) const
+     dataLogLn(indent, "m_regions: ", regionCount(), " region(s) at ", m_regions.size(), " base(s), ",
+         mappedPageCount(), " page(s) mapped");
+     for (auto& entry : m_regions) {
+-        dataLog(indent, "  corpse ", RawHex(entry.key.toMachVMAddress()), " ->");
++        dataLog(indent, "  corpse ", RawHex(entry.key.toTargetVMAddress()), " ->");
+         for (auto& region : entry.value) {
+             const char* baseNote = region->remoteBase() == entry.key ? "" : " <base disagrees with its key>";
+             dataLog(" [", region->pageCount(), " page(s), local ",
+diff --git a/Source/JavaScriptCore/corpse/CorpseMemory.h b/Source/JavaScriptCore/corpse/CorpseMemory.h
+index ffc79741b629..0f4e5921f2a9 100644
+--- a/Source/JavaScriptCore/corpse/CorpseMemory.h
++++ b/Source/JavaScriptCore/corpse/CorpseMemory.h
+@@ -25,10 +25,11 @@
+ 
+ #pragma once
+ 
++#include <JavaScriptCore/CorpsePlatform.h>
++
+ #if ENABLE(MYA)
+ 
+ #include <JavaScriptCore/CorpseAddress.h>
+-#include <mach/mach.h>
+ #include <stdint.h>
+ #include <wtf/ForbidHeapAllocation.h>
+ #include <wtf/HashMap.h>
+@@ -87,7 +88,7 @@ public:
+     template<typename T> class Ptr; // See CorpseMemoryPtr.h.
+     template<typename T> class Span; // See CorpseMemorySpan.h.
+ 
+-    explicit Memory(mach_port_t corpsePort);
++    explicit Memory(TaskHandle corpsePort);
+     ~Memory();
+ 
+     Memory(const Memory&) = delete;
+@@ -131,10 +132,10 @@ private:
+     };
+ 
+     struct MapResult {
+-        RefPtr<Region> region;
++        RefPtr<Region> region { };
+         const uint8_t* data { nullptr };
+         Error error { Error::None };
+-        kern_return_t kernResult { KERN_SUCCESS };
++        KernelResult kernResult { kernelSuccess };
+     };
+ 
+     MapResult map(Address, size_t bytes);
+@@ -142,7 +143,7 @@ private:
+     void addRegion(RefPtr<Region>);
+     void removeRegion(Region*);
+ 
+-    mach_port_t m_corpsePort { MACH_PORT_NULL };
++    TaskHandle m_corpsePort { invalidTaskHandle };
+ 
+     // The Address key must be page aligned. The value is a Vector because there
+     // can be more than one Region of different sizes which start at the same page
+diff --git a/Source/JavaScriptCore/corpse/CorpseMemoryPtr.h b/Source/JavaScriptCore/corpse/CorpseMemoryPtr.h
+index 067eb3aef049..a175e302d53b 100644
+--- a/Source/JavaScriptCore/corpse/CorpseMemoryPtr.h
++++ b/Source/JavaScriptCore/corpse/CorpseMemoryPtr.h
+@@ -25,10 +25,11 @@
+ 
+ #pragma once
+ 
++#include <JavaScriptCore/CorpsePlatform.h>
++
+ #if ENABLE(MYA)
+ 
+ #include <JavaScriptCore/CorpseMemory.h>
+-#include <mach/mach.h>
+ #include <stdint.h>
+ #include <type_traits>
+ #include <wtf/Assertions.h>
+@@ -72,7 +73,7 @@ public:
+     explicit operator bool() const { return isValid(); }
+ 
+     Error error() const { return m_error; }
+-    kern_return_t kernResult() const { return m_kernResult; }
++    KernelResult kernResult() const { return m_kernResult; }
+ 
+     Address address() const { return m_address; }
+     size_t sizeInBytes() const { return isValid() ? sizeof(T) : 0; }
+@@ -107,7 +108,7 @@ private:
+     RefPtr<Region> m_region;
+ 
+     Error m_error { Error::None };
+-    kern_return_t m_kernResult { KERN_SUCCESS };
++    KernelResult m_kernResult { kernelSuccess };
+ };
+ 
+ template<typename T>
+diff --git a/Source/JavaScriptCore/corpse/CorpseMemorySpan.h b/Source/JavaScriptCore/corpse/CorpseMemorySpan.h
+index a334cefc0f56..d7b87cc4f808 100644
+--- a/Source/JavaScriptCore/corpse/CorpseMemorySpan.h
++++ b/Source/JavaScriptCore/corpse/CorpseMemorySpan.h
+@@ -25,12 +25,13 @@
+ 
+ #pragma once
+ 
++#include <JavaScriptCore/CorpsePlatform.h>
++
+ #if ENABLE(MYA)
+ 
+ #include <JavaScriptCore/CorpseMemory.h>
+ #include <cstddef>
+ #include <limits>
+-#include <mach/mach.h>
+ #include <span>
+ #include <stdint.h>
+ #include <type_traits>
+@@ -77,7 +78,7 @@ public:
+     explicit operator bool() const { return isValid(); }
+ 
+     Error error() const { return m_error; }
+-    kern_return_t kernResult() const { return m_kernResult; }
++    KernelResult kernResult() const { return m_kernResult; }
+ 
+     Address address() const { return m_address; }
+ 
+@@ -151,7 +152,7 @@ private:
+     RefPtr<Region> m_region;
+ 
+     Error m_error { Error::None };
+-    kern_return_t m_kernResult { KERN_SUCCESS };
++    KernelResult m_kernResult { kernelSuccess };
+ };
+ 
+ template<typename T>
+diff --git a/Source/JavaScriptCore/corpse/CorpsePlatform.h b/Source/JavaScriptCore/corpse/CorpsePlatform.h
+new file mode 100644
+index 000000000000..0afea4ab8f96
+--- /dev/null
++++ b/Source/JavaScriptCore/corpse/CorpsePlatform.h
+@@ -0,0 +1,103 @@
++/*
++ * Copyright (C) 2026 Apple Inc. All rights reserved.
++ * Copyright (C) 2026 Igalia S.L.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#pragma once
++
++#include <wtf/Platform.h>
++
++#if ENABLE(MYA)
++
++#include <utility>
++#if OS(DARWIN)
++#include <mach/mach.h>
++#endif
++
++namespace JSC {
++namespace Corpse {
++
++#if OS(DARWIN)
++using TaskHandle = mach_port_t;
++constexpr TaskHandle invalidTaskHandle = MACH_PORT_NULL;
++inline bool isValidTaskHandle(TaskHandle handle) { return MACH_PORT_VALID(handle); }
++
++using KernelResult = kern_return_t;
++constexpr KernelResult kernelSuccess = KERN_SUCCESS;
++#else
++using TaskHandle = int;
++constexpr TaskHandle invalidTaskHandle = -1;
++inline bool isValidTaskHandle(TaskHandle handle) { return handle >= 0; }
++
++using KernelResult = int; // An errno.
++constexpr KernelResult kernelSuccess = 0;
++#endif
++
++// Owns a task handle. On Darwin that is a send right, given back on destruction.
++class OwnedTaskHandle {
++public:
++    static OwnedTaskHandle adopt(TaskHandle handle) { return OwnedTaskHandle { handle }; }
++
++    OwnedTaskHandle() = default;
++    OwnedTaskHandle(OwnedTaskHandle&& other)
++        : m_handle(std::exchange(other.m_handle, invalidTaskHandle))
++    {
++    }
++    OwnedTaskHandle& operator=(OwnedTaskHandle&& other)
++    {
++        if (this != &other) {
++            release();
++            m_handle = std::exchange(other.m_handle, invalidTaskHandle);
++        }
++        return *this;
++    }
++    ~OwnedTaskHandle() { release(); }
++
++    OwnedTaskHandle(const OwnedTaskHandle&) = delete;
++    OwnedTaskHandle& operator=(const OwnedTaskHandle&) = delete;
++
++private:
++    explicit OwnedTaskHandle(TaskHandle handle)
++        : m_handle(handle)
++    {
++    }
++
++    void release()
++    {
++#if OS(DARWIN)
++        if (isValidTaskHandle(m_handle))
++            mach_port_deallocate(mach_task_self(), m_handle);
++#endif
++        m_handle = invalidTaskHandle;
++    }
++
++    friend TaskHandle taskHandle(const OwnedTaskHandle& owned) { return owned.m_handle; }
++
++    TaskHandle m_handle { invalidTaskHandle };
++};
++
++} // namespace Corpse
++} // namespace JSC
++
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseProcess.cpp b/Source/JavaScriptCore/corpse/CorpseProcess.cpp
+index 22eb771541a9..c5e3ec36c7a4 100644
+--- a/Source/JavaScriptCore/corpse/CorpseProcess.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseProcess.cpp
+@@ -1,5 +1,6 @@
+ /*
+  * Copyright (C) 2026 Apple Inc. All rights reserved.
++ * Copyright (C) 2026 Igalia S.L.
+  *
+  * Redistribution and use in source and binary forms, with or without
+  * modification, are permitted provided that the following conditions
+@@ -29,20 +30,31 @@
+ #if ENABLE(MYA)
+ 
+ #include "CorpseError.h"
++#include <array>
++#include <span>
+ 
++#if OS(DARWIN)
+ #include <errno.h>
++#include <libproc.h>
+ #include <mach/mach.h>
+ #include <mach/mach_error.h>
+ #include <mach/mach_traps.h>
+ #include <signal.h>
+ #include <sys/proc.h>
+ #include <sys/sysctl.h>
++#else
++#include <limits.h>
++#include <unistd.h>
++#include <wtf/text/MakeString.h>
++#endif
+ 
+ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
+ 
+ namespace JSC {
+ namespace Corpse {
+ 
++#if OS(DARWIN)
++
+ // A task port name outlives the task it named: when the target exits, the right we
+ // hold becomes a dead name while the name itself is unchanged. MACH_PORT_VALID only
+ // looks at the name, so it keeps reporting the port as good. Asking the kernel which
+@@ -51,10 +63,10 @@ namespace Corpse {
+ // process that inherited the same pid.
+ bool Process::holdsLiveTask() const
+ {
+-    if (!MACH_PORT_VALID(m_taskPort))
++    if (!isAttached())
+         return false;
+     int pid = -1;
+-    return pid_for_task(m_taskPort, &pid) == KERN_SUCCESS && pid == m_pid;
++    return pid_for_task(taskPort(), &pid) == KERN_SUCCESS && pid == m_pid;
+ }
+ 
+ bool Process::isTranslated() const
+@@ -81,7 +93,7 @@ bool Process::attach()
+     mach_port_t taskPort = MACH_PORT_NULL;
+     kern_return_t kr = task_for_pid(mach_task_self(), m_pid, &taskPort);
+     if (kr == KERN_SUCCESS) {
+-        m_taskPort = taskPort;
++        m_taskPort = OwnedTaskHandle::adopt(taskPort);
+         return true;
+     }
+ 
+@@ -95,13 +107,47 @@ bool Process::attach()
+     return false;
+ }
+ 
+-void Process::detach()
++UTF8CString Process::executablePath() const
+ {
+-    if (MACH_PORT_VALID(m_taskPort))
+-        mach_port_deallocate(mach_task_self(), m_taskPort);
+-    m_taskPort = MACH_PORT_NULL;
++    std::array<char, PROC_PIDPATHINFO_MAXSIZE> path;
++    int length = proc_pidpath(m_pid, path.data(), path.size());
++    if (length <= 0)
++        return { };
++    return UTF8CString(byteCast<char8_t>(std::span { path }.first(length)));
+ }
+ 
++#else
++
++bool Process::holdsLiveTask() const
++{
++    return isAttached();
++}
++
++bool Process::isTranslated() const { return false; }
++
++// FIXME: Attach to processes other than this one.
++bool Process::attach()
++{
++    if (m_pid != getpid()) {
++        Error::report("Could not attach to PID %d: only this process can be attached to", static_cast<int>(m_pid));
++        return false;
++    }
++    m_taskPort = OwnedTaskHandle::adopt(m_pid);
++    return true;
++}
++
++UTF8CString Process::executablePath() const
++{
++    std::array<char, PATH_MAX> path;
++    ASCIICString link = makeString("/proc/"_s, m_pid, "/exe"_s).ascii();
++    ssize_t length = readlink(link.data(), path.data(), path.size());
++    if (length <= 0 || static_cast<size_t>(length) >= path.size())
++        return { };
++    return UTF8CString(byteCast<char8_t>(std::span { path }.first(length)));
++}
++
++#endif // OS(DARWIN)
++
+ } // namespace Corpse
+ } // namespace JSC
+ 
+diff --git a/Source/JavaScriptCore/corpse/CorpseProcess.h b/Source/JavaScriptCore/corpse/CorpseProcess.h
+index 7f190c5efcad..a5ad83886977 100644
+--- a/Source/JavaScriptCore/corpse/CorpseProcess.h
++++ b/Source/JavaScriptCore/corpse/CorpseProcess.h
+@@ -25,13 +25,15 @@
+ 
+ #pragma once
+ 
++#include <JavaScriptCore/CorpsePlatform.h>
++
+ #if ENABLE(MYA)
+ 
+-#include <mach/mach.h>
+ #include <sys/types.h>
+ #include <wtf/Assertions.h>
+ #include <wtf/Ref.h>
+ #include <wtf/RefCounted.h>
++#include <wtf/text/CString.h>
+ 
+ namespace JSC {
+ namespace Corpse {
+@@ -43,15 +45,15 @@ class Process final : public RefCounted<Process> {
+ public:
+     static Ref<Process> create(pid_t pid) { return adoptRef(*new Process(pid)); }
+ 
+-    ~Process() { detach(); }
+-
+     bool attach();
+-    void detach();
++    void detach() { m_taskPort = { }; }
+ 
+     pid_t pid() const { return m_pid; }
+-    mach_port_t taskPort() const { return m_taskPort; }
+ 
+-    bool isAttached() const { return MACH_PORT_VALID(m_taskPort); }
++    UTF8CString executablePath() const;
++    TaskHandle taskPort() const { return taskHandle(m_taskPort); }
++
++    bool isAttached() const { return isValidTaskHandle(taskPort()); }
+ 
+     // The target process may have terminated while we still hold the port.
+     bool holdsLiveTask() const;
+@@ -69,7 +71,7 @@ private:
+     }
+ 
+     pid_t m_pid;
+-    mach_port_t m_taskPort { MACH_PORT_NULL };
++    OwnedTaskHandle m_taskPort;
+ };
+ 
+ } // namespace Corpse
+diff --git a/Source/JavaScriptCore/corpse/CorpseRegion.cpp b/Source/JavaScriptCore/corpse/CorpseRegion.cpp
+index d53fb063cf00..c630f95ffcac 100644
+--- a/Source/JavaScriptCore/corpse/CorpseRegion.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseRegion.cpp
+@@ -1,5 +1,6 @@
+ /*
+  * Copyright (C) 2026 Apple Inc. All rights reserved.
++ * Copyright (C) 2026 Igalia S.L.
+  *
+  * Redistribution and use in source and binary forms, with or without
+  * modification, are permitted provided that the following conditions
+@@ -28,11 +29,15 @@
+ 
+ #if ENABLE(MYA)
+ 
++#if OS(DARWIN)
+ #include <mach/mach_vm.h>
++#endif
+ 
+ namespace JSC {
+ namespace Corpse {
+ 
++#if OS(DARWIN)
++
+ uint64_t Region::pageCount() const
+ {
+     return vm_kernel_page_size ? m_size / vm_kernel_page_size : 0;
+@@ -46,7 +51,7 @@ std::optional<Region> Region::findContaining(mach_port_t task, Address address)
+     mach_vm_size_t regionSize = 0;
+     vm_region_submap_info_data_64_t info;
+     for (natural_t depth = 0; ; ++depth) {
+-        regionAddress = address.toMachVMAddress();
++        regionAddress = address.toTargetVMAddress();
+         regionSize = 0;
+         natural_t depthLimit = depth; // We tell the kernel how deep we want to go. Kernel tells us how deep it can go.
+         mach_msg_type_number_t infoCount = VM_REGION_SUBMAP_INFO_COUNT_64;
+@@ -69,6 +74,14 @@ std::optional<Region> Region::findContaining(mach_port_t task, Address address)
+     return region;
+ }
+ 
++#else
++
++uint64_t Region::pageCount() const { return 0; }
++
++std::optional<Region> Region::findContaining(TaskHandle, Address) { return std::nullopt; }
++
++#endif // OS(DARWIN)
++
+ } // namespace Corpse
+ } // namespace JSC
+ 
+diff --git a/Source/JavaScriptCore/corpse/CorpseRegion.h b/Source/JavaScriptCore/corpse/CorpseRegion.h
+index 0115c7a5c307..cf0b78b9d8df 100644
+--- a/Source/JavaScriptCore/corpse/CorpseRegion.h
++++ b/Source/JavaScriptCore/corpse/CorpseRegion.h
+@@ -25,10 +25,11 @@
+ 
+ #pragma once
+ 
++#include <JavaScriptCore/CorpsePlatform.h>
++
+ #if ENABLE(MYA)
+ 
+ #include <JavaScriptCore/CorpseAddress.h>
+-#include <mach/mach.h>
+ #include <optional>
+ #include <stdint.h>
+ 
+@@ -39,7 +40,7 @@ namespace Corpse {
+ class Region {
+ public:
+     // The region containing `address`, or nullopt if not found in any region.
+-    static std::optional<Region> findContaining(mach_port_t task, Address);
++    static std::optional<Region> findContaining(TaskHandle, Address);
+ 
+     Address base() const { return m_base; }
+     size_t size() const { return m_size; }
+diff --git a/Source/JavaScriptCore/corpse/CorpseSnapshot.cpp b/Source/JavaScriptCore/corpse/CorpseSnapshot.cpp
+index acac5392a318..5236561ac360 100644
+--- a/Source/JavaScriptCore/corpse/CorpseSnapshot.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseSnapshot.cpp
+@@ -30,8 +30,10 @@
+ 
+ #include "CorpseError.h"
+ 
++#if OS(DARWIN)
+ #include <mach/mach.h>
+ #include <mach/mach_error.h>
++#endif
+ #include <wtf/TZoneMallocInlines.h>
+ 
+ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
+@@ -43,43 +45,6 @@ WTF_MAKE_TZONE_ALLOCATED_IMPL(Snapshot);
+ 
+ unsigned Snapshot::s_nextId = 1;
+ 
+-// Returns MACH_PORT_NULL if the snapshot could not be taken, having reported why.
+-static mach_port_t takeSnapshot(Process* process)
+-{
+-    if (!process || !process->isAttached()) {
+-        Error::report("Could not snapshot: No process attached");
+-        return MACH_PORT_NULL;
+-    }
+-
+-    mach_port_t corpsePort = MACH_PORT_NULL;
+-    kern_return_t kr = task_generate_corpse(process->taskPort(), &corpsePort);
+-    if (kr == KERN_SUCCESS)
+-        return corpsePort;
+-
+-    if (!process->holdsLiveTask()) {
+-        Error::report("Could not snapshot PID %d: the process has terminated",
+-            static_cast<int>(process->pid()));
+-    } else {
+-        Error::report("Could not snapshot PID %d: %s (0x%x)",
+-            static_cast<int>(process->pid()), mach_error_string(kr), kr);
+-    }
+-    return MACH_PORT_NULL;
+-}
+-
+-Snapshot::Snapshot(RefPtr<Process> process)
+-    : m_process(WTF::move(process))
+-    , m_corpsePort(takeSnapshot(m_process.get()))
+-    , m_id(s_nextId++)
+-    , m_memory(m_corpsePort)
+-{
+-}
+-
+-Snapshot::~Snapshot()
+-{
+-    if (isValid())
+-        mach_port_deallocate(mach_task_self(), m_corpsePort);
+-}
+-
+ const Vector<Thread>& Snapshot::threads()
+ {
+     if (!m_threads)
+@@ -99,6 +64,55 @@ Address Snapshot::symbol(const char* name)
+     return entry.iterator->value->address();
+ }
+ 
++#if OS(DARWIN)
++
++// Returns a null handle if the snapshot could not be taken, having reported why.
++static OwnedTaskHandle takeSnapshot(Process* process)
++{
++    if (!process || !process->isAttached()) {
++        Error::report("Could not snapshot: No process attached");
++        return { };
++    }
++
++    mach_port_t corpsePort = MACH_PORT_NULL;
++    kern_return_t kr = task_generate_corpse(process->taskPort(), &corpsePort);
++    if (kr == KERN_SUCCESS)
++        return OwnedTaskHandle::adopt(corpsePort);
++
++    if (!process->holdsLiveTask()) {
++        Error::report("Could not snapshot PID %d: the process has terminated",
++            static_cast<int>(process->pid()));
++    } else {
++        Error::report("Could not snapshot PID %d: %s (0x%x)",
++            static_cast<int>(process->pid()), mach_error_string(kr), kr);
++    }
++    return { };
++}
++
++#else
++
++// There is no corpse on Linux yet: the snapshot reads the live process.
++static OwnedTaskHandle takeSnapshot(Process* process)
++{
++    if (!process || !process->isAttached()) {
++        Error::report("Could not snapshot: No process attached");
++        return { };
++    }
++    return OwnedTaskHandle::adopt(process->taskPort());
++}
++
++#endif // OS(DARWIN)
++
++Snapshot::Snapshot(RefPtr<Process> process)
++    : m_process(WTF::move(process))
++    , m_corpsePort(takeSnapshot(m_process.get()))
++    , m_id(s_nextId++)
++    , m_memory(corpsePort())
++{
++}
++
++Snapshot::~Snapshot() = default;
++
+ } // namespace Corpse
+ } // namespace JSC
+ 
+diff --git a/Source/JavaScriptCore/corpse/CorpseSnapshot.h b/Source/JavaScriptCore/corpse/CorpseSnapshot.h
+index b69f6c117ffe..6ff18d6de5a6 100644
+--- a/Source/JavaScriptCore/corpse/CorpseSnapshot.h
++++ b/Source/JavaScriptCore/corpse/CorpseSnapshot.h
+@@ -25,6 +25,8 @@
+ 
+ #pragma once
+ 
++#include <JavaScriptCore/CorpsePlatform.h>
++
+ #if ENABLE(MYA)
+ 
+ #include <JavaScriptCore/CorpseAddress.h>
+@@ -32,7 +34,6 @@
+ #include <JavaScriptCore/CorpseProcess.h>
+ #include <JavaScriptCore/CorpseSymbol.h>
+ #include <JavaScriptCore/CorpseThread.h>
+-#include <mach/mach.h>
+ #include <memory>
+ #include <optional>
+ #include <utility>
+@@ -65,14 +66,14 @@ public:
+     Snapshot& operator=(const Snapshot&) = delete;
+     Snapshot(Snapshot&& other) = delete;
+ 
+-    bool isValid() const { return MACH_PORT_VALID(m_corpsePort); }
++    bool isValid() const { return isValidTaskHandle(corpsePort()); }
+ 
+     // A monotonically increasing identifier assigned at construction. IDs are
+     // never reused, so they stay stable as snapshots are added and removed.
+     unsigned id() const { return m_id; }
+ 
+     Process* process() const { return m_process.get(); }
+-    mach_port_t corpsePort() const { return m_corpsePort; }
++    TaskHandle corpsePort() const { return taskHandle(m_corpsePort); }
+ 
+     Memory& memory() LIFETIME_BOUND
+     {
+@@ -90,7 +91,7 @@ private:
+     static unsigned s_nextId;
+ 
+     RefPtr<Process> m_process;
+-    mach_port_t m_corpsePort { MACH_PORT_NULL };
++    OwnedTaskHandle m_corpsePort;
+     unsigned m_id;
+ 
+     std::optional<Vector<Thread>> m_threads;
+diff --git a/Source/JavaScriptCore/corpse/CorpseSymbol.cpp b/Source/JavaScriptCore/corpse/CorpseSymbol.cpp
+index 0d2caa9d25af..a611aec73458 100644
+--- a/Source/JavaScriptCore/corpse/CorpseSymbol.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseSymbol.cpp
+@@ -1,5 +1,6 @@
+ /*
+  * Copyright (C) 2026 Apple Inc. All rights reserved.
++ * Copyright (C) 2026 Igalia S.L.
+  *
+  * Redistribution and use in source and binary forms, with or without
+  * modification, are permitted provided that the following conditions
+@@ -32,10 +33,12 @@
+ #include "CorpseExportsTrie.h"
+ #include "CorpseSnapshot.h"
+ 
++#if OS(DARWIN)
+ #include <mach-o/dyld_images.h>
+ #include <mach-o/loader.h>
+ #include <mach/mach.h>
+ #include <mach/task_info.h>
++#endif
+ #include <optional>
+ #include <span>
+ #include <string.h>
+@@ -56,6 +59,8 @@ namespace Corpse {
+ 
+ WTF_MAKE_TZONE_ALLOCATED_IMPL(Symbol);
+ 
++#if OS(DARWIN)
++
+ // It is assumed that this corpse analysis library is built with the same SDK targeting
+ // the same OS that the corpse binary is built for. While the corpse gives us the data
+ // to inspect, it does not provide the format. Hence, we need to rely on the invariant
+@@ -357,18 +362,18 @@ void Symbol::reportFailure(const Snapshot& snapshot) const
+     }
+     if (!d.readAllImageInfos) {
+         Error::report("  could not read dyld_all_image_infos at 0x%llx",
+-            d.allImageInfosAddress.toMachVMAddress());
++            d.allImageInfosAddress.toTargetVMAddress());
+         return;
+     }
+ 
+     // A sane version says the struct read probably landed on real data, which is what
+     // makes the image count and array address below worth printing.
+     Error::report("  dyld_all_image_infos v%u at 0x%llx lists %u images at 0x%llx",
+-        d.version, d.allImageInfosAddress.toMachVMAddress(),
+-        d.images, d.imageArrayAddress.toMachVMAddress());
++        d.version, d.allImageInfosAddress.toTargetVMAddress(),
++        d.images, d.imageArrayAddress.toTargetVMAddress());
+     if (d.rawImageArrayAddress != d.imageArrayAddress) {
+         Error::report("  that address was ptrauth-signed as 0x%llx; the signature was stripped",
+-            d.rawImageArrayAddress.toMachVMAddress());
++            d.rawImageArrayAddress.toTargetVMAddress());
+     }
+     if (!d.imageArrayAddress || !d.images) {
+         Error::report("  that list is empty, so there was nothing to search");
+@@ -421,6 +426,13 @@ void Symbol::reportFailure(const Snapshot& snapshot) const
+ 
+ #endif // CORPSE_SYMBOL_LOOKUP_DIAGNOSTICS
+ 
++#else
++
++Address Symbol::resolveInImage(Memory&, Address, std::string_view) { return { }; }
++Address Symbol::lookUpName(Snapshot&) { return { }; }
++
++#endif // OS(DARWIN)
++
+ Symbol::Symbol(Snapshot& snapshot, const char* name)
+     : m_name(name ? name : "")
+ {
+diff --git a/Source/JavaScriptCore/corpse/CorpseSymbol.h b/Source/JavaScriptCore/corpse/CorpseSymbol.h
+index aec3fd6abce9..ad6cd49cd891 100644
+--- a/Source/JavaScriptCore/corpse/CorpseSymbol.h
++++ b/Source/JavaScriptCore/corpse/CorpseSymbol.h
+@@ -1,5 +1,6 @@
+ /*
+  * Copyright (C) 2026 Apple Inc. All rights reserved.
++ * Copyright (C) 2026 Igalia S.L.
+  *
+  * Redistribution and use in source and binary forms, with or without
+  * modification, are permitted provided that the following conditions
+@@ -25,10 +26,11 @@
+ 
+ #pragma once
+ 
++#include <JavaScriptCore/CorpsePlatform.h>
++
+ #if ENABLE(MYA)
+ 
+ #include <JavaScriptCore/CorpseAddress.h>
+-#include <mach/mach.h>
+ #include <stdint.h>
+ #include <string>
+ #include <string_view>
+@@ -67,7 +69,9 @@ public:
+ private:
+     Address lookUpName(Snapshot&);
+     Address resolveInImage(Memory&, Address loadAddress, std::string_view name);
++#if OS(DARWIN)
+     bool hasReadBudget(size_t length);
++#endif
+ 
+ #if CORPSE_SYMBOL_LOOKUP_DIAGNOSTICS
+     // How far a search got, so a failure can name the stage that fell short.
+@@ -104,8 +108,10 @@ private:
+     std::string m_name;
+     Address m_address;
+ 
++#if OS(DARWIN)
+     // What this lookup may still copy out of the corpse. Set when the search starts.
+     size_t m_readBudget { 0 };
++#endif
+ };
+ 
+ } // namespace Corpse
+diff --git a/Source/JavaScriptCore/corpse/CorpseThread.cpp b/Source/JavaScriptCore/corpse/CorpseThread.cpp
+index d09f7f250a94..a974cc416c94 100644
+--- a/Source/JavaScriptCore/corpse/CorpseThread.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseThread.cpp
+@@ -1,5 +1,6 @@
+ /*
+  * Copyright (C) 2026 Apple Inc. All rights reserved.
++ * Copyright (C) 2026 Igalia S.L.
+  *
+  * Redistribution and use in source and binary forms, with or without
+  * modification, are permitted provided that the following conditions
+@@ -33,12 +34,14 @@
+ #include "CorpseRegion.h"
+ #include "CorpseSnapshot.h"
+ 
++#if OS(DARWIN)
+ #include <mach/mach.h>
+ #include <mach/mach_error.h>
+ #include <mach/mach_vm.h>
+ #include <mach/thread_act.h>
+ #include <mach/thread_info.h>
+ #include <mach/thread_status.h>
++#endif
+ #include <optional>
+ 
+ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
+@@ -46,6 +49,8 @@ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
+ namespace JSC {
+ namespace Corpse {
+ 
++#if OS(DARWIN)
++
+ static std::optional<Address> readStackPointer(thread_act_t thread)
+ {
+ #if CPU(ARM64)
+@@ -181,6 +186,14 @@ Vector<Thread> Thread::collect(const Snapshot& snapshot)
+ 
+     return result;
+ }
++#else
++
++const char* Thread::runStateDescription() const { return "unknown"; }
++
++Vector<Thread> Thread::collect(const Snapshot&) { return { }; }
++
++#endif // OS(DARWIN)
++
+ } // namespace Corpse
+ } // namespace JSC
+ 
+diff --git a/Source/JavaScriptCore/corpse/CorpseThread.h b/Source/JavaScriptCore/corpse/CorpseThread.h
+index d63d9f055fdf..c0a2c480415c 100644
+--- a/Source/JavaScriptCore/corpse/CorpseThread.h
++++ b/Source/JavaScriptCore/corpse/CorpseThread.h
+@@ -25,11 +25,12 @@
+ 
+ #pragma once
+ 
++#include <JavaScriptCore/CorpsePlatform.h>
++
+ #if ENABLE(MYA)
+ 
+ #include <JavaScriptCore/CorpseAddress.h>
+ #include <JavaScriptCore/CorpseRegion.h>
+-#include <mach/mach.h>
+ #include <stdint.h>
+ #include <string>
+ #include <wtf/Vector.h>
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseAddressTest.cpp b/Source/JavaScriptCore/corpse/tests/CorpseAddressTest.cpp
+index f0b29e998abc..6afbad3b100e 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseAddressTest.cpp
++++ b/Source/JavaScriptCore/corpse/tests/CorpseAddressTest.cpp
+@@ -24,14 +24,12 @@
+  */
+ 
+ #include "config.h"
+-#include "CorpseAddressTest.h"
+ 
+ #if ENABLE(MYA)
+ 
+ #include "LibJSCToolsTestUtilities.h"
+ 
+ #include <JavaScriptCore/CorpseAddress.h>
+-#include <mach/mach.h>
+ #include <type_traits>
+ #include <wtf/HashMap.h>
+ #include <wtf/HashSet.h>
+@@ -43,6 +41,7 @@
+ namespace JSCToolsTest {
+ 
+ using JSC::Corpse::Address;
++using JSC::Corpse::target_address_t;
+ 
+ void testAddress()
+ {
+@@ -54,18 +53,18 @@ void testAddress()
+         Address none;
+         TEST_ASSERT(!none, "a default Address is null");
+         TEST_ASSERT(none == nullptr, "a default Address compares equal to nullptr");
+-        TEST_ASSERT_HEX_EQ(none.toMachVMAddress(), 0, "a default Address holds zero");
++        TEST_ASSERT_HEX_EQ(none.toTargetVMAddress(), 0, "a default Address holds zero");
+     }
+     {
+-        Address address(static_cast<mach_vm_address_t>(0x1000));
++        Address address(static_cast<uint64_t>(0x1000));
+         TEST_ASSERT(static_cast<bool>(address), "a non-zero Address is not null");
+         TEST_ASSERT(!(address == nullptr), "a non-zero Address does not compare equal to nullptr");
+-        TEST_ASSERT_HEX_EQ(address.toMachVMAddress(), 0x1000, "an Address holds what it was given");
++        TEST_ASSERT_HEX_EQ(address.toTargetVMAddress(), 0x1000, "an Address holds what it was given");
+     }
+     {
+         int local = 0;
+         Address address(&local);
+-        TEST_ASSERT_HEX_EQ(address.toMachVMAddress(), reinterpret_cast<uintptr_t>(&local),
++        TEST_ASSERT_HEX_EQ(address.toTargetVMAddress(), reinterpret_cast<uintptr_t>(&local),
+             "an Address built from a pointer holds that pointer");
+     }
+     {
+@@ -77,25 +76,25 @@ void testAddress()
+             "an Address does not convert to a pointer");
+     }
+     {
+-        Address low(static_cast<mach_vm_address_t>(0x1000));
+-        Address high(static_cast<mach_vm_address_t>(0x2000));
++        Address low(static_cast<uint64_t>(0x1000));
++        Address high(static_cast<uint64_t>(0x2000));
+         TEST_ASSERT(low < high, "Addresses order by value");
+         TEST_ASSERT(high > low, "Addresses order by value the other way");
+         TEST_ASSERT(low <= low && low >= low, "an Address is not less or greater than itself");
+-        TEST_ASSERT(low == Address(static_cast<mach_vm_address_t>(0x1000)), "equal values compare equal");
++        TEST_ASSERT(low == Address(static_cast<uint64_t>(0x1000)), "equal values compare equal");
+         TEST_ASSERT(low != high, "different values do not compare equal");
+     }
+     {
+-        Address base(static_cast<mach_vm_address_t>(0x1000));
+-        TEST_ASSERT_HEX_EQ((base + 0x20).toMachVMAddress(), 0x1020, "adding an offset moves forward");
+-        TEST_ASSERT_HEX_EQ((base - 0x20).toMachVMAddress(), 0x0fe0, "subtracting an offset moves back");
+-        TEST_ASSERT_HEX_EQ(Address(static_cast<mach_vm_address_t>(0x1030)) - base, 0x30,
++        Address base(static_cast<uint64_t>(0x1000));
++        TEST_ASSERT_HEX_EQ((base + 0x20).toTargetVMAddress(), 0x1020, "adding an offset moves forward");
++        TEST_ASSERT_HEX_EQ((base - 0x20).toTargetVMAddress(), 0x0fe0, "subtracting an offset moves back");
++        TEST_ASSERT_HEX_EQ(Address(static_cast<uint64_t>(0x1030)) - base, 0x30,
+             "subtracting two Addresses gives the distance between them");
+     }
+     {
+         // A plain address has nothing to strip, whatever the platform.
+-        Address plain(static_cast<mach_vm_address_t>(0x0000000100002000));
+-        TEST_ASSERT_HEX_EQ(plain.stripped().toMachVMAddress(), 0x0000000100002000,
++        Address plain(static_cast<uint64_t>(0x0000000100002000));
++        TEST_ASSERT_HEX_EQ(plain.stripped().toTargetVMAddress(), 0x0000000100002000,
+             "stripping an unsigned address changes nothing");
+     }
+ #if CPU(ARM64E)
+@@ -110,14 +109,14 @@ void testAddress()
+             signedPointer = ptrauth_sign_unauthenticated(raw, ptrauth_key_process_dependent_code, 0);
+         } while (signedPointer == raw && ++count <= maxRetryCount);
+         TEST_ASSERT(count <= maxRetryCount, "unable to generate PAC signed pointer for test");
+-        TEST_ASSERT_HEX_EQ(Address(signedPointer).stripped().toMachVMAddress(),
++        TEST_ASSERT_HEX_EQ(Address(signedPointer).stripped().toTargetVMAddress(),
+             reinterpret_cast<uintptr_t>(raw), "stripping recovers the address a signed pointer names");
+     }
+     {
+         // Top-byte-ignore and memory tagging both leave data in the top byte, which
+         // is not part of the address either.
+-        Address tagged(static_cast<mach_vm_address_t>(0x4200000100002000));
+-        TEST_ASSERT_HEX_EQ(tagged.stripped().toMachVMAddress(), 0x0000000100002000,
++        Address tagged(static_cast<uint64_t>(0x4200000100002000));
++        TEST_ASSERT_HEX_EQ(tagged.stripped().toTargetVMAddress(), 0x0000000100002000,
+             "stripping clears a tagged top byte");
+     }
+ #endif
+@@ -125,8 +124,8 @@ void testAddress()
+     {
+         // Test Address as a hash table key.
+         HashMap<Address, unsigned> map;
+-        Address first(static_cast<mach_vm_address_t>(0x100000000));
+-        Address second(static_cast<mach_vm_address_t>(0x100004000));
++        Address first(static_cast<target_address_t>(0x100000000));
++        Address second(static_cast<target_address_t>(0x100004000));
+ 
+         map.add(first, 1u);
+         map.add(second, 2u);
+@@ -165,12 +164,12 @@ void testAddress()
+ 
+         // A truncated probe chain only shows up once keys collide. Test with churning.
+         static constexpr size_t pageSize = 16384;
+-        static constexpr mach_vm_address_t keyBase = 0x100000000;
++        static constexpr target_address_t keyBase = 0x100000000;
+         static constexpr unsigned windowSize = 64;
+         static constexpr unsigned rounds = 200;
+ 
+         auto keyAt = [] (unsigned index) {
+-            return Address(keyBase + static_cast<mach_vm_address_t>(index) * pageSize);
++            return Address(keyBase + static_cast<target_address_t>(index) * pageSize);
+         };
+ 
+         HashMap<Address, unsigned> map;
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseAddressTest.h b/Source/JavaScriptCore/corpse/tests/CorpseAddressTest.h
+deleted file mode 100644
+index 802d16b0cf55..000000000000
+--- a/Source/JavaScriptCore/corpse/tests/CorpseAddressTest.h
++++ /dev/null
+@@ -1,36 +0,0 @@
+-/*
+- * Copyright (C) 2026 Apple Inc. All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- *
+- * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
+- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+- * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+- * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
+- * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
+- * THE POSSIBILITY OF SUCH DAMAGE.
+- */
+-
+-#pragma once
+-
+-#if ENABLE(MYA)
+-
+-namespace JSCToolsTest {
+-
+-void testAddress();
+-
+-} // namespace JSCToolsTest
+-
+-#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseByteParserTest.cpp b/Source/JavaScriptCore/corpse/tests/CorpseByteParserTest.cpp
+index 0e518e6de7a2..4e7627e4f965 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseByteParserTest.cpp
++++ b/Source/JavaScriptCore/corpse/tests/CorpseByteParserTest.cpp
+@@ -24,7 +24,6 @@
+  */
+ 
+ #include "config.h"
+-#include "CorpseByteParserTest.h"
+ 
+ #if ENABLE(MYA)
+ 
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseByteParserTest.h b/Source/JavaScriptCore/corpse/tests/CorpseByteParserTest.h
+deleted file mode 100644
+index 8a1dfdc216d5..000000000000
+--- a/Source/JavaScriptCore/corpse/tests/CorpseByteParserTest.h
++++ /dev/null
+@@ -1,36 +0,0 @@
+-/*
+- * Copyright (C) 2026 Apple Inc. All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- *
+- * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
+- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+- * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+- * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
+- * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
+- * THE POSSIBILITY OF SUCH DAMAGE.
+- */
+-
+-#pragma once
+-
+-#if ENABLE(MYA)
+-
+-namespace JSCToolsTest {
+-
+-void testByteParser();
+-
+-} // namespace JSCToolsTest
+-
+-#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseExportsTrieTest.cpp b/Source/JavaScriptCore/corpse/tests/CorpseExportsTrieTest.cpp
+index 641774767cf9..daf7fd1bb037 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseExportsTrieTest.cpp
++++ b/Source/JavaScriptCore/corpse/tests/CorpseExportsTrieTest.cpp
+@@ -24,7 +24,6 @@
+  */
+ 
+ #include "config.h"
+-#include "CorpseExportsTrieTest.h"
+ 
+ #if ENABLE(MYA)
+ 
+@@ -33,14 +32,19 @@
+ #include <JavaScriptCore/CorpseExportsTrie.h>
+ #include <array>
+ #include <limits>
+-#include <mach-o/loader.h>
+ #include <pthread.h>
+ #include <string>
+ #include <unistd.h>
+ #include <wtf/Atomics.h>
+ 
++#if OS(DARWIN)
++#include <mach-o/loader.h>
++#endif
++
+ namespace JSCToolsTest {
+ 
++#if OS(DARWIN)
++
+ using JSC::Corpse::ExportsTrie;
+ 
+ namespace {
+@@ -808,6 +812,28 @@ void fuzzExportsTrie(uint64_t seed, unsigned iterations)
+         pthread_join(watchdog, nullptr);
+ }
+ 
++#else
++
++void testExportsTrie()
++{
++    SuiteTracer tracer("ExportsTrie");
++    if (!tracer.shouldRun())
++        return;
++
++    skipSuite("ExportsTrie", "Mach-O only");
++}
++
++void fuzzExportsTrie(uint64_t, unsigned)
++{
++    SuiteTracer tracer("ExportsTrieFuzz");
++    if (!tracer.shouldRun())
++        return;
++
++    skipSuite("ExportsTrieFuzz", "Mach-O only");
++}
++
++#endif // OS(DARWIN)
++
+ } // namespace JSCToolsTest
+ 
+ #endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseExportsTrieTest.h b/Source/JavaScriptCore/corpse/tests/CorpseExportsTrieTest.h
+deleted file mode 100644
+index f8ad61bf05ea..000000000000
+--- a/Source/JavaScriptCore/corpse/tests/CorpseExportsTrieTest.h
++++ /dev/null
+@@ -1,43 +0,0 @@
+-/*
+- * Copyright (C) 2026 Apple Inc. All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- *
+- * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
+- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+- * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+- * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
+- * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
+- * THE POSSIBILITY OF SUCH DAMAGE.
+- */
+-
+-#pragma once
+-
+-#if ENABLE(MYA)
+-
+-#include <stdint.h>
+-
+-namespace JSCToolsTest {
+-
+-void testExportsTrie();
+-
+-// Feeds mutated and random tries to the decoder. A trie out of a corpse is
+-// untrusted, and the decoder promises to bound its work on any input, which only
+-// a run over inputs nobody wrote can really check.
+-void fuzzExportsTrie(uint64_t seed, unsigned iterations);
+-
+-} // namespace JSCToolsTest
+-
+-#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseMemoryTest.cpp b/Source/JavaScriptCore/corpse/tests/CorpseMemoryTest.cpp
+index c28ea098a7ca..1d08878537da 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseMemoryTest.cpp
++++ b/Source/JavaScriptCore/corpse/tests/CorpseMemoryTest.cpp
+@@ -24,7 +24,6 @@
+  */
+ 
+ #include "config.h"
+-#include "CorpseMemoryTest.h"
+ 
+ #if ENABLE(MYA)
+ 
+@@ -36,13 +35,16 @@
+ #include <JavaScriptCore/CorpseSnapshot.h>
+ #include <array>
+ #include <limits>
+-#include <mach/mach.h>
+-#include <mach/mach_vm.h>
+ #include <span>
+ #include <unistd.h>
+ #include <wtf/StdLibExtras.h>
+ #include <wtf/WeakRandom.h>
+ 
++#if OS(DARWIN)
++#include <mach/mach.h>
++#include <mach/mach_vm.h>
++#endif
++
+ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
+ 
+ namespace JSCToolsTest {
+@@ -52,6 +54,8 @@ using JSC::Corpse::Memory;
+ using JSC::Corpse::Process;
+ using JSC::Corpse::Snapshot;
+ 
++#if OS(DARWIN)
++
+ namespace {
+ 
+ // The arena's page layout, all of it set up before the corpse is taken. The pages the
+@@ -433,6 +437,18 @@ void testMemory()
+     }
+ }
+ 
++#else
++
++void testMemory()
++{
++    SuiteTracer tracer("Memory");
++    if (!tracer.shouldRun())
++        return;
++    skipSuite("Memory", "the test arena is laid out with Mach VM calls");
++}
++
++#endif // OS(DARWIN)
++
+ } // namespace JSCToolsTest
+ 
+ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseMemoryTest.h b/Source/JavaScriptCore/corpse/tests/CorpseMemoryTest.h
+deleted file mode 100644
+index 753a38e88d94..000000000000
+--- a/Source/JavaScriptCore/corpse/tests/CorpseMemoryTest.h
++++ /dev/null
+@@ -1,39 +0,0 @@
+-/*
+- * Copyright (C) 2026 Apple Inc. All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- *
+- * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
+- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+- * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+- * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
+- * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
+- * THE POSSIBILITY OF SUCH DAMAGE.
+- */
+-
+-#pragma once
+-
+-#if ENABLE(MYA)
+-
+-namespace JSCToolsTest {
+-
+-// Builds a range of memory with a known page layout, takes a corpse of the running
+-// test, and checks what Memory makes of it.
+-
+-void testMemory();
+-
+-} // namespace JSCToolsTest
+-
+-#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseProcessTest.cpp b/Source/JavaScriptCore/corpse/tests/CorpseProcessTest.cpp
+index 6395a25706c5..9ff5dca14f58 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseProcessTest.cpp
++++ b/Source/JavaScriptCore/corpse/tests/CorpseProcessTest.cpp
+@@ -24,7 +24,6 @@
+  */
+ 
+ #include "config.h"
+-#include "CorpseProcessTest.h"
+ 
+ #if ENABLE(MYA)
+ 
+@@ -71,7 +70,7 @@ static pid_t reapedChildPid()
+     return child;
+ }
+ 
+-#if CPU(ARM64)
++#if OS(DARWIN) && CPU(ARM64)
+ // Launches /bin/sh as x86_64, which on Apple silicon means under translation.
+ // Returns 0 if this machine cannot run x86_64 code.
+ static pid_t spawnTranslatedChild()
+@@ -98,7 +97,7 @@ static pid_t spawnTranslatedChild()
+         return 0;
+     return child;
+ }
+-#endif // CPU(ARM64)
++#endif // OS(DARWIN) && CPU(ARM64)
+ 
+ void testProcess()
+ {
+@@ -125,6 +124,7 @@ void testProcess()
+         process->detach();
+         TEST_ASSERT(!process->isAttached(), "detaching twice is harmless");
+     }
++#if OS(DARWIN)
+     {
+         // Attaching takes a send right to the target's task port, and every path out of
+         // an attach has to give it back. Attaching to this very process yields the name
+@@ -163,17 +163,22 @@ void testProcess()
+                 "attaching and detaching leaves no port name behind");
+         }
+     }
++#endif // OS(DARWIN)
+     {
+         pid_t gone = reapedChildPid();
+         if (!gone)
+             TEST_ASSERT(gone, "a child could be forked and reaped");
+         else {
+             dataLogLn("    (the next line is the failure this test asks for)");
++#if OS(DARWIN)
+             unsigned namesBefore = machPortNameCount();
++#endif
+             RefPtr<Process> process = Process::create(gone);
+             TEST_ASSERT(!process->attach(), "attaching to a process that has exited fails");
+             TEST_ASSERT(!process->isAttached(), "a failed attach leaves the Process unattached");
++#if OS(DARWIN)
+             TEST_ASSERT_EQ(machPortNameCount(), namesBefore, "a failed attach leaves no port name behind");
++#endif
+         }
+     }
+     {
+@@ -193,7 +198,7 @@ void testProcess()
+             TEST_ASSERT(!process->isTranslated(), "a process that has exited is not translated");
+         }
+     }
+-#if CPU(ARM64)
++#if OS(DARWIN) && CPU(ARM64)
+     {
+         pid_t translated = spawnTranslatedChild();
+         if (!translated)
+@@ -206,7 +211,7 @@ void testProcess()
+             while (waitpid(translated, &status, 0) < 0 && errno == EINTR) { }
+         }
+     }
+-#endif // CPU(ARM64)
++#endif // OS(DARWIN) && CPU(ARM64)
+ }
+ 
+ } // namespace JSCToolsTest
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseProcessTest.h b/Source/JavaScriptCore/corpse/tests/CorpseProcessTest.h
+deleted file mode 100644
+index 1057e6711ced..000000000000
+--- a/Source/JavaScriptCore/corpse/tests/CorpseProcessTest.h
++++ /dev/null
+@@ -1,36 +0,0 @@
+-/*
+- * Copyright (C) 2026 Apple Inc. All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- *
+- * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
+- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+- * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+- * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
+- * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
+- * THE POSSIBILITY OF SUCH DAMAGE.
+- */
+-
+-#pragma once
+-
+-#if ENABLE(MYA)
+-
+-namespace JSCToolsTest {
+-
+-void testProcess();
+-
+-} // namespace JSCToolsTest
+-
+-#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseRegionTest.cpp b/Source/JavaScriptCore/corpse/tests/CorpseRegionTest.cpp
+index 6e12d9301fb8..22a259464dd6 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseRegionTest.cpp
++++ b/Source/JavaScriptCore/corpse/tests/CorpseRegionTest.cpp
+@@ -24,7 +24,6 @@
+  */
+ 
+ #include "config.h"
+-#include "CorpseRegionTest.h"
+ 
+ #if ENABLE(MYA)
+ 
+@@ -33,8 +32,10 @@
+ #include <JavaScriptCore/CorpseAddress.h>
+ #include <JavaScriptCore/CorpseRegion.h>
+ #include <JavaScriptCore/CorpseSnapshot.h>
++#if OS(DARWIN)
+ #include <mach/mach.h>
+ #include <mach/mach_vm.h>
++#endif
+ #include <string.h>
+ #include <sys/mman.h>
+ #include <unistd.h>
+@@ -49,6 +50,8 @@ void testRegion()
+     SuiteTracer tracer("Region");
+     if (!tracer.shouldRun())
+         return;
++    if (linuxSkip("Region", "corpses are not implemented on Linux yet"))
++        return;
+ 
+     size_t pageSize = static_cast<size_t>(getpagesize());
+     static constexpr size_t mappedPages = 5;
+@@ -107,18 +110,23 @@ void testRegion()
+         unmapPagesStillHeld();
+         return;
+     }
+-    mach_port_t corpsePort = self.snapshot().corpsePort();
++    JSC::Corpse::TaskHandle corpsePort = self.snapshot().corpsePort();
++#if OS(DARWIN)
++    size_t kernelPageSize = vm_kernel_page_size;
++#else
++    size_t kernelPageSize = pageSize;
++#endif
+ 
+     {
+-        auto region = Region::findContaining(corpsePort, Address(static_cast<mach_vm_address_t>(base)));
++        auto region = Region::findContaining(corpsePort, Address(static_cast<JSC::Corpse::target_address_t>(base)));
+         TEST_ASSERT(region, "the region holding a known mapping is found");
+         if (region) {
+-            TEST_ASSERT_HEX_EQ(region->base().toMachVMAddress(), base, "the region starts where the mapping does");
++            TEST_ASSERT_HEX_EQ(region->base().toTargetVMAddress(), base, "the region starts where the mapping does");
+             TEST_ASSERT_EQ(region->size(), mappedPages * pageSize, "the region is as large as the mapping");
+-            TEST_ASSERT_HEX_EQ(region->end().toMachVMAddress(), base + mappedPages * pageSize,
++            TEST_ASSERT_HEX_EQ(region->end().toTargetVMAddress(), base + mappedPages * pageSize,
+                 "the region ends where the mapping does");
+             TEST_ASSERT_EQ(region->pageCount(),
+-                static_cast<uint64_t>(mappedPages * pageSize / vm_kernel_page_size),
++                static_cast<uint64_t>(mappedPages * pageSize / kernelPageSize),
+                 "the region holds as many pages as were mapped");
+             TEST_ASSERT(region->contains(region->base()), "a region contains its first byte");
+             TEST_ASSERT(region->contains(region->end() - 1), "a region contains its last byte");
+@@ -126,7 +134,7 @@ void testRegion()
+             TEST_ASSERT(!region->contains(region->base() - 1), "a region does not contain the byte before it");
+ 
+             uint64_t accessedKernelPages =
+-                static_cast<uint64_t>((writtenPages + readPages) * pageSize / vm_kernel_page_size);
++                static_cast<uint64_t>((writtenPages + readPages) * pageSize / kernelPageSize);
+             TEST_ASSERT_EQ(region->residentPageCount(), accessedKernelPages,
+                 "the pages that were accessed are the resident ones");
+ 
+@@ -134,7 +142,7 @@ void testRegion()
+             // from, so it counts as dirty from the moment a fault creates it, whether
+             // that fault was a write or a read. The page that was only read is dirty in
+             // most runs but not all, so the written pages are what can be counted on.
+-            uint64_t writtenKernelPages = static_cast<uint64_t>(writtenPages * pageSize / vm_kernel_page_size);
++            uint64_t writtenKernelPages = static_cast<uint64_t>(writtenPages * pageSize / kernelPageSize);
+             TEST_ASSERT(region->dirtyPageCount() >= writtenKernelPages
+                 && region->dirtyPageCount() <= accessedKernelPages,
+                 "every page that was written is dirty and no page that was never accessed is");
+@@ -143,23 +151,23 @@ void testRegion()
+     {
+         // An address in the middle of the mapping still finds the whole region.
+         auto region = Region::findContaining(corpsePort,
+-            Address(static_cast<mach_vm_address_t>(base + pageSize + 16)));
++            Address(static_cast<JSC::Corpse::target_address_t>(base + pageSize + 16)));
+         TEST_ASSERT(region, "an address inside the mapping finds the region");
+         if (region)
+-            TEST_ASSERT_HEX_EQ(region->base().toMachVMAddress(), base, "any address in a region finds its base");
++            TEST_ASSERT_HEX_EQ(region->base().toTargetVMAddress(), base, "any address in a region finds its base");
+     }
+     {
+         // The kernel reports the region at or above the address it is asked about,
+         // so a hole must be reported as a hole rather than as the region above it.
+         auto region = Region::findContaining(corpsePort,
+-            Address(static_cast<mach_vm_address_t>(addressAt(holeBelowRegion))));
++            Address(static_cast<JSC::Corpse::target_address_t>(addressAt(holeBelowRegion))));
+         TEST_ASSERT(!region, "an address in an unmapped hole finds no region");
+     }
+     {
+         // The same question asked from the other side. An address in this hole sits past
+         // the end of the region below it, which must not be reported as containing it.
+         auto region = Region::findContaining(corpsePort,
+-            Address(static_cast<mach_vm_address_t>(addressAt(holeAboveRegion))));
++            Address(static_cast<JSC::Corpse::target_address_t>(addressAt(holeAboveRegion))));
+         TEST_ASSERT(!region, "an address in the hole above a region finds no region");
+     }
+     {
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseRegionTest.h b/Source/JavaScriptCore/corpse/tests/CorpseRegionTest.h
+deleted file mode 100644
+index c7e36be3eab1..000000000000
+--- a/Source/JavaScriptCore/corpse/tests/CorpseRegionTest.h
++++ /dev/null
+@@ -1,39 +0,0 @@
+-/*
+- * Copyright (C) 2026 Apple Inc. All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- *
+- * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
+- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+- * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+- * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
+- * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
+- * THE POSSIBILITY OF SUCH DAMAGE.
+- */
+-
+-#pragma once
+-
+-#if ENABLE(MYA)
+-
+-namespace JSCToolsTest {
+-
+-// Takes a corpse of the running test itself, so that everything the corpse
+-// reports can be checked against what this process already knows.
+-
+-void testRegion();
+-
+-} // namespace JSCToolsTest
+-
+-#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.cpp b/Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.cpp
+index cc1eb821d63a..3f13c53892af 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.cpp
++++ b/Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.cpp
+@@ -24,7 +24,6 @@
+  */
+ 
+ #include "config.h"
+-#include "CorpseSnapshotTest.h"
+ 
+ #if ENABLE(MYA)
+ 
+@@ -32,19 +31,24 @@
+ 
+ #include <JavaScriptCore/CorpseProcess.h>
+ #include <JavaScriptCore/CorpseSnapshot.h>
++#if OS(DARWIN)
+ #include <mach/mach.h>
++#endif
+ #include <unistd.h>
+ 
+ namespace JSCToolsTest {
+ 
+ using JSC::Corpse::Process;
+ using JSC::Corpse::Snapshot;
++using JSC::Corpse::TaskHandle;
+ 
+ void testSnapshot()
+ {
+     SuiteTracer tracer("Snapshot");
+     if (!tracer.shouldRun())
+         return;
++    if (linuxSkip("Snapshot", "corpses are not implemented on Linux yet"))
++        return;
+ 
+     RefPtr<Process> process = Process::create(getpid());
+     if (!process->attach()) {
+@@ -53,12 +57,12 @@ void testSnapshot()
+     }
+ 
+     unsigned firstId = 0;
+-    mach_port_t firstCorpsePort = MACH_PORT_NULL;
+-    mach_port_t secondCorpsePort = MACH_PORT_NULL;
++    TaskHandle firstCorpsePort = JSC::Corpse::invalidTaskHandle;
++    TaskHandle secondCorpsePort = JSC::Corpse::invalidTaskHandle;
+     {
+         Snapshot snapshot(process);
+         TEST_ASSERT(snapshot.isValid(), "a snapshot of this process is valid");
+-        TEST_ASSERT(MACH_PORT_VALID(snapshot.corpsePort()), "a valid snapshot holds a corpse port");
++        TEST_ASSERT(JSC::Corpse::isValidTaskHandle(snapshot.corpsePort()), "a valid snapshot holds a corpse port");
+         TEST_ASSERT(snapshot.process() == process.get(), "a snapshot keeps the process it came from");
+         firstId = snapshot.id();
+         TEST_ASSERT(firstId, "a snapshot has an identifier");
+@@ -71,10 +75,15 @@ void testSnapshot()
+             "two snapshots hold two different corpses");
+         secondCorpsePort = second.corpsePort();
+     }
++#if OS(DARWIN)
+     TEST_ASSERT_EQ(machPortSendRightCount(firstCorpsePort), 0u,
+         "destroying a snapshot gives its corpse port back");
+     TEST_ASSERT_EQ(machPortSendRightCount(secondCorpsePort), 0u,
+         "and so does destroying the second");
++#else
++    UNUSED_VARIABLE(firstCorpsePort);
++    UNUSED_VARIABLE(secondCorpsePort);
++#endif
+     {
+         // The two above are gone; their identifiers must not come back.
+         Snapshot later(process);
+@@ -98,6 +107,7 @@ void testSnapshot()
+         TEST_ASSERT(!snapshot.symbol(""), "an empty symbol name resolves to nothing");
+     }
+ 
++#if OS(DARWIN)
+     {
+         // A corpse and the thread rights read out of it are Mach ports. Taking a snapshot
+         // must not leave any of them behind.
+@@ -123,6 +133,7 @@ void testSnapshot()
+         TEST_ASSERT_EQ(machPortNameCount(), namesBefore,
+             "and leaves no port name behind");
+     }
++#endif // OS(DARWIN)
+ }
+ 
+ } // namespace JSCToolsTest
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.h b/Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.h
+deleted file mode 100644
+index 38f92ed3dc8b..000000000000
+--- a/Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.h
++++ /dev/null
+@@ -1,39 +0,0 @@
+-/*
+- * Copyright (C) 2026 Apple Inc. All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- *
+- * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
+- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+- * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+- * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
+- * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
+- * THE POSSIBILITY OF SUCH DAMAGE.
+- */
+-
+-#pragma once
+-
+-#if ENABLE(MYA)
+-
+-namespace JSCToolsTest {
+-
+-// Takes a corpse of the running test itself, so that everything the corpse
+-// reports can be checked against what this process already knows.
+-
+-void testSnapshot();
+-
+-} // namespace JSCToolsTest
+-
+-#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseSymbolTest.cpp b/Source/JavaScriptCore/corpse/tests/CorpseSymbolTest.cpp
+index 85e70bcd74b5..cd050699c368 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseSymbolTest.cpp
++++ b/Source/JavaScriptCore/corpse/tests/CorpseSymbolTest.cpp
+@@ -1,5 +1,6 @@
+ /*
+  * Copyright (C) 2026 Apple Inc. All rights reserved.
++ * Copyright (C) 2026 Igalia S.L.
+  *
+  * Redistribution and use in source and binary forms, with or without
+  * modification, are permitted provided that the following conditions
+@@ -24,7 +25,6 @@
+  */
+ 
+ #include "config.h"
+-#include "CorpseSymbolTest.h"
+ 
+ #if ENABLE(MYA)
+ 
+@@ -34,7 +34,9 @@
+ #include <JavaScriptCore/CorpseSnapshot.h>
+ #include <JavaScriptCore/CorpseSymbol.h>
+ #include <dlfcn.h>
++#if OS(DARWIN)
+ #include <mach/mach.h>
++#endif
+ #include <stdlib.h>
+ #include <unistd.h>
+ #include <wtf/MonotonicTime.h>
+@@ -59,6 +61,8 @@ void testSymbol()
+     SuiteTracer tracer("Symbol");
+     if (!tracer.shouldRun())
+         return;
++    if (linuxSkip("Symbol", "corpses are not implemented on Linux yet"))
++        return;
+ 
+     SelfSnapshot self;
+     if (!self.isValid())
+@@ -72,7 +76,7 @@ void testSymbol()
+         auto expected = reinterpret_cast<uintptr_t>(WebConfig::g_config);
+         Address found = snapshot.symbol("g_config");
+         TEST_ASSERT(found, "a symbol exported by JavaScriptCore is found");
+-        TEST_ASSERT_HEX_EQ(found.toMachVMAddress(), expected,
++        TEST_ASSERT_HEX_EQ(found.toTargetVMAddress(), expected,
+             "g_config resolves to the address this process uses for it");
+     }
+     {
+@@ -84,8 +88,8 @@ void testSymbol()
+         TEST_ASSERT(found, "a symbol exported by a shared cache image is found");
+         // A function pointer arrives signed on arm64e; only the address it names is
+         // being compared here.
+-        TEST_ASSERT_HEX_EQ(found.stripped().toMachVMAddress(),
+-            Address(expected).stripped().toMachVMAddress(),
++        TEST_ASSERT_HEX_EQ(found.stripped().toTargetVMAddress(),
++            Address(expected).stripped().toTargetVMAddress(),
+             "tolower resolves to the address this process uses for it");
+     }
+     {
+@@ -96,8 +100,8 @@ void testSymbol()
+         else {
+             Address found = snapshot.symbol("environ");
+             TEST_ASSERT(found, "a data symbol in the shared cache is found");
+-            TEST_ASSERT_HEX_EQ(found.stripped().toMachVMAddress(),
+-                Address(expected).stripped().toMachVMAddress(),
++            TEST_ASSERT_HEX_EQ(found.stripped().toTargetVMAddress(),
++                Address(expected).stripped().toTargetVMAddress(),
+                 "environ resolves to the address this process uses for it");
+         }
+     }
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseSymbolTest.h b/Source/JavaScriptCore/corpse/tests/CorpseSymbolTest.h
+deleted file mode 100644
+index 87af2ea0cd04..000000000000
+--- a/Source/JavaScriptCore/corpse/tests/CorpseSymbolTest.h
++++ /dev/null
+@@ -1,36 +0,0 @@
+-/*
+- * Copyright (C) 2026 Apple Inc. All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- *
+- * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
+- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+- * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+- * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
+- * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
+- * THE POSSIBILITY OF SUCH DAMAGE.
+- */
+-
+-#pragma once
+-
+-#if ENABLE(MYA)
+-
+-namespace JSCToolsTest {
+-
+-void testSymbol();
+-
+-} // namespace JSCToolsTest
+-
+-#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseThreadTest.cpp b/Source/JavaScriptCore/corpse/tests/CorpseThreadTest.cpp
+index ef74186f5152..e9311ae97a7a 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseThreadTest.cpp
++++ b/Source/JavaScriptCore/corpse/tests/CorpseThreadTest.cpp
+@@ -24,7 +24,6 @@
+  */
+ 
+ #include "config.h"
+-#include "CorpseThreadTest.h"
+ 
+ #if ENABLE(MYA)
+ 
+@@ -45,6 +44,8 @@ void testThreads()
+     SuiteTracer tracer("Thread");
+     if (!tracer.shouldRun())
+         return;
++    if (linuxSkip("Thread", "corpses are not implemented on Linux yet"))
++        return;
+ 
+     static constexpr const char* alphaName = "jsctools alpha";
+     static constexpr const char* betaName = "jsctools beta";
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseThreadTest.h b/Source/JavaScriptCore/corpse/tests/CorpseThreadTest.h
+deleted file mode 100644
+index 7420c5f4c49c..000000000000
+--- a/Source/JavaScriptCore/corpse/tests/CorpseThreadTest.h
++++ /dev/null
+@@ -1,39 +0,0 @@
+-/*
+- * Copyright (C) 2026 Apple Inc. All rights reserved.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- *
+- * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
+- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+- * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+- * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
+- * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
+- * THE POSSIBILITY OF SUCH DAMAGE.
+- */
+-
+-#pragma once
+-
+-#if ENABLE(MYA)
+-
+-namespace JSCToolsTest {
+-
+-// Takes a corpse of the running test itself, so that everything the corpse
+-// reports can be checked against what this process already knows.
+-
+-void testThreads();
+-
+-} // namespace JSCToolsTest
+-
+-#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseVMTest.cpp b/Source/JavaScriptCore/corpse/tests/CorpseVMTest.cpp
+new file mode 100644
+index 000000000000..696697696670
+--- /dev/null
++++ b/Source/JavaScriptCore/corpse/tests/CorpseVMTest.cpp
+@@ -0,0 +1,95 @@
++/*
++ * Copyright (C) 2026 Igalia S.L.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "config.h"
++
++#if ENABLE(MYA)
++
++#include "LibJSCToolsTestUtilities.h"
++
++#include <JavaScriptCore/Completion.h>
++#include <JavaScriptCore/CorpseAddress.h>
++#include <JavaScriptCore/CorpseSnapshot.h>
++#include <JavaScriptCore/InitializeThreading.h>
++#include <JavaScriptCore/JSCJSValueInlines.h>
++#include <JavaScriptCore/JSGlobalObjectInlines.h>
++#include <JavaScriptCore/JSLock.h>
++#include <JavaScriptCore/SourceCode.h>
++#include <JavaScriptCore/VM.h>
++#include <stdint.h>
++#include <wtf/text/MakeString.h>
++
++namespace JSCToolsTest {
++
++namespace {
++
++using JSC::Corpse::Address;
++using JSC::Corpse::Snapshot;
++
++struct VMFixture {
++    int32_t sum { 0 };
++};
++
++// Just prove we can launch and attach to JSC.
++Address createFixture()
++{
++    static VMFixture fixture;
++
++    JSC::initialize();
++    JSC::VM& vm = JSC::VM::create(JSC::HeapType::Large).leakRef();
++    JSC::JSLockHolder locker(vm);
++    JSC::JSGlobalObject* globalObject = JSC::JSGlobalObject::create(vm, JSC::JSGlobalObject::createStructure(vm, JSC::jsNull()));
++
++    NakedPtr<JSC::Exception> exception;
++    JSC::JSValue result = JSC::evaluate(globalObject, JSC::makeSource("40 + 2"_s, JSC::SourceOrigin { }, JSC::SourceTaintedOrigin::Untainted), JSC::JSValue(), exception);
++    RELEASE_ASSERT(!exception && result.isInt32());
++
++    fixture.sum = result.asInt32();
++    return Address { &fixture };
++}
++
++void analyze(Snapshot& snapshot, Address fixtureAddress)
++{
++    auto fixture = snapshot.memory().ptr<VMFixture>(fixtureAddress);
++    TEST_ASSERT(fixture, "the target's fixture reads");
++    if (!fixture)
++        return;
++    TEST_ASSERT_EQ(fixture->sum, 40 + 2, "the target's VM computed the sum");
++}
++
++} // anonymous namespace
++
++void testVM()
++{
++    SuiteTracer tracer("VM");
++    if (!tracer.shouldRun())
++        return;
++
++    analyzeInAndOutOfProcess(createFixture, analyze);
++}
++
++} // namespace JSCToolsTest
++
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.cpp b/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.cpp
+index 45ed72585af3..30cb593380f0 100644
+--- a/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.cpp
++++ b/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.cpp
+@@ -1,5 +1,6 @@
+ /*
+  * Copyright (C) 2026 Apple Inc. All rights reserved.
++ * Copyright (C) 2026 Igalia S.L.
+  *
+  * Redistribution and use in source and binary forms, with or without
+  * modification, are permitted provided that the following conditions
+@@ -26,18 +27,36 @@
+ #include "config.h"
+ #include "LibJSCToolsTestUtilities.h"
+ 
+-#if ENABLE(MYA)
+-
+-#include <JavaScriptCore/CorpseProcess.h>
+-#include <JavaScriptCore/CorpseSnapshot.h>
+-#include <mach/mach.h>
+-#include <mach/mach_vm.h>
+-#include <pthread.h>
+-#include <string>
+-#include <unistd.h>
+ #include <wtf/MonotonicTime.h>
+ #include <wtf/StdLibExtras.h>
+ 
++#if ENABLE(MYA)
++#include <JavaScriptCore/CorpseProcess.h>
++#include <JavaScriptCore/CorpseSnapshot.h>
++#if OS(DARWIN)
++#include <mach/mach.h>
++#include <mach/mach_vm.h>
++#endif
++#include <array>
++#include <dlfcn.h>
++#include <errno.h>
++#include <pthread.h>
++#include <signal.h>
++#include <spawn.h>
++#include <stdlib.h>
++#include <string>
++#include <sys/wait.h>
++#include <unistd.h>
++#include <wtf/PtrTag.h>
++#include <wtf/SafeStrerror.h>
++#include <wtf/Scope.h>
++#include <wtf/text/CString.h>
++#include <wtf/text/MakeString.h>
++#include <wtf/text/StringToIntegerConversion.h>
++
++extern char** environ;
++#endif
++
+ namespace JSCToolsTest {
+ 
+ unsigned assertionsRun = 0;
+@@ -85,6 +104,21 @@ void skipSuite(const char* name, const char* why)
+     dataLogLn("SKIP: ", name, ": ", why);
+ }
+ 
++bool linuxSkip(const char* name, const char* why)
++{
++#if OS(LINUX)
++    // FIXME: Implement the corpse functionality these suites need on Linux.
++    skipSuite(name, why);
++    return true;
++#else
++    UNUSED_PARAM(name);
++    UNUSED_PARAM(why);
++    return false;
++#endif
++}
++
++#if ENABLE(MYA) && OS(DARWIN)
++
+ unsigned machPortNameCount()
+ {
+     mach_port_name_array_t names = nullptr;
+@@ -112,6 +146,10 @@ unsigned machPortSendRightCount(mach_port_t port)
+     return refs; // Can still be 0 (which still means no send right).
+ }
+ 
++#endif // ENABLE(MYA) && OS(DARWIN)
++
++#if ENABLE(MYA)
++
+ SelfSnapshot::SelfSnapshot()
+ {
+     m_process = JSC::Corpse::Process::create(getpid());
+@@ -155,7 +193,11 @@ struct ParkedThreads::Thread {
+ static void* parkThread(void* argument)
+ {
+     auto* thread = static_cast<ParkedThreads::Thread*>(argument);
++#if OS(DARWIN)
+     pthread_setname_np(thread->name.c_str());
++#else
++    pthread_setname_np(pthread_self(), thread->name.c_str());
++#endif
+ 
+     pthread_mutex_lock(&parkMutex);
+     ++parkedCount;
+@@ -227,6 +269,124 @@ void ParkedThreads::stopAndJoin()
+     pthread_mutex_unlock(&parkMutex);
+ }
+ 
+-} // namespace JSCToolsTest
++using CreateTargetObject = JSC::Corpse::Address (*)();
++
++static uintptr_t executableBase()
++{
++    Dl_info info;
++    if (!dladdr(removeCodePtrTag<void*>(&executableBase), &info))
++        return 0;
++    return reinterpret_cast<uintptr_t>(info.dli_fbase);
++}
++
++int runCorpseTarget(const char* offsetText)
++{
++    auto offset = WTF::parseInteger<uint64_t>(StringView::fromLatin1(offsetText), 16);
++    uintptr_t base = executableBase();
++    if (!offset || !base) {
++        dataLogLn("--target needs the offset of a create function into this executable, in hex");
++        return 1;
++    }
++    // Warning: do not ever move this into a production binary!
++    auto create = tagCodePtr<CreateTargetObject, CFunctionPtrTag>(std::bit_cast<void*>(base + *offset));
++    uint64_t address = create().toTargetVMAddress();
++    if (write(STDOUT_FILENO, &address, sizeof(address)) != sizeof(address))
++        return 1;
++
++    // The analysis kills this process when it is done with the object.
++    while (true)
++        pause();
++}
++
++static std::unique_ptr<JSC::Corpse::Snapshot> takeSnapshot(pid_t pid)
++{
++    RefPtr<JSC::Corpse::Process> process = JSC::Corpse::Process::create(pid);
++    bool attached = process->attach();
++    TEST_ASSERT(attached, "attaching to the target process succeeds");
++    if (!attached)
++        return nullptr;
++    auto snapshot = WTF::makeUnique<JSC::Corpse::Snapshot>(process);
++    TEST_ASSERT(snapshot->isValid(), "a snapshot of the target process is valid");
++    if (!snapshot->isValid())
++        return nullptr;
++    return snapshot;
++}
++
++static void spawnAndAnalyze(const char* executable, char* const* arguments, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
++{
++    std::array<int, 2> addressPipe { -1, -1 };
++    bool opened = !pipe(addressPipe.data());
++    TEST_ASSERT(opened, "a pipe from the target opens");
++    auto closePipe = makeScopeExit([&] {
++        for (int fd : addressPipe) {
++            if (fd >= 0)
++                close(fd);
++        }
++    });
++    if (!opened)
++        return;
++
++    posix_spawn_file_actions_t actions;
++    posix_spawn_file_actions_init(&actions);
++    posix_spawn_file_actions_adddup2(&actions, addressPipe[1], STDOUT_FILENO);
++    posix_spawn_file_actions_addclose(&actions, addressPipe[0]);
++    posix_spawn_file_actions_addclose(&actions, addressPipe[1]);
++    pid_t child = 0;
++    int error = posix_spawn(&child, executable, &actions, nullptr, arguments, environ);
++    posix_spawn_file_actions_destroy(&actions);
++    TEST_ASSERT(!error, "the target process launches");
++    if (error) {
++        dataLogLn("    posix_spawn ", executable, ": ", safeStrerror(error));
++        return;
++    }
++    auto killChild = makeScopeExit([&] {
++        kill(child, SIGKILL);
++        while (waitpid(child, nullptr, 0) < 0 && errno == EINTR) { }
++    });
++
++    uint64_t address = 0;
++    bool reported = read(addressPipe[0], &address, sizeof(address)) == sizeof(address);
++    TEST_ASSERT(reported, "the target reports the address of its object");
++    if (!reported)
++        return;
++
++    if (auto snapshot = takeSnapshot(child))
++        analyze(*snapshot, JSC::Corpse::Address { address });
++}
++
++void analyzeInAndOutOfProcess(CreateTargetObject create, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
++{
++    {
++        JSC::Corpse::Address object = create();
++        if (auto snapshot = takeSnapshot(getpid()))
++            analyze(*snapshot, object);
++    }
++
++    if (linuxSkip("analysis of a separate process", "attaching to another process is not implemented on Linux yet"))
++        return;
++
++    uintptr_t createAddress = reinterpret_cast<uintptr_t>(removeCodePtrTag(create));
++    Dl_info info;
++    bool inThisExecutable = dladdr(std::bit_cast<void*>(createAddress), &info) && reinterpret_cast<uintptr_t>(info.dli_fbase) == executableBase();
++    TEST_ASSERT(inThisExecutable, "the target's create function is in this executable");
++    if (!inThisExecutable)
++        return;
++
++    UTF8CString executablePath = JSC::Corpse::Process::create(getpid())->executablePath();
++    TEST_ASSERT(!executablePath.isNull(), "this process's executable path is readable");
++    if (executablePath.isNull())
++        return;
++
++    CString offsetText = makeString(hex(createAddress - executableBase())).utf8();
++    char* const arguments[] = {
++        const_cast<char*>(executablePath.legacyCStringPointer()),
++        const_cast<char*>("--target"),
++        const_cast<char*>(offsetText.legacyCStringPointer()),
++        nullptr
++    };
++    spawnAndAnalyze(executablePath.legacyCStringPointer(), arguments, analyze);
++}
+ 
+ #endif // ENABLE(MYA)
++
++} // namespace JSCToolsTest
+diff --git a/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h b/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h
+index c8c486bad005..5a44c651489b 100644
+--- a/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h
++++ b/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h
+@@ -1,5 +1,6 @@
+ /*
+  * Copyright (C) 2026 Apple Inc. All rights reserved.
++ * Copyright (C) 2026 Igalia S.L.
+  *
+  * Redistribution and use in source and binary forms, with or without
+  * modification, are permitted provided that the following conditions
+@@ -25,26 +26,33 @@
+ 
+ #pragma once
+ 
+-#if ENABLE(MYA)
+-
+-#include <mach/mach.h>
++#include <JavaScriptCore/CorpsePlatform.h>
+ #include <memory>
+ #include <span>
+ #include <stdint.h>
+ #include <string_view>
+ #include <wtf/DataLog.h>
++#include <wtf/Function.h>
+ #include <wtf/HexNumber.h>
+ #include <wtf/MonotonicTime.h>
+ #include <wtf/RefPtr.h>
+ #include <wtf/Seconds.h>
+ #include <wtf/Vector.h>
+ 
++#if OS(DARWIN)
++#include <mach/mach.h>
++#endif
++
++#if ENABLE(MYA)
++#include <JavaScriptCore/CorpseAddress.h>
++
+ namespace JSC {
+ namespace Corpse {
+ class Process;
+ class Snapshot;
+ }
+ }
++#endif
+ 
+ namespace JSCToolsTest {
+ 
+@@ -60,6 +68,20 @@ extern bool verbose;
+ 
+ void skipSuite(const char* name, const char* why);
+ 
++bool linuxSkip(const char* name, const char* why);
++
++void testAddress();
++void testByteParser();
++void testExportsTrie();
++void testProcess();
++void testSymbol();
++void testRegion();
++void testMemory();
++void testSnapshot();
++void testThreads();
++void fuzzExportsTrie(uint64_t seed, unsigned iterations);
++void testVM();
++
+ // Announces a suite, times it, and reports on the way out. Destroyed on every path out
+ // of a suite, including the early returns a suite takes when it cannot set itself up.
+ class SuiteTracer {
+@@ -119,6 +141,8 @@ Seconds totalSuiteTime();
+         } \
+     } while (0)
+ 
++#if ENABLE(MYA) && OS(DARWIN)
++
+ // The number of names in this task's Mach port name space. Used to show that a
+ // sequence of operations leaves no port behind.
+ unsigned machPortNameCount();
+@@ -129,6 +153,10 @@ unsigned machPortNameCount();
+ // given back shows up here and not in machPortNameCount().
+ unsigned machPortSendRightCount(mach_port_t);
+ 
++#endif // ENABLE(MYA) && OS(DARWIN)
++
++#if ENABLE(MYA)
++
+ // Attaches to this process and takes a corpse of it. That is what lets a test
+ // check what a corpse reports against what this process already knows about
+ // itself, and it needs no privilege: a task may always snapshot itself.
+@@ -160,7 +188,11 @@ public:
+ 
+     // pthread keeps a thread name in a fixed buffer, so a longer name arrives cut
+     // to this length.
++#if OS(DARWIN)
+     static constexpr size_t maximumNameLength = 63;
++#else
++    static constexpr size_t maximumNameLength = 15;
++#endif
+ 
+     ~ParkedThreads();
+ 
+@@ -179,6 +211,13 @@ private:
+     Vector<Thread*> m_threads;
+ };
+ 
+-} // namespace JSCToolsTest
++// create() an object, then analyze() it in and out of process.
++void analyzeInAndOutOfProcess(JSC::Corpse::Address (*create)(), NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address object)>& analyze);
++
++// The main function for a copy of this process launched as `--target <offset>`: runs the
++// create function at `offset` into this executable and holds its object.
++int runCorpseTarget(const char* offsetText);
+ 
+ #endif // ENABLE(MYA)
++
++} // namespace JSCToolsTest
+diff --git a/Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp b/Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp
+index fd0739294774..b9e0552bd6c3 100644
+--- a/Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp
++++ b/Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp
+@@ -25,19 +25,11 @@
+ 
+ #include "config.h"
+ 
++#include <JavaScriptCore/CorpsePlatform.h>
+ #include <wtf/DataLog.h>
+ 
+ #if ENABLE(MYA)
+ 
+-#include "CorpseAddressTest.h"
+-#include "CorpseByteParserTest.h"
+-#include "CorpseExportsTrieTest.h"
+-#include "CorpseMemoryTest.h"
+-#include "CorpseProcessTest.h"
+-#include "CorpseRegionTest.h"
+-#include "CorpseSnapshotTest.h"
+-#include "CorpseSymbolTest.h"
+-#include "CorpseThreadTest.h"
+ #include "LibJSCToolsTestUtilities.h"
+ 
+ #include <stdlib.h>
+@@ -59,6 +51,7 @@ void printUsage()
+ {
+     dataLogLn("Usage: testLibJSCTools [--verbose] [<suite filter>]");
+     dataLogLn("       testLibJSCTools --fuzz-trie [<seed> [<iterations>]]");
++    dataLogLn("       testLibJSCTools --target <offset>");
+     dataLogLn("");
+     dataLogLn("  Runs the tests for libJavaScriptCoreTools. With a filter, only the");
+     dataLogLn("  suites whose name contains it run.");
+@@ -76,6 +69,19 @@ bool parseUint64(std::string_view text, uint64_t& out)
+     return true;
+ }
+ 
++void runCorpseSuite()
++{
++    JSCToolsTest::testByteParser();
++    JSCToolsTest::testExportsTrie();
++    JSCToolsTest::testAddress();
++    JSCToolsTest::testProcess();
++    JSCToolsTest::testSnapshot();
++    JSCToolsTest::testRegion();
++    JSCToolsTest::testMemory();
++    JSCToolsTest::testThreads();
++    JSCToolsTest::testSymbol();
++}
++
+ } // anonymous namespace
+ 
+ int main(int argc, char** argv)
+@@ -96,6 +102,14 @@ int main(int argc, char** argv)
+             JSCToolsTest::verbose = true;
+             continue;
+         }
++        if (argument == "--target") {
++            if (index + 1 >= arguments.size()) {
++                dataLogLn("--target needs the offset of a create function into this executable, in hex");
++                printUsage();
++                return 1;
++            }
++            return JSCToolsTest::runCorpseTarget(arguments[index + 1]);
++        }
+         if (argument == "--fuzz-trie") {
+             fuzzOnly = true;
+             if (index + 1 < arguments.size() && parseUint64(arguments[index + 1], fuzzSeed)) {
+@@ -118,16 +132,9 @@ int main(int argc, char** argv)
+     if (fuzzOnly)
+         JSCToolsTest::fuzzExportsTrie(fuzzSeed, static_cast<unsigned>(fuzzIterations));
+     else {
+-        JSCToolsTest::testByteParser();
+-        JSCToolsTest::testExportsTrie();
+         JSCToolsTest::fuzzExportsTrie(fuzzSeed, static_cast<unsigned>(fuzzIterations));
+-        JSCToolsTest::testAddress();
+-        JSCToolsTest::testProcess();
+-        JSCToolsTest::testSnapshot();
+-        JSCToolsTest::testRegion();
+-        JSCToolsTest::testMemory();
+-        JSCToolsTest::testThreads();
+-        JSCToolsTest::testSymbol();
++        runCorpseSuite();
++        JSCToolsTest::testVM();
+     }
+ 
+     dataLogLn("Ran ", JSCToolsTest::assertionsRun, " assertions, ",
+@@ -152,8 +159,6 @@ int main(int argc, char** argv)
+ 
+ int main(int, char**)
+ {
+-    // The corpse support is built on Mach task APIs, so there is nothing to test
+-    // on other platforms. Simulators and MacCatalyst are also not supported.
+     // Report success so that a run here is not a failure.
+     printf("Not supported platform for testLibJSCTools\n");
+     return 0;
+diff --git a/Source/JavaScriptCore/mya/mya.cpp b/Source/JavaScriptCore/mya/mya.cpp
+index 0d14f4636997..35d7ebdd7d7c 100644
+--- a/Source/JavaScriptCore/mya/mya.cpp
++++ b/Source/JavaScriptCore/mya/mya.cpp
+@@ -25,6 +25,8 @@
+ 
+ #include "config.h"
+ 
++#include <JavaScriptCore/CorpsePlatform.h>
++
+ #if ENABLE(MYA)
+ 
+ #include <JavaScriptCore/CorpseAddress.h>
+@@ -57,6 +59,7 @@
+ #include <wtf/Ref.h>
+ #include <wtf/RefPtr.h>
+ #include <wtf/Vector.h>
++#include <wtf/text/CString.h>
+ 
+ #if HAVE(READLINE)
+ // readline/history.h has a Function typedef that conflicts with WTF::Function;
+@@ -594,16 +597,16 @@ private:
+             snprintf(buffer, sizeof(buffer), "%.3f", thread.systemTimeUsec() / 1000.0);
+             row.cells[4] = buffer;
+             if (thread.stackPointer()) {
+-                snprintf(buffer, sizeof(buffer), "0x%llx",
+-                    thread.stackPointer().toMachVMAddress());
++                SAFE_SPRINTF(std::span { buffer }, "0x%llx",
++                    static_cast<unsigned long long>(thread.stackPointer().toTargetVMAddress()));
+                 row.cells[5] = buffer;
+             } else
+                 row.cells[5] = "-";
+             if (thread.hasStack()) {
+                 const auto& stack = thread.stackRegion();
+-                snprintf(buffer, sizeof(buffer), "0x%llx-0x%llx",
+-                    stack.base().toMachVMAddress(),
+-                    stack.end().toMachVMAddress());
++                SAFE_SPRINTF(std::span { buffer }, "0x%llx-0x%llx",
++                    static_cast<unsigned long long>(stack.base().toTargetVMAddress()),
++                    static_cast<unsigned long long>(stack.end().toTargetVMAddress()));
+                 row.cells[6] = buffer;
+                 formatByteSize(stack.size(), buffer, sizeof(buffer));
+                 row.cells[7] = buffer;
+@@ -709,16 +712,16 @@ private:
+             return;
+         }
+ 
+-        std::string name(token);
+-        Address address = snapshot->symbol(name.c_str());
++        CString name = UTF8CString { byteCast<char8_t>(std::span { token }) };
++        Address address = snapshot->symbol(name.legacyCStringPointer());
+         if (!address) {
+-            fprintf(stderr, "mya: No symbol '%s' in snapshot #%u\n", name.c_str(), snapshot->id());
++            SAFE_FPRINTF(stderr, "mya: No symbol '%s' in snapshot #%u\n", name, snapshot->id());
+             return;
+         }
+         if (hex)
+-            printf("&%s = 0x%llx\n", name.c_str(), address.toMachVMAddress());
++            SAFE_PRINTF("&%s = 0x%llx\n", name, static_cast<unsigned long long>(address.toTargetVMAddress()));
+         else
+-            printf("&%s = %llu\n", name.c_str(), address.toMachVMAddress());
++            SAFE_PRINTF("&%s = %llu\n", name, static_cast<unsigned long long>(address.toTargetVMAddress()));
+     }
+ 
+     // Releases resources without extra output. Dropping the current selection
+@@ -1401,7 +1404,7 @@ int main(int argc, char** argv)
+ #else
+     UNUSED_PARAM(argc);
+     UNUSED_PARAM(argv);
+-    printf("Not supported platform for mya\n");
++    SAFE_PRINTF("Not supported platform for mya\n");
+     return 1;
+ #endif // ENABLE(MYA)
+ }
+diff --git a/Source/JavaScriptCore/shell/CMakeLists.txt b/Source/JavaScriptCore/shell/CMakeLists.txt
+index 95976222a869..c22a316fdc5d 100644
+--- a/Source/JavaScriptCore/shell/CMakeLists.txt
++++ b/Source/JavaScriptCore/shell/CMakeLists.txt
+@@ -116,6 +116,7 @@ if (DEVELOPER_MODE)
+             ../corpse/tests/CorpseSnapshotTest.cpp
+             ../corpse/tests/CorpseSymbolTest.cpp
+             ../corpse/tests/CorpseThreadTest.cpp
++            ../corpse/tests/CorpseVMTest.cpp
+             ../corpse/tests/LibJSCToolsTestUtilities.cpp
+             ../corpse/tests/testLibJSCTools.cpp
+         )
+diff --git a/Source/cmake/WebKitFeatures.cmake b/Source/cmake/WebKitFeatures.cmake
+index 0ac5380e2a00..0670e084f9d8 100644
+--- a/Source/cmake/WebKitFeatures.cmake
++++ b/Source/cmake/WebKitFeatures.cmake
+@@ -177,7 +177,7 @@ macro(WEBKIT_OPTION_BEGIN)
+     endif ()
+ 
+     if (NOT DEFINED ENABLE_MYA_DEFAULT)
+-        if (APPLE)
++        if (APPLE OR (CMAKE_SYSTEM_NAME STREQUAL "Linux" AND DEVELOPER_MODE AND CMAKE_SIZEOF_VOID_P EQUAL 8))
+             set(ENABLE_MYA_DEFAULT ON)
+         else ()
+             set(ENABLE_MYA_DEFAULT OFF)
+-- 
+2.54.0 (Apple Git-157)
+

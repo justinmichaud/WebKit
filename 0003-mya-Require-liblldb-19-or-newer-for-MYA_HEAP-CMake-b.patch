@@ -1,0 +1,101 @@
+From 273f2280a03e7ae5143f0b81038985432192ffa2 Mon Sep 17 00:00:00 2001
+From: Justin Michaud <jmichaud@igalia.com>
+Date: Tue, 6 Oct 2026 10:19:56 -0600
+Subject: [PATCH 03/23] [mya] Require liblldb 19 or newer for MYA_HEAP CMake
+ builds Need the bug URL (OOPS!).
+
+Reviewed by NOBODY (OOPS!).
+
+Build configuration only.
+
+FindLLDB.cmake now reports LLDB_VERSION, taken from the library's file name
+(liblldb-18.so.1 on Debian, liblldb.22.1.8.dylib from Homebrew) or, failing
+that, from the install directory (/usr/lib/llvm-18, Cellar/llvm/22.1.8), and
+JavaScriptCore asks for version 19. A liblldb older than that is a
+configure-time error that says what to install, rather than a build that
+links and then fails at run time.
+
+Why it is needed: liblldb 18 cannot resolve an address in an ELF segment that
+a PT_TLS segment starts at. libstdc++'s vtables live in such a segment, so on
+Linux with liblldb 18 every object whose vtable is libstdc++'s (std::
+exceptions, streams, std::function's managers...) has no dynamic type, and the
+DebugInfo and HeapWalk suites fail. The default liblldb of Debian 12 and of
+Ubuntu 24.04 is older than 19, so this is the common case, not a corner.
+
+What we lose if it is not taken: on Linux distributions with an older default
+LLVM, a MYA_HEAP build configures and builds fine and then gives wrong heap
+walks and failing tests, with nothing pointing at the cause. A liblldb whose
+version cannot be read from its path is still accepted.
+
+* Source/JavaScriptCore/CMakeLists.txt:
+* Source/cmake/FindLLDB.cmake:
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/JavaScriptCore/CMakeLists.txt | 11 +++++++++--
+ Source/cmake/FindLLDB.cmake          | 16 ++++++++++++++++
+ 2 files changed, 25 insertions(+), 2 deletions(-)
+
+diff --git a/Source/JavaScriptCore/CMakeLists.txt b/Source/JavaScriptCore/CMakeLists.txt
+index 67fa35705246..7a677091d3b8 100644
+--- a/Source/JavaScriptCore/CMakeLists.txt
++++ b/Source/JavaScriptCore/CMakeLists.txt
+@@ -1635,9 +1635,16 @@ if (USE_INSPECTOR_SOCKET_SERVER)
+     )
+ endif ()
+ 
+-# A machine without liblldb still builds, but the mya_heap tests fail.
++# A machine without liblldb still builds, but the mya_heap tests fail. liblldb 18
++# cannot resolve addresses in an ELF segment that a PT_TLS segment starts at,
++# such as libstdc++'s vtables; 19 can.
+ if (ENABLE_MYA_HEAP)
+-    find_package(LLDB)
++    find_package(LLDB 19)
++    if (LLDB_VERSION AND LLDB_VERSION VERSION_LESS 19)
++        message(FATAL_ERROR "mya_heap needs liblldb 19 or newer, but found liblldb ${LLDB_VERSION} "
++            "(${LLDB_LIBRARY}). Install liblldb-22-dev from apt.llvm.org, then configure again "
++            "with -ULLDB_INCLUDE_DIR -ULLDB_LIBRARY.")
++    endif ()
+     if (NOT LLDB_FOUND)
+         message(WARNING "mya_heap is on but liblldb was not found. "
+             "Install liblldb-dev (Debian, Ubuntu), lldb-devel (Fedora) or llvm (Homebrew), "
+diff --git a/Source/cmake/FindLLDB.cmake b/Source/cmake/FindLLDB.cmake
+index e0494c4c970c..f25fae447697 100644
+--- a/Source/cmake/FindLLDB.cmake
++++ b/Source/cmake/FindLLDB.cmake
+@@ -2,6 +2,7 @@
+ # Once done, this will define
+ #
+ #  LLDB_FOUND - LLDB's SB API was found
++#  LLDB_VERSION - the version of that LLDB
+ #  LLDB_INCLUDE_DIRS - the LLDB include directories
+ #  LLDB_LIBRARIES - link these to use LLDB.
+ #  LLDB::LLDB - an imported target
+@@ -56,9 +57,24 @@ if (LLDB_INCLUDE_DIR)
+     )
+ endif ()
+ 
++# The SB headers carry no version, but the installed library's name does
++# (liblldb-18.so.1 on Debian, liblldb.22.1.8.dylib from Homebrew), as does the
++# directory of an install (/usr/lib/llvm-18, Cellar/llvm/22.1.8).
++if (LLDB_LIBRARY)
++    file(REAL_PATH "${LLDB_LIBRARY}" _LLDB_REAL_LIBRARY)
++    file(REAL_PATH "${LLDB_INCLUDE_DIR}" _LLDB_REAL_INCLUDE_DIR)
++    get_filename_component(_LLDB_LIBRARY_NAME "${_LLDB_REAL_LIBRARY}" NAME)
++    if (_LLDB_LIBRARY_NAME MATCHES "lldb[-.]([0-9]+(\\.[0-9]+)*)")
++        set(LLDB_VERSION "${CMAKE_MATCH_1}")
++    elseif (_LLDB_REAL_INCLUDE_DIR MATCHES "llvm[-/]([0-9]+(\\.[0-9]+)*)")
++        set(LLDB_VERSION "${CMAKE_MATCH_1}")
++    endif ()
++endif ()
++
+ include(FindPackageHandleStandardArgs)
+ find_package_handle_standard_args(LLDB
+     REQUIRED_VARS LLDB_INCLUDE_DIR LLDB_LIBRARY
++    VERSION_VAR LLDB_VERSION
+ )
+ 
+ mark_as_advanced(
+-- 
+2.54.0 (Apple Git-157)
+

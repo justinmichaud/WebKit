@@ -1,0 +1,89 @@
+From c550845fc62b556dc9bdbc4b6586d7d21f281819 Mon Sep 17 00:00:00 2001
+From: Justin Michaud <jmichaud@igalia.com>
+Date: Tue, 6 Oct 2026 10:52:48 -0600
+Subject: [PATCH 05/17] [WTF] Zero a hash table bucket's destroyed value before
+ marking it deleted, in MYA_HEAP builds Need the bug URL (OOPS!).
+
+Reviewed by NOBODY (OOPS!).
+
+Touches WTF/wtf/HashTraits.h, which every build compiles. The new code is
+under #if ENABLE(MYA_HEAP), which is off in every production and Release
+configuration, so production builds compile exactly what they did before.
+
+hashTraitsDeleteBucket destroys a bucket's value and constructs the deleted
+value in its place; KeyValuePairHashTraits::customDeleteBucket destroys the
+mapped value and leaves its storage as the destructor left it. In
+ENABLE(MYA_HEAP) builds, both now zero the destroyed value's storage
+(clearDestroyedHashTableValue) before the deleted value is constructed.
+
+Why it is needed: the heap walk reads every bucket of a HashTable, empty,
+deleted or live, as the bucket's type, without needing the table's traits to
+tell a deleted bucket apart (they live in the target's code, not its data).
+A destructor may leave a pointer behind in the storage it destroyed: a
+RefPtr's destructor derefs but does not null, for instance. The walk would
+follow such a stale pointer from every deleted bucket into freed or reused
+memory, and attribute that memory to the table. With the storage zeroed, a
+deleted bucket holds only its deleted key and zeros.
+
+Cost: a memset of the bucket's value on every removal from a HashTable in
+MYA_HEAP builds (Debug).
+
+What we lose if it is not taken: heap walks follow stale pointers out of
+deleted buckets: they over-count what is reached and can read freed memory as
+a live object of the bucket's type. The DebugInfo suite's container test and
+the HeapWalk suite's deleted-HashMap-entry case fail.
+
+* Source/WTF/wtf/HashTraits.h:
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/WTF/wtf/HashTraits.h | 19 +++++++++++++++++++
+ 1 file changed, 19 insertions(+)
+
+diff --git a/Source/WTF/wtf/HashTraits.h b/Source/WTF/wtf/HashTraits.h
+index fb0ba495df4c..fc5b0eb99dbd 100644
+--- a/Source/WTF/wtf/HashTraits.h
++++ b/Source/WTF/wtf/HashTraits.h
+@@ -328,6 +328,19 @@ struct HashTraitHasCustomDelete {
+     static constexpr bool value = ResultType::value;
+ };
+ 
++#if ENABLE(MYA_HEAP)
++// mya reads every bucket of a table, deleted or not, as the bucket's type, so a
++// deleted bucket must hold nothing but its deleted value: no stale pointer the
++// destructor left behind. Only for storage whose object has been destroyed.
++template<typename T>
++void clearDestroyedHashTableValue(T& value)
++{
++    WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
++    memset(static_cast<void*>(std::addressof(value)), 0, sizeof(T)); // NOLINT
++    WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
++}
++#endif
++
+ template<typename Traits, typename T>
+ void hashTraitsDeleteBucket(T& value)
+ {
+@@ -335,6 +348,9 @@ void hashTraitsDeleteBucket(T& value)
+         Traits::customDeleteBucket(value);
+     else {
+         value.~T();
++#if ENABLE(MYA_HEAP)
++        clearDestroyedHashTableValue(value);
++#endif
+         Traits::constructDeletedValue(value);
+     }
+ }
+@@ -463,6 +479,9 @@ struct KeyValuePairHashTraits : GenericHashTraits<KeyValuePair<typename KeyTrait
+ 
+         hashTraitsDeleteBucket<KeyTraits>(value.key);
+         value.value.~ValueType();
++#if ENABLE(MYA_HEAP)
++        clearDestroyedHashTableValue(value.value);
++#endif
+     }
+ };
+ 
+-- 
+2.54.0 (Apple Git-157)
+

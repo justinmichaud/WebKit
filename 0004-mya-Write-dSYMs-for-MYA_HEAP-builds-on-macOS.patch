@@ -1,0 +1,145 @@
+From 247bf21e5eca760d2977274315bfc6498931f897 Mon Sep 17 00:00:00 2001
+From: Justin Michaud <jmichaud@igalia.com>
+Date: Tue, 6 Oct 2026 10:19:56 -0600
+Subject: [PATCH 04/23] [mya] Write dSYMs for MYA_HEAP builds on macOS Need the
+ bug URL (OOPS!).
+
+Reviewed by NOBODY (OOPS!).
+
+Build flags only. Debug macOS builds with MYA_HEAP on; nothing else changes.
+
+Xcode: JavaScriptCore, WebCore, WebGPU and WebKit use
+DEBUG_INFORMATION_FORMAT = dwarf-with-dsym instead of dwarf when WK_MYA_HEAP
+is YES. CMake: each shared library and executable target gets a POST_BUILD
+dsymutil step that writes its dSYM where liblldb looks for it, next to the
+image, or for a framework next to its bundle (Foo.framework.dSYM).
+
+Why it is needed:
+- Without a dSYM, liblldb reads debug info through the debug map, out of each
+  .o file. Through the debug map it cannot find the compile unit that defines
+  a global variable, so `SBTarget::FindGlobalVariables` comes back empty: the
+  heap walk then has no type for any global or static (it reads every one as
+  a root), and can find neither JSC's VM through `s_recentVM` nor WebCore's
+  `g_commonVMOrNull` by type.
+- With Xcode's compilation caching, an object file's debug info refers to its
+  precompiled header's debug info inside the cache, which only dsymutil knows
+  how to read. liblldb reading the .o files directly misses the types that
+  only the prefix header's debug info describes (WebCore, WebGPU, WebKit).
+
+Cost: dsymutil runs after every link of these images in MYA_HEAP builds,
+which adds its time to each incremental build.
+
+What we lose if it is not taken: on macOS, global variables have no types
+(the DebugInfo tests that look them up fail) and heap walks of WebCore,
+WebGPU and WebKit lose the types that come from prefix headers. Linux is
+unaffected.
+
+* Source/JavaScriptCore/Configurations/DebugRelease.xcconfig:
+* Source/WebCore/Configurations/DebugRelease.xcconfig:
+* Source/WebGPU/Configurations/DebugRelease.xcconfig:
+* Source/WebKit/Configurations/DebugRelease.xcconfig:
+* Source/cmake/WebKitMacros.cmake:
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../Configurations/DebugRelease.xcconfig            |  5 ++++-
+ Source/WebCore/Configurations/DebugRelease.xcconfig |  6 +++++-
+ Source/WebGPU/Configurations/DebugRelease.xcconfig  |  6 +++++-
+ Source/WebKit/Configurations/DebugRelease.xcconfig  |  6 +++++-
+ Source/cmake/WebKitMacros.cmake                     | 13 +++++++++++++
+ 5 files changed, 32 insertions(+), 4 deletions(-)
+
+diff --git a/Source/JavaScriptCore/Configurations/DebugRelease.xcconfig b/Source/JavaScriptCore/Configurations/DebugRelease.xcconfig
+index d8b0c3c6adc0..e34bebb01dc1 100644
+--- a/Source/JavaScriptCore/Configurations/DebugRelease.xcconfig
++++ b/Source/JavaScriptCore/Configurations/DebugRelease.xcconfig
+@@ -27,7 +27,10 @@
+ ONLY_ACTIVE_ARCH = YES;
+ 
+ GCC_WARN_ABOUT_DEPRECATED_FUNCTIONS = YES;
+-DEBUG_INFORMATION_FORMAT = dwarf;
++DEBUG_INFORMATION_FORMAT = $(WK_DEBUG_INFORMATION_FORMAT_MYA_HEAP_$(WK_MYA_HEAP));
++WK_DEBUG_INFORMATION_FORMAT_MYA_HEAP_NO = dwarf;
++// liblldb finds the compile unit that defines a global variable only in a dSYM, not through the debug map.
++WK_DEBUG_INFORMATION_FORMAT_MYA_HEAP_YES = dwarf-with-dsym;
+ 
+ CODE_SIGN_IDENTITY[sdk=macosx*] = $(CODE_SIGN_IDENTITY_$(USE_INTERNAL_SDK));
+ CODE_SIGN_IDENTITY_ = $(CODE_SIGN_IDENTITY_NO);
+diff --git a/Source/WebCore/Configurations/DebugRelease.xcconfig b/Source/WebCore/Configurations/DebugRelease.xcconfig
+index 70b3835e2dc4..2a39e9f31f36 100644
+--- a/Source/WebCore/Configurations/DebugRelease.xcconfig
++++ b/Source/WebCore/Configurations/DebugRelease.xcconfig
+@@ -27,7 +27,11 @@
+ ONLY_ACTIVE_ARCH = YES;
+ 
+ GCC_WARN_ABOUT_DEPRECATED_FUNCTIONS = YES;
+-DEBUG_INFORMATION_FORMAT = dwarf;
++DEBUG_INFORMATION_FORMAT = $(WK_DEBUG_INFORMATION_FORMAT_MYA_HEAP_$(WK_MYA_HEAP));
++WK_DEBUG_INFORMATION_FORMAT_MYA_HEAP_NO = dwarf;
++// With compilation caching, an object file's debug info refers to its precompiled header's in the
++// cache, which only dsymutil reads; liblldb reads the dSYM it writes.
++WK_DEBUG_INFORMATION_FORMAT_MYA_HEAP_YES = dwarf-with-dsym;
+ 
+ SDKROOT = $(SDKROOT_$(USE_INTERNAL_SDK));
+ SDKROOT_ = macosx;
+diff --git a/Source/WebGPU/Configurations/DebugRelease.xcconfig b/Source/WebGPU/Configurations/DebugRelease.xcconfig
+index 908dc7ba5bd5..b488ac1bee57 100644
+--- a/Source/WebGPU/Configurations/DebugRelease.xcconfig
++++ b/Source/WebGPU/Configurations/DebugRelease.xcconfig
+@@ -27,7 +27,11 @@
+ ONLY_ACTIVE_ARCH = YES;
+ 
+ GCC_WARN_ABOUT_DEPRECATED_FUNCTIONS = YES;
+-DEBUG_INFORMATION_FORMAT = dwarf;
++DEBUG_INFORMATION_FORMAT = $(WK_DEBUG_INFORMATION_FORMAT_MYA_HEAP_$(WK_MYA_HEAP));
++WK_DEBUG_INFORMATION_FORMAT_MYA_HEAP_NO = dwarf;
++// With compilation caching, an object file's debug info refers to its precompiled header's in the
++// cache, which only dsymutil reads; liblldb reads the dSYM it writes.
++WK_DEBUG_INFORMATION_FORMAT_MYA_HEAP_YES = dwarf-with-dsym;
+ 
+ SDKROOT = $(SDKROOT_$(USE_INTERNAL_SDK));
+ SDKROOT_ = macosx;
+diff --git a/Source/WebKit/Configurations/DebugRelease.xcconfig b/Source/WebKit/Configurations/DebugRelease.xcconfig
+index cc73fb9049db..52657d063f1b 100644
+--- a/Source/WebKit/Configurations/DebugRelease.xcconfig
++++ b/Source/WebKit/Configurations/DebugRelease.xcconfig
+@@ -27,7 +27,11 @@
+ ONLY_ACTIVE_ARCH = YES;
+ 
+ GCC_WARN_ABOUT_DEPRECATED_FUNCTIONS = YES;
+-DEBUG_INFORMATION_FORMAT = dwarf;
++DEBUG_INFORMATION_FORMAT = $(WK_DEBUG_INFORMATION_FORMAT_MYA_HEAP_$(WK_MYA_HEAP));
++WK_DEBUG_INFORMATION_FORMAT_MYA_HEAP_NO = dwarf;
++// With compilation caching, an object file's debug info refers to its precompiled header's in the
++// cache, which only dsymutil reads; liblldb reads the dSYM it writes.
++WK_DEBUG_INFORMATION_FORMAT_MYA_HEAP_YES = dwarf-with-dsym;
+ 
+ SDKROOT = $(SDKROOT_$(USE_INTERNAL_SDK));
+ SDKROOT_ = macosx;
+diff --git a/Source/cmake/WebKitMacros.cmake b/Source/cmake/WebKitMacros.cmake
+index d4a356ef527a..ccf125c57455 100644
+--- a/Source/cmake/WebKitMacros.cmake
++++ b/Source/cmake/WebKitMacros.cmake
+@@ -503,6 +503,19 @@ macro(_WEBKIT_TARGET_SETUP _target _logical_name)
+     if (${_logical_name}_DEPENDENCIES)
+         add_dependencies(${_target} ${${_logical_name}_DEPENDENCIES})
+     endif ()
++
++    # liblldb finds the compile unit that defines a global variable only in a
++    # dSYM, not through the debug map, and finds a dSYM next to its image, or a
++    # framework's next to its bundle, which is Foo.framework/Versions/A/Foo.
++    if (APPLE AND ENABLE_MYA_HEAP)
++        get_target_property(_webkit_target_type ${_target} TYPE)
++        if (_webkit_target_type STREQUAL "SHARED_LIBRARY" OR _webkit_target_type STREQUAL "EXECUTABLE")
++            # A port marks a target a framework after this, so the generator decides.
++            add_custom_command(TARGET ${_target} POST_BUILD
++                COMMAND dsymutil $<TARGET_FILE:${_target}> -o $<IF:$<BOOL:$<TARGET_PROPERTY:${_target},FRAMEWORK>>,$<TARGET_FILE_DIR:${_target}>/../../../$<TARGET_FILE_NAME:${_target}>.framework.dSYM,$<TARGET_FILE:${_target}>.dSYM>
++                VERBATIM)
++        endif ()
++    endif ()
+ endmacro()
+ 
+ macro(_WEBKIT_TARGET _target)
+-- 
+2.54.0 (Apple Git-157)
+

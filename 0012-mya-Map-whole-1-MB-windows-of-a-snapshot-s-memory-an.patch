@@ -1,0 +1,331 @@
+From dfe25c1d1fc74bdc80b6edf7a3109de2d008d527 Mon Sep 17 00:00:00 2001
+From: Justin Michaud <jmichaud@igalia.com>
+Date: Tue, 6 Oct 2026 10:19:57 -0600
+Subject: [PATCH 12/23] [mya] Map whole 1 MB windows of a snapshot's memory,
+ and keep recent mappings Need the bug URL (OOPS!).
+
+Reviewed by NOBODY (OOPS!).
+
+Corpse::Memory mapped exactly the pages each read asked for and unmapped a
+Region as soon as its last reader released it. A heap walk reads millions of
+small values, most of them near the last one read, so nearly every read cost
+a mach_vm_remap and a later munmap.
+
+Now:
+- A read that fits in an aligned window of mappingWindowSize (1 MB) maps the
+  whole window, and later reads in it are served from that Region.
+- Memory keeps the most recently mapped Regions (4096 on Darwin) mapped after
+  their last reader releases them, in a ring; keepRecentMappings(n) changes
+  the bound, and 0 restores the old behaviour.
+- A window that cannot be mapped whole (it holds a hole or an unreadable
+  page) is remembered, and reads in it map their own pages as before. A
+  single page that cannot be mapped is remembered with its error, since a
+  walk meets the same unmappable page many times along an array or table.
+
+Reads that do not fit in one window are mapped as before.
+
+The Memory suite gains a window arena and checks that a read maps its whole
+window, that the window outlives its readers, that a read across two windows
+maps its own pages, that the bound releases the oldest, and that an
+unmappable page is remembered with its error. The original arena is now
+allocated at a window start, so that its hole keeps reads in it page by page.
+
+* Source/JavaScriptCore/corpse/CorpseMemory.cpp:
+* Source/JavaScriptCore/corpse/CorpseMemory.h:
+* Source/JavaScriptCore/corpse/tests/CorpseMemoryTest.cpp:
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/JavaScriptCore/corpse/CorpseMemory.cpp | 49 +++++++++-
+ Source/JavaScriptCore/corpse/CorpseMemory.h   | 27 +++++-
+ .../corpse/tests/CorpseMemoryTest.cpp         | 93 ++++++++++++++++++-
+ 3 files changed, 161 insertions(+), 8 deletions(-)
+
+diff --git a/Source/JavaScriptCore/corpse/CorpseMemory.cpp b/Source/JavaScriptCore/corpse/CorpseMemory.cpp
+index 7e473ed4c8d5..4d94cf404c08 100644
+--- a/Source/JavaScriptCore/corpse/CorpseMemory.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseMemory.cpp
+@@ -165,10 +165,13 @@ Memory::Memory(TaskHandle corpsePort)
+     // Placed here so we can assert this invariant only once on construction.
+     size_t page = pageSize();
+     RELEASE_ASSERT(page && !(page & (page - 1))); // The masking below needs a power of two.
++    RELEASE_ASSERT(!(mappingWindowSize % page));
++    keepRecentMappings(defaultKeptMappingCount);
+ }
+ 
+ Memory::~Memory()
+ {
++    keepRecentMappings(0);
+     for (auto& entry : m_regions) {
+         for (auto& region : entry.value)
+             RELEASE_ASSERT(region->refCount() == 1);
+@@ -199,6 +202,33 @@ Memory::MapResult Memory::map(Address objAddress, size_t objSizeInBytes)
+     if (!regionBase)
+         return MapResult { .error = Error::InvalidRequest };
+ 
++    auto keep = [&](const RefPtr<Region>& region) {
++        if (m_recentRegions.isEmpty())
++            return;
++        m_recentRegions[m_nextRecentRegion] = region;
++        m_nextRecentRegion = (m_nextRecentRegion + 1) % m_recentRegions.size();
++    };
++
++    target_address_t windowBase = objBase & ~(mappingWindowSize - 1);
++    if (windowBase && objEnd <= windowBase + mappingWindowSize && !m_unmappableWindows.contains(windowBase)) {
++        size_t windowPages = mappingWindowSize / page;
++        size_t windowOffset = static_cast<size_t>(objBase - windowBase);
++        auto window = m_regions.find(Address { windowBase });
++        if (window != m_regions.end()) {
++            for (auto& region : window->value) {
++                if (region->pageCount() >= windowPages)
++                    return MapResult { region, region->localBase() + windowOffset };
++            }
++        }
++        auto result = Region::create(*this, Address { windowBase }, windowPages, windowOffset);
++        if (result.region) {
++            addRegion(result.region);
++            keep(result.region);
++            return result;
++        }
++        m_unmappableWindows.add(windowBase);
++    }
++
+     // Find an existing page aligned Region that fits this request if possible.
+     Address regionBaseAddress { regionBase };
+     size_t pageCount = static_cast<size_t>((regionEnd - regionBase) / page);
+@@ -213,15 +243,30 @@ Memory::MapResult Memory::map(Address objAddress, size_t objSizeInBytes)
+         }
+     }
+ 
+-    // No existing Region fits, so map a new one.
++    // No existing Region fits, so map a new one. A walk reads its way along
++    // arrays and tables, so an unmappable page is met many times.
++    if (auto unmappable = m_unmappablePages.find(regionBase); unmappable != m_unmappablePages.end())
++        return MapResult { .error = unmappable->value.first, .kernResult = unmappable->value.second };
+     auto result = Region::create(*this, regionBaseAddress, pageCount, offset);
+-    if (!result.region)
++    if (!result.region) {
++        if (pageCount == 1)
++            m_unmappablePages.add(regionBase, std::pair { result.error, result.kernResult });
+         return result;
++    }
+ 
+     addRegion(result.region);
++    keep(result.region);
+     return result;
+ }
+ 
++void Memory::keepRecentMappings(size_t count)
++{
++    // Dropping a kept Region releases it if no reader holds it.
++    m_recentRegions.clear();
++    m_recentRegions.resize(count);
++    m_nextRecentRegion = 0;
++}
++
+ void Memory::addRegion(RefPtr<Region> region)
+ {
+     auto& regions = m_regions.add(region->remoteBase(), Vector<RefPtr<Region>> { }).iterator->value;
+diff --git a/Source/JavaScriptCore/corpse/CorpseMemory.h b/Source/JavaScriptCore/corpse/CorpseMemory.h
+index 0f4e5921f2a9..5a3f7b840838 100644
+--- a/Source/JavaScriptCore/corpse/CorpseMemory.h
++++ b/Source/JavaScriptCore/corpse/CorpseMemory.h
+@@ -33,6 +33,7 @@
+ #include <stdint.h>
+ #include <wtf/ForbidHeapAllocation.h>
+ #include <wtf/HashMap.h>
++#include <wtf/HashSet.h>
+ #include <wtf/RefPtr.h>
+ #include <wtf/TZoneMalloc.h>
+ #include <wtf/Vector.h>
+@@ -46,7 +47,13 @@ namespace Corpse {
+ // the remote memory into this process' address space as Regions (in multiples of
+ // pages), and manage the life cycle of these Regions.
+ //
+-// When mapping a Region, Memory aims to map the smallest range possible. Hence, it is
++// A read that fits in an aligned window of mappingWindowSize maps the whole window,
++// since readers read many small values near each other, and Memory keeps the most
++// recently mapped Regions mapped after their last reader releases them, up to a bound.
++// A window that runs into memory that cannot be mapped is remembered, and reads in it
++// map only their own pages; a page that cannot be mapped is remembered too.
++//
++// Outside a window, Memory aims to map the smallest range possible. Hence, it is
+ // possible that subsequest requests land in the same address range as an existing
+ // Region but spans more pages beyond the end of the existing Region. In such a
+ // scenario, we'll map a new Region that may overlap an existing Region. We do expect
+@@ -100,6 +107,18 @@ public:
+     size_t regionCount() const;
+     size_t mappedPageCount() const;
+ 
++    static constexpr target_address_t mappingWindowSize = 1024 * 1024;
++    // On Linux a Region is a copy of the snapshot's memory, not a mapping of it.
++#if OS(DARWIN)
++    static constexpr size_t defaultKeptMappingCount = 4096;
++#else
++    static constexpr size_t defaultKeptMappingCount = 256;
++#endif
++    // Keeps the `count` most recently mapped Regions mapped after their last
++    // reader releases them, and drops those kept beyond it. Zero releases each
++    // Region with its last reader.
++    void keepRecentMappings(size_t count);
++
+     void dump(const char* indent = "    ") const;
+ 
+     static size_t pageSize();
+@@ -149,6 +168,12 @@ private:
+     // can be more than one Region of different sizes which start at the same page
+     // Address. The Vector is sorted in ascending size (i.e. pageCount).
+     HashMap<Address, Vector<RefPtr<Region>>> m_regions;
++
++    // The most recently used Regions, each kept with one reference, in a ring.
++    Vector<RefPtr<Region>> m_recentRegions;
++    size_t m_nextRecentRegion { 0 };
++    HashSet<target_address_t> m_unmappableWindows; // Windows with a hole, which reads map page by page.
++    HashMap<target_address_t, std::pair<Error, KernelResult>> m_unmappablePages;
+ };
+ 
+ } // namespace Corpse
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseMemoryTest.cpp b/Source/JavaScriptCore/corpse/tests/CorpseMemoryTest.cpp
+index 1d08878537da..8c2d3a7b7fdb 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseMemoryTest.cpp
++++ b/Source/JavaScriptCore/corpse/tests/CorpseMemoryTest.cpp
+@@ -78,15 +78,22 @@ uint64_t patternFor(unsigned page) { return patternBase | page; }
+ constexpr uint64_t tailPatternBase = 0x7A11E00000000000ull;
+ uint64_t tailPatternFor(unsigned page) { return tailPatternBase | page; }
+ 
++// Memory at the start of a mapping window, so that every page of `size` bytes is in one.
++static bool allocateAtWindowStart(mach_vm_address_t& base, mach_vm_size_t size)
++{
++    return mach_vm_map(mach_task_self(), &base, size, Memory::mappingWindowSize - 1, VM_FLAGS_ANYWHERE, MEMORY_OBJECT_NULL, 0, FALSE,
++        VM_PROT_DEFAULT, VM_PROT_ALL, VM_INHERIT_DEFAULT) == KERN_SUCCESS;
++}
++
+ // Each page holds one pattern at its first word and another at its last, so a read can
+-// be attributed to its page and contiguity across a boundary can be checked.
++// be attributed to its page and contiguity across a boundary can be checked. Its window
++// holds its hole, so reads in it map their own pages.
+ class Arena {
+ public:
+     bool build()
+     {
+         m_pageSize = Memory::pageSize();
+-        kern_return_t kr = mach_vm_allocate(mach_task_self(), &m_base, arenaPageCount * m_pageSize, VM_FLAGS_ANYWHERE);
+-        if (kr != KERN_SUCCESS)
++        if (!allocateAtWindowStart(m_base, arenaPageCount * m_pageSize))
+             return false;
+ 
+         for (unsigned page = 0; page < arenaPageCount; ++page) {
+@@ -125,6 +132,26 @@ private:
+     size_t m_pageSize { 0 };
+ };
+ 
++// Two whole mapping windows of readable memory, with a pattern at the start and the end of each.
++class WindowArena {
++public:
++    bool build()
++    {
++        if (!allocateAtWindowStart(m_base, 2 * Memory::mappingWindowSize))
++            return false;
++        for (unsigned window = 0; window < 2; ++window) {
++            *reinterpret_cast<uint64_t*>(m_base + window * Memory::mappingWindowSize) = patternFor(window);
++            *reinterpret_cast<uint64_t*>(m_base + (window + 1) * Memory::mappingWindowSize - sizeof(uint64_t)) = tailPatternFor(window);
++        }
++        return true;
++    }
++
++    Address corpseAddressOf(unsigned window) const { return Address(m_base + window * Memory::mappingWindowSize); }
++
++private:
++    mach_vm_address_t m_base { 0 };
++};
++
+ // Takes a std::span, so that handing a Memory::Span straight to it is what checks a
+ // handle stands in for one.
+ uint64_t firstWordOf(std::span<const uint8_t> bytes)
+@@ -160,11 +187,13 @@ void testMemory()
+         return;
+ 
+     Arena arena;
+-    if (!arena.build()) {
+-        TEST_ASSERT(false, "the test arena could be built");
++    WindowArena windows;
++    if (!arena.build() || !windows.build()) {
++        TEST_ASSERT(false, "the test arenas could be built");
+         return;
+     }
+     size_t pageSize = arena.pageSize();
++    size_t windowPages = Memory::mappingWindowSize / pageSize;
+ 
+     // The corpse is taken after the arena is laid out, so it holds the same layout at
+     // the same addresses.
+@@ -181,6 +210,58 @@ void testMemory()
+     Memory& memory = snapshot.memory();
+     TEST_ASSERT_EQ(memory.regionCount(), 0uz, "a new Memory has nothing mapped");
+ 
++    {
++        // A read maps its whole window, which stays mapped for the reads after it.
++        const void* windowBase = nullptr;
++        {
++            auto word = memory.ptr<uint64_t>(windows.corpseAddressOf(0) + 64);
++            TEST_ASSERT(word.isValid(), "a word in a readable window maps");
++            TEST_ASSERT_EQ(memory.regionCount(), 1uz, "as one region");
++            TEST_ASSERT_EQ(memory.mappedPageCount(), windowPages, "covering its whole window");
++            windowBase = word.get() - 64 / sizeof(uint64_t);
++        }
++        TEST_ASSERT_EQ(memory.regionCount(), 1uz, "the window stays mapped after its last reader");
++        TEST_ASSERT(isMappedLocally(windowBase), "and its pages stay present");
++        {
++            auto first = memory.ptr<uint64_t>(windows.corpseAddressOf(0));
++            auto last = memory.ptr<uint64_t>(windows.corpseAddressOf(1) - sizeof(uint64_t));
++            TEST_ASSERT(first.get() == windowBase, "a later read in the window is served from it");
++            TEST_ASSERT_HEX_EQ(*first, patternFor(0), "and reads its start");
++            TEST_ASSERT_HEX_EQ(*last, tailPatternFor(0), "and its end");
++            TEST_ASSERT_EQ(memory.regionCount(), 1uz, "with no region of their own");
++        }
++        {
++            auto words = memory.span<uint64_t>(windows.corpseAddressOf(1) - sizeof(uint64_t), 2);
++            TEST_ASSERT(words.isValid(), "a range across two windows maps");
++            TEST_ASSERT_EQ(memory.mappedPageCount(), windowPages + 2, "as its own two pages");
++            TEST_ASSERT_HEX_EQ(words[0], tailPatternFor(0), "the end of the first window");
++            TEST_ASSERT_HEX_EQ(words[1], patternFor(1), "next to the start of the second");
++        }
++        auto inSecond = memory.ptr<uint64_t>(windows.corpseAddressOf(1));
++        TEST_ASSERT_EQ(memory.regionCount(), 3uz, "the second window is a region of its own");
++    }
++    {
++        // The bound on what is kept: keeping one Region drops the others no reader holds.
++        memory.keepRecentMappings(1);
++        TEST_ASSERT_EQ(memory.regionCount(), 0uz, "kept Regions no reader holds are released");
++        const void* firstWindow = nullptr;
++        {
++            auto word = memory.ptr<uint64_t>(windows.corpseAddressOf(0));
++            firstWindow = word.get();
++        }
++        TEST_ASSERT_EQ(memory.regionCount(), 1uz, "the one kept is mapped");
++        {
++            auto word = memory.ptr<uint64_t>(windows.corpseAddressOf(1));
++        }
++        TEST_ASSERT_EQ(memory.regionCount(), 1uz, "a second window takes its place");
++        TEST_ASSERT(!isMappedLocally(firstWindow), "and the first is unmapped");
++    }
++
++    // With nothing kept, each Region is released with its last reader, and the reads in the
++    // arena's window, which holds its hole, map only their own pages.
++    memory.keepRecentMappings(0);
++    TEST_ASSERT_EQ(memory.regionCount(), 0uz, "keeping nothing releases what was kept");
++
+     {
+         auto word = memory.ptr<uint64_t>(arena.corpseAddressOf(Readable0));
+         TEST_ASSERT(word.isValid(), "a readable page maps");
+@@ -343,6 +424,8 @@ void testMemory()
+         auto span = memory.span<uint8_t>(arena.corpseAddressOf(NoAccess), sizeof(uint64_t));
+         TEST_ASSERT(!span.isValid(), "an inaccessible page does not map");
+         TEST_ASSERT_EQ(span.error(), Memory::Error::NotReadable, "and says it denies read access");
++        auto again = memory.span<uint8_t>(arena.corpseAddressOf(NoAccess) + 64, sizeof(uint64_t));
++        TEST_ASSERT_EQ(again.error(), Memory::Error::NotReadable, "a page that did not map is remembered with its error");
+     }
+     {
+         auto span = memory.span<uint8_t>(arena.corpseAddressOf(Readable0), 0);
+-- 
+2.54.0 (Apple Git-157)
+

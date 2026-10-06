@@ -1,0 +1,3707 @@
+From 8a120fabba2552227ac66d3800aa546052b22c0c Mon Sep 17 00:00:00 2001
+From: Justin Michaud <jmichaud@igalia.com>
+Date: Tue, 6 Oct 2026 10:19:57 -0600
+Subject: [PATCH 18/23] [mya] Read a snapshot's types from its debug info
+ through liblldb Need the bug URL (OOPS!).
+
+Reviewed by NOBODY (OOPS!).
+
+The layer the heap walk reads the target through: C++ types and values of a
+snapshot, described by the target's own debug info, with no RTTI and no
+cooperation from the target.
+
+- SnapshotDebugInfo opens the debug info of a snapshot's images through
+  liblldb. liblldb is only ever given files, never a process: each image is
+  added at its load address with its UUID (Darwin) or build-id (Linux), so
+  liblldb refuses a file that was rebuilt since the target loaded it rather
+  than misreading memory with its layouts. It finds types and global
+  variables by name, the symbol at an address, and an object's dynamic type:
+  the destructor in the object's vtable, matched against the destructors'
+  linkage names, gives its complete class.
+- TargetType is a type of the debug info by its layout: size, fields with
+  their offsets, bases (virtual ones too), pointees, array elements,
+  enumerators; one per canonical type, owned by the SnapshotDebugInfo.
+- TargetValue is an address and a TargetType. Nothing is read until a scalar
+  is asked for, so reaching a field of a large object reads only that field.
+  A failure reports once and makes the value invalid, and everything after
+  it is quietly invalid, so a chain of lookups reports only the step that
+  failed.
+- Remote<T> is a TargetValue named by the C++ type T a walker knows it
+  holds, with RemoteTraits<T> saying what it holds, the way visitChildren
+  does for a cell: pointers, and readers for WTF's Vector, HashSet, HashMap
+  and SentinelLinkedList, bounded by new CorpseLimits.
+
+The DebugInfo suite (replacing the old Typeinfo suite) checks all of this in
+and out of process, after the target has exited, and after its executable
+was replaced on disk: same-image and cross-image objects, diamond
+inheritance, destructors defined later, system-library objects, alignment,
+null and unreadable pointers, and WTF containers, including deleted hash
+table buckets.
+
+Needs: liblldb at build time (MYA_HEAP), the dSYM and DWARF-shape build
+patches for the types to be complete, and the HashTraits patch for the
+deleted-bucket case.
+
+* Source/JavaScriptCore/CMakeLists.txt:
+* Source/JavaScriptCore/JavaScriptCore.xcodeproj/project.pbxproj:
+* Source/JavaScriptCore/corpse/CMakeLists.txt:
+* Source/JavaScriptCore/corpse/CorpseError.cpp:
+* Source/JavaScriptCore/corpse/CorpseError.h:
+* Source/JavaScriptCore/corpse/CorpseLimits.h:
+* Source/JavaScriptCore/corpse/CorpseRemote.h: Added.
+* Source/JavaScriptCore/corpse/CorpseSnapshotDebugInfo.cpp: Added.
+* Source/JavaScriptCore/corpse/CorpseSnapshotDebugInfo.h: Added.
+* Source/JavaScriptCore/corpse/CorpseTargetType.cpp: Added.
+* Source/JavaScriptCore/corpse/CorpseTargetType.h: Added.
+* Source/JavaScriptCore/corpse/CorpseTargetValue.cpp: Added.
+* Source/JavaScriptCore/corpse/CorpseTargetValue.h: Added.
+* Source/JavaScriptCore/corpse/tests/DebugInfoTest.cpp: Added.
+* Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.cpp:
+* Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h:
+* Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp:
+* Source/JavaScriptCore/shell/CMakeLists.txt:
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/JavaScriptCore/CMakeLists.txt          |    4 +
+ .../JavaScriptCore.xcodeproj/project.pbxproj  |   32 +
+ Source/JavaScriptCore/corpse/CMakeLists.txt   |    3 +
+ Source/JavaScriptCore/corpse/CorpseError.cpp  |    8 +
+ Source/JavaScriptCore/corpse/CorpseError.h    |    6 +-
+ Source/JavaScriptCore/corpse/CorpseLimits.h   |    6 +
+ Source/JavaScriptCore/corpse/CorpseRemote.h   |  414 +++++++
+ .../corpse/CorpseSnapshotDebugInfo.cpp        | 1061 +++++++++++++++++
+ .../corpse/CorpseSnapshotDebugInfo.h          |  204 ++++
+ .../corpse/CorpseTargetType.cpp               |  410 +++++++
+ .../JavaScriptCore/corpse/CorpseTargetType.h  |  144 +++
+ .../corpse/CorpseTargetValue.cpp              |  281 +++++
+ .../JavaScriptCore/corpse/CorpseTargetValue.h |  138 +++
+ .../corpse/tests/DebugInfoTest.cpp            |  486 ++++++++
+ .../corpse/tests/LibJSCToolsTestUtilities.cpp |  111 +-
+ .../corpse/tests/LibJSCToolsTestUtilities.h   |   12 +
+ .../corpse/tests/testLibJSCTools.cpp          |    1 +
+ Source/JavaScriptCore/shell/CMakeLists.txt    |    1 +
+ 18 files changed, 3303 insertions(+), 19 deletions(-)
+ create mode 100644 Source/JavaScriptCore/corpse/CorpseRemote.h
+ create mode 100644 Source/JavaScriptCore/corpse/CorpseSnapshotDebugInfo.cpp
+ create mode 100644 Source/JavaScriptCore/corpse/CorpseSnapshotDebugInfo.h
+ create mode 100644 Source/JavaScriptCore/corpse/CorpseTargetType.cpp
+ create mode 100644 Source/JavaScriptCore/corpse/CorpseTargetType.h
+ create mode 100644 Source/JavaScriptCore/corpse/CorpseTargetValue.cpp
+ create mode 100644 Source/JavaScriptCore/corpse/CorpseTargetValue.h
+ create mode 100644 Source/JavaScriptCore/corpse/tests/DebugInfoTest.cpp
+
+diff --git a/Source/JavaScriptCore/CMakeLists.txt b/Source/JavaScriptCore/CMakeLists.txt
+index 722900e194a5..50d7b76e5855 100644
+--- a/Source/JavaScriptCore/CMakeLists.txt
++++ b/Source/JavaScriptCore/CMakeLists.txt
+@@ -1670,8 +1670,12 @@ if (ENABLE_MYA)
+         corpse/CorpsePlatform.h
+         corpse/CorpseProcess.h
+         corpse/CorpseRegion.h
++        corpse/CorpseRemote.h
+         corpse/CorpseSnapshot.h
++        corpse/CorpseSnapshotDebugInfo.h
+         corpse/CorpseSymbol.h
++        corpse/CorpseTargetType.h
++        corpse/CorpseTargetValue.h
+         corpse/CorpseThread.h
+     )
+ endif ()
+diff --git a/Source/JavaScriptCore/JavaScriptCore.xcodeproj/project.pbxproj b/Source/JavaScriptCore/JavaScriptCore.xcodeproj/project.pbxproj
+index 5fc889ff4535..f162b37df966 100644
+--- a/Source/JavaScriptCore/JavaScriptCore.xcodeproj/project.pbxproj
++++ b/Source/JavaScriptCore/JavaScriptCore.xcodeproj/project.pbxproj
+@@ -1862,12 +1862,20 @@
+ 		7E83C40E17D785F3003DC41B /* CorpseSymbolTest.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 7E83C40817D785F3003DC41B /* CorpseSymbolTest.cpp */; };
+ 		7E83C40A17D785F3003DC41B /* testLibJSCTools.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 7E83C40017D785F3003DC41B /* testLibJSCTools.cpp */; };
+ 		1AB0DEAD00000006000D0001 /* CorpseVMTest.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000007000D0001 /* CorpseVMTest.cpp */; };
++		1AB0DEAD00000004000D0001 /* DebugInfoTest.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000005000D0001 /* DebugInfoTest.cpp */; };
+ 		D68DA6DA907546EFA429D8D2 /* CorpseDiagnosticsTest.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 203DFA350D3248B0A8E7376B /* CorpseDiagnosticsTest.cpp */; };
+ 		7E83C43717D785F3003DC41B /* CorpseExportsTrie.h in Headers */ = {isa = PBXBuildFile; fileRef = 7E83C43517D785F3003DC41B /* CorpseExportsTrie.h */; settings = {ATTRIBUTES = (Private, ); }; };
+ 		56C6C2B7EBDCC63B6ECEA9AD /* CorpseThread.h in Headers */ = {isa = PBXBuildFile; fileRef = 211E3D6CA97F31CEB385A75A /* CorpseThread.h */; settings = {ATTRIBUTES = (Private, ); }; };
+ 		DD38CA03D03F45F09699BF9F /* CorpseImage.h in Headers */ = {isa = PBXBuildFile; fileRef = 44DFA0959F8443918E97F342 /* CorpseImage.h */; settings = {ATTRIBUTES = (Private, ); }; };
++		E3EF497D7DA94ED8B61EDD60 /* CorpseRemote.h in Headers */ = {isa = PBXBuildFile; fileRef = E6B032F41DE24CC994F1B609 /* CorpseRemote.h */; settings = {ATTRIBUTES = (Private, ); }; };
++		090DE21C7C0945CB953F653C /* CorpseTargetValue.h in Headers */ = {isa = PBXBuildFile; fileRef = 337602DDDA3B4A62BBFF3D32 /* CorpseTargetValue.h */; settings = {ATTRIBUTES = (Private, ); }; };
++		AB3763E342CB4561B6AA47B5 /* CorpseTargetType.h in Headers */ = {isa = PBXBuildFile; fileRef = 1645A496EB8C4AFEBFC2DA4E /* CorpseTargetType.h */; settings = {ATTRIBUTES = (Private, ); }; };
++		5E8EAC2E70DC4819B4D48B01 /* CorpseSnapshotDebugInfo.h in Headers */ = {isa = PBXBuildFile; fileRef = 79A90D14EE9E4B22A597E1FB /* CorpseSnapshotDebugInfo.h */; settings = {ATTRIBUTES = (Private, ); }; };
+ 		EF648B9EEAF54C44048B416A /* CorpseThread.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 960BD2B783EAEBE3233F91BF /* CorpseThread.cpp */; };
+ 		274BDBF8F9DE497D87E618C3 /* CorpseImage.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1739997C26A542609CF9FCED /* CorpseImage.cpp */; };
++		CE0CD4DCEEE844329099C636 /* CorpseTargetValue.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 4D16106F78AE4E62AD426408 /* CorpseTargetValue.cpp */; };
++		AA2EDB06191943A4B7636190 /* CorpseTargetType.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 5CCD29167DBA4CA2B24D20CE /* CorpseTargetType.cpp */; };
++		CDEB690CE7724FC191AD47A8 /* CorpseSnapshotDebugInfo.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 34A09B37A7D649E4B951F6F5 /* CorpseSnapshotDebugInfo.cpp */; };
+ 		4C1E8A7D2B5F4E0F9A3D6C2B /* CorpseLimits.h in Headers */ = {isa = PBXBuildFile; fileRef = 7E2F9B3C4D5A6E7F8091A2B3 /* CorpseLimits.h */; settings = {ATTRIBUTES = (Private, ); }; };
+ 		CA47D093D003440A28D15924 /* CorpseSnapshot.h in Headers */ = {isa = PBXBuildFile; fileRef = 94711688984F16F71D615DE5 /* CorpseSnapshot.h */; settings = {ATTRIBUTES = (Private, ); }; };
+ 		A3B4C5D6E7F8091A2B3C4D5E /* CorpseMemory.h in Headers */ = {isa = PBXBuildFile; fileRef = 92A3B4C5D6E7F8091A2B3C4D /* CorpseMemory.h */; settings = {ATTRIBUTES = (Private, ); }; };
+@@ -4117,8 +4125,15 @@
+ 		7E83C43517D785F3003DC41B /* CorpseExportsTrie.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseExportsTrie.h; sourceTree = "<group>"; };
+ 		211E3D6CA97F31CEB385A75A /* CorpseThread.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseThread.h; sourceTree = "<group>"; };
+ 		44DFA0959F8443918E97F342 /* CorpseImage.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseImage.h; sourceTree = "<group>"; };
++		E6B032F41DE24CC994F1B609 /* CorpseRemote.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseRemote.h; sourceTree = "<group>"; };
++		337602DDDA3B4A62BBFF3D32 /* CorpseTargetValue.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseTargetValue.h; sourceTree = "<group>"; };
++		1645A496EB8C4AFEBFC2DA4E /* CorpseTargetType.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseTargetType.h; sourceTree = "<group>"; };
++		79A90D14EE9E4B22A597E1FB /* CorpseSnapshotDebugInfo.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseSnapshotDebugInfo.h; sourceTree = "<group>"; };
+ 		960BD2B783EAEBE3233F91BF /* CorpseThread.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseThread.cpp; sourceTree = "<group>"; };
+ 		1739997C26A542609CF9FCED /* CorpseImage.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseImage.cpp; sourceTree = "<group>"; };
++		4D16106F78AE4E62AD426408 /* CorpseTargetValue.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseTargetValue.cpp; sourceTree = "<group>"; };
++		5CCD29167DBA4CA2B24D20CE /* CorpseTargetType.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseTargetType.cpp; sourceTree = "<group>"; };
++		34A09B37A7D649E4B951F6F5 /* CorpseSnapshotDebugInfo.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseSnapshotDebugInfo.cpp; sourceTree = "<group>"; };
+ 		7E2F9B3C4D5A6E7F8091A2B3 /* CorpseLimits.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseLimits.h; sourceTree = "<group>"; };
+ 		1482B7E10A43076000517CFC /* JSObjectRef.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = JSObjectRef.h; sourceTree = "<group>"; };
+ 		1482B7E20A43076000517CFC /* JSObjectRef.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = JSObjectRef.cpp; sourceTree = "<group>"; };
+@@ -4539,6 +4554,7 @@
+ 		7E83C40917D785F3003DC41B /* testLibJSCTools */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = testLibJSCTools; sourceTree = BUILT_PRODUCTS_DIR; };
+ 		1AB0DEAD00000007000D0001 /* CorpseVMTest.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseVMTest.cpp; sourceTree = "<group>"; };
+ 		203DFA350D3248B0A8E7376B /* CorpseDiagnosticsTest.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseDiagnosticsTest.cpp; sourceTree = "<group>"; };
++		1AB0DEAD00000005000D0001 /* DebugInfoTest.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = DebugInfoTest.cpp; sourceTree = "<group>"; };
+ 		44F93E0D2AE71F9F00FFA37C /* JavaScriptCoreFramework.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = JavaScriptCoreFramework.cpp; sourceTree = "<group>"; };
+ 		451539B812DC994500EF7AC4 /* Yarr.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = Yarr.h; path = yarr/Yarr.h; sourceTree = "<group>"; };
+ 		45E12D8806A49B0F00E9DF84 /* jsc.cpp */ = {isa = PBXFileReference; fileEncoding = 30; indentWidth = 4; lastKnownFileType = sourcecode.cpp.cpp; path = jsc.cpp; sourceTree = "<group>"; tabWidth = 4; };
+@@ -6972,6 +6988,7 @@
+ 				7E83C40817D785F3003DC41B /* CorpseSymbolTest.cpp */,
+ 				7E83C43217D785F3003DC41B /* CorpseThreadTest.cpp */,
+ 				1AB0DEAD00000007000D0001 /* CorpseVMTest.cpp */,
++				1AB0DEAD00000005000D0001 /* DebugInfoTest.cpp */,
+ 				7E83C40417D785F3003DC41B /* LibJSCToolsTestUtilities.cpp */,
+ 				7E83C40317D785F3003DC41B /* LibJSCToolsTestUtilities.h */,
+ 				7E83C40017D785F3003DC41B /* testLibJSCTools.cpp */,
+@@ -7005,10 +7022,17 @@
+ 				55D0F2DD9CA70132D5104B34 /* CorpseProcess.h */,
+ 				C8503B7E641A29DF5B0E3742 /* CorpseRegion.cpp */,
+ 				9F41D6082A3E4B57C0768DB1 /* CorpseRegion.h */,
++				E6B032F41DE24CC994F1B609 /* CorpseRemote.h */,
+ 				5E906BE4CC29012A83A8F299 /* CorpseSnapshot.cpp */,
+ 				94711688984F16F71D615DE5 /* CorpseSnapshot.h */,
++				34A09B37A7D649E4B951F6F5 /* CorpseSnapshotDebugInfo.cpp */,
++				79A90D14EE9E4B22A597E1FB /* CorpseSnapshotDebugInfo.h */,
+ 				E8D1735B28066A3B1D756ECC /* CorpseSymbol.cpp */,
+ 				8F1FA0900D09DF06EE63F7D2 /* CorpseSymbol.h */,
++				5CCD29167DBA4CA2B24D20CE /* CorpseTargetType.cpp */,
++				1645A496EB8C4AFEBFC2DA4E /* CorpseTargetType.h */,
++				4D16106F78AE4E62AD426408 /* CorpseTargetValue.cpp */,
++				337602DDDA3B4A62BBFF3D32 /* CorpseTargetValue.h */,
+ 				960BD2B783EAEBE3233F91BF /* CorpseThread.cpp */,
+ 				211E3D6CA97F31CEB385A75A /* CorpseThread.h */,
+ 			);
+@@ -11736,8 +11760,12 @@
+ 				1AB0DEAD00000018000D0001 /* CorpsePlatform.h in Headers */,
+ 				0D9C2E68ACFF010D91916993 /* CorpseProcess.h in Headers */,
+ 				3A7C1E5D9B0F4A2681C34D07 /* CorpseRegion.h in Headers */,
++				E3EF497D7DA94ED8B61EDD60 /* CorpseRemote.h in Headers */,
+ 				CA47D093D003440A28D15924 /* CorpseSnapshot.h in Headers */,
++				5E8EAC2E70DC4819B4D48B01 /* CorpseSnapshotDebugInfo.h in Headers */,
+ 				5601486802533982ACC870BE /* CorpseSymbol.h in Headers */,
++				AB3763E342CB4561B6AA47B5 /* CorpseTargetType.h in Headers */,
++				090DE21C7C0945CB953F653C /* CorpseTargetValue.h in Headers */,
+ 				56C6C2B7EBDCC63B6ECEA9AD /* CorpseThread.h in Headers */,
+ 				C4F4B6F41A05C944005CAB76 /* cpp_generator.py in Headers */,
+ 				C4F4B6F31A05C944005CAB76 /* cpp_generator_templates.py in Headers */,
+@@ -14418,7 +14446,10 @@
+ 				C366EA5039A3B51405995EA6 /* CorpseProcess.cpp in Sources */,
+ 				5E2B94A17C6D40F3B85219CE /* CorpseRegion.cpp in Sources */,
+ 				0946712DEC51E0E86C4A49E3 /* CorpseSnapshot.cpp in Sources */,
++				CDEB690CE7724FC191AD47A8 /* CorpseSnapshotDebugInfo.cpp in Sources */,
+ 				377C8C2416AE3DF90650C0E9 /* CorpseSymbol.cpp in Sources */,
++				AA2EDB06191943A4B7636190 /* CorpseTargetType.cpp in Sources */,
++				CE0CD4DCEEE844329099C636 /* CorpseTargetValue.cpp in Sources */,
+ 				EF648B9EEAF54C44048B416A /* CorpseThread.cpp in Sources */,
+ 			);
+ 			runOnlyForDeploymentPostprocessing = 0;
+@@ -14800,6 +14831,7 @@
+ 				7E83C40E17D785F3003DC41B /* CorpseSymbolTest.cpp in Sources */,
+ 				7E83C43417D785F3003DC41B /* CorpseThreadTest.cpp in Sources */,
+ 				1AB0DEAD00000006000D0001 /* CorpseVMTest.cpp in Sources */,
++				1AB0DEAD00000004000D0001 /* DebugInfoTest.cpp in Sources */,
+ 				7E83C40C17D785F3003DC41B /* LibJSCToolsTestUtilities.cpp in Sources */,
+ 				7E83C40A17D785F3003DC41B /* testLibJSCTools.cpp in Sources */,
+ 			);
+diff --git a/Source/JavaScriptCore/corpse/CMakeLists.txt b/Source/JavaScriptCore/corpse/CMakeLists.txt
+index e2aa63999628..f826d1b7f61c 100644
+--- a/Source/JavaScriptCore/corpse/CMakeLists.txt
++++ b/Source/JavaScriptCore/corpse/CMakeLists.txt
+@@ -10,7 +10,10 @@ set(JavaScriptCoreTools_SOURCES
+     CorpseProcess.cpp
+     CorpseRegion.cpp
+     CorpseSnapshot.cpp
++    CorpseSnapshotDebugInfo.cpp
+     CorpseSymbol.cpp
++    CorpseTargetType.cpp
++    CorpseTargetValue.cpp
+     CorpseThread.cpp
+ )
+ 
+diff --git a/Source/JavaScriptCore/corpse/CorpseError.cpp b/Source/JavaScriptCore/corpse/CorpseError.cpp
+index 1e9f0bb7657c..7cc7d73b45fb 100644
+--- a/Source/JavaScriptCore/corpse/CorpseError.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseError.cpp
+@@ -122,6 +122,14 @@ static ASCIILiteral label(DiagnosticCounter counter)
+         return "images without a readable path"_s;
+     case DiagnosticCounter::ImagesWithoutFile:
+         return "images no file holds"_s;
++    case DiagnosticCounter::ImagesWithoutDebugInfo:
++        return "images liblldb could not open"_s;
++    case DiagnosticCounter::VTableSlotsNotDestructors:
++        return "vtable slots that are not a destructor"_s;
++    case DiagnosticCounter::VTablesWithoutSymbol:
++        return "vtables without a symbol to check their class against"_s;
++    case DiagnosticCounter::ClosuresWithoutCallOperator:
++        return "closures of unnamed types whose call operator was not found"_s;
+     }
+     RELEASE_ASSERT_NOT_REACHED();
+ }
+diff --git a/Source/JavaScriptCore/corpse/CorpseError.h b/Source/JavaScriptCore/corpse/CorpseError.h
+index 1a3dba0c3714..51a89ed159d0 100644
+--- a/Source/JavaScriptCore/corpse/CorpseError.h
++++ b/Source/JavaScriptCore/corpse/CorpseError.h
+@@ -74,8 +74,12 @@ enum class DiagnosticCounter : uint8_t {
+     UnreadableThreadStates,
+     ImagesWithoutPath,
+     ImagesWithoutFile,
++    ImagesWithoutDebugInfo,
++    VTableSlotsNotDestructors,
++    VTablesWithoutSymbol,
++    ClosuresWithoutCallOperator,
+ };
+-constexpr size_t numberOfDiagnosticCounters = static_cast<size_t>(DiagnosticCounter::ImagesWithoutFile) + 1;
++constexpr size_t numberOfDiagnosticCounters = static_cast<size_t>(DiagnosticCounter::ClosuresWithoutCallOperator) + 1;
+ 
+ // Mya may be used on corrupted target heaps; we must be able to
+ // use and test it in these cases without crashing, and
+diff --git a/Source/JavaScriptCore/corpse/CorpseLimits.h b/Source/JavaScriptCore/corpse/CorpseLimits.h
+index 32f40459562f..12c75ad4d660 100644
+--- a/Source/JavaScriptCore/corpse/CorpseLimits.h
++++ b/Source/JavaScriptCore/corpse/CorpseLimits.h
+@@ -60,6 +60,12 @@ constexpr uint32_t maxGNUHashBuckets = 16 * 1024 * 1024; // libJavaScriptCore's
+ constexpr uint32_t maxGNUHashBloomWords = 1024 * 1024; // And 256 Bloom filter words.
+ constexpr uint32_t maxGNUHashChainLength = 1024 * 1024; // A chain holds a few symbols.
+ constexpr size_t maxRegionCount = 1024 * 1024; // A large process maps tens of thousands.
++constexpr size_t maxVTableSlots = 64 * 1024; // Well above the few hundred virtual functions of the largest WebCore classes.
++
++// No container read out of a target's heap comes near these element counts.
++constexpr unsigned maxLinkedListLength = 64 * 1024;
++constexpr unsigned maxHashTableSize = 64 * 1024 * 1024;
++constexpr unsigned maxVectorSize = 16 * 1024 * 1024;
+ 
+ // A lookup that finds nothing will read every image's load commands and exports
+ // trie, which measured 101 MB for the ~2,800 image process above and 0.4 MB for
+diff --git a/Source/JavaScriptCore/corpse/CorpseRemote.h b/Source/JavaScriptCore/corpse/CorpseRemote.h
+new file mode 100644
+index 000000000000..27b30ca3d751
+--- /dev/null
++++ b/Source/JavaScriptCore/corpse/CorpseRemote.h
+@@ -0,0 +1,414 @@
++/*
++ * Copyright (C) 2026 Igalia S.L.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#pragma once
++
++#include <JavaScriptCore/CorpsePlatform.h>
++
++#if ENABLE(MYA)
++
++#include <JavaScriptCore/CorpseAddress.h>
++#include <JavaScriptCore/CorpseError.h>
++#include <JavaScriptCore/CorpseLimits.h>
++#include <JavaScriptCore/CorpseSnapshot.h>
++#include <JavaScriptCore/CorpseSnapshotDebugInfo.h>
++#include <JavaScriptCore/CorpseTargetType.h>
++#include <JavaScriptCore/CorpseTargetValue.h>
++#include <optional>
++#include <stddef.h>
++#include <stdint.h>
++#include <type_traits>
++#include <algorithm>
++#include <span>
++#include <string_view>
++#include <wtf/HashMap.h>
++#include <wtf/HashSet.h>
++#include <wtf/HashTraits.h>
++#include <wtf/IterationStatus.h>
++#include <wtf/SentinelLinkedList.h>
++#include <wtf/StdLibExtras.h>
++#include <wtf/Vector.h>
++
++namespace JSC {
++namespace Corpse {
++
++// A T in a corpse. Its layout is the target's, from the target's debug info;
++// T only names what a walker knows the value holds, and picks the RemoteTraits
++// that say what it holds. A value the debug info gives no type to, such as a
++// JSValue in an object's inline storage, is held by its address alone, and
++// can be read whole but not by field.
++template<typename T>
++class Remote {
++public:
++    Remote() = default;
++    Remote(Snapshot& snapshot, Address address)
++        : m_snapshot(&snapshot)
++        , m_address(address)
++    {
++    }
++    explicit Remote(TargetValue&& value)
++        : m_snapshot(&value.snapshot())
++        , m_address(value.address())
++        , m_value(WTF::move(value))
++    {
++    }
++
++    // False for a null address: a null pointer is a state of the target, not a failure.
++    explicit operator bool() const { return m_address && (!m_value || m_value->isValid()); }
++    Address address() const { return m_address; }
++    Snapshot& snapshot() const { return *m_snapshot; }
++    const TargetType* type() const { return m_value ? &m_value->type() : nullptr; }
++    const TargetValue* typed() const { return m_value ? &*m_value : nullptr; }
++
++    // A field this value's class declares itself, and the `index`th of its
++    // direct bases.
++    template<typename U>
++    Remote<U> field(const char* name) const
++    {
++        if (!requireType("field"))
++            return { };
++        return Remote<U>(m_value->properField(name));
++    }
++
++    template<typename U>
++    Remote<U> base(size_t index) const
++    {
++        if (!requireType("base"))
++            return { };
++        const TargetType::Layout& layout = m_value->type().layout();
++        auto* klass = std::get_if<TargetType::Class>(&layout);
++        if (!klass || index >= klass->bases.size()) {
++            if (*this)
++                CORPSE_REPORT("Type '%s' has no base %zu", m_value->type().name(), index);
++            return { };
++        }
++        return Remote<U>(m_value->base(klass->bases[index]));
++    }
++
++    std::optional<int64_t> integer() const
++    {
++        if (!requireType("integer"))
++            return std::nullopt;
++        return m_value->integer();
++    }
++
++    // The value whole, as a V of the same size.
++    template<typename V>
++    std::optional<V> as() const
++    {
++        if (m_value)
++            return m_value->template as<V>();
++        if (!*this)
++            return std::nullopt;
++        auto value = m_snapshot->memory().ptr<V>(m_address);
++        if (!value) {
++            CORPSE_REPORT("Could not read the %zu bytes at 0x%llx", sizeof(V), forReport());
++            return std::nullopt;
++        }
++        return *value;
++    }
++
++    std::optional<Address> pointerValue() const
++    {
++        if (!requireType("pointerValue"))
++            return std::nullopt;
++        return m_value->pointerValue();
++    }
++
++    Remote<std::remove_cv_t<std::remove_pointer_t<T>>> dereference() const
++    {
++        if (!requireType("dereference"))
++            return { };
++        return Remote<std::remove_cv_t<std::remove_pointer_t<T>>>(m_value->dereference());
++    }
++
++    // For a pointer: what it would point at if it pointed at `address`.
++    Remote<std::remove_cv_t<std::remove_pointer_t<T>>> pointeeAt(Address address) const
++    {
++        if (!requireType("pointeeAt"))
++            return { };
++        return Remote<std::remove_cv_t<std::remove_pointer_t<T>>>(m_value->pointeeAt(address));
++    }
++
++    // The same value `count` values on, for a buffer of them.
++    Remote<T> offsetBy(size_t count) const
++    {
++        if (!requireType("offsetBy"))
++            return { };
++        return Remote<T>(m_value->offsetBy(count));
++    }
++
++    // The same kind of value at another address.
++    Remote<T> at(Address address) const
++    {
++        if (m_value)
++            return Remote<T>(m_value->at(address));
++        if (!m_snapshot)
++            return { };
++        return Remote<T>(*m_snapshot, address);
++    }
++
++private:
++    unsigned long long forReport() const { return m_address.toTargetVMAddress(); }
++
++    // False, and reported once, when there is no type to do `what` with.
++    bool requireType(const char* what) const
++    {
++        if (m_value)
++            return true;
++        if (*this)
++            CORPSE_REPORT("The value at 0x%llx has no type, so it has no %s", forReport(), what);
++        return false;
++    }
++
++    Snapshot* m_snapshot { nullptr };
++    Address m_address;
++    std::optional<TargetValue> m_value;
++};
++
++// What a value holds, told to a visitor one child at a time, as a cell's
++// visitChildren tells the SlotVisitor. A specialization for a type says what
++// it holds; a type without one holds nothing a walk follows. A visitor is
++// anything with visit(const Remote<U>&) for the children it will be given.
++template<typename T>
++struct RemoteTraits {
++    template<typename Visitor>
++    static void visitChildren(const Remote<T>&, Visitor&) { }
++};
++
++template<typename T, typename Visitor>
++void visitChildren(const Remote<T>& value, Visitor& visitor)
++{
++    RemoteTraits<T>::visitChildren(value, visitor);
++}
++
++// A pointer holds what it points at.
++template<typename T>
++struct RemoteTraits<T*> {
++    template<typename Visitor>
++    static void visitChildren(const Remote<T*>& pointer, Visitor& visitor)
++    {
++        if (auto pointee = pointer.dereference())
++            visitor.visit(pointee);
++    }
++};
++
++// The readers of WTF's containers. Each reads a container through a
++// TargetValue of its own type, so that the heap walk, through Remote<T>, and
++// the reach walk, through whatever type it reached, share one copy of each
++// container's layout.
++
++// A Vector's storage: VectorBufferBase's m_buffer and m_size, in the base of
++// the Vector's base. Nullopt, and reported, for a count no Vector reaches.
++struct VectorStorage {
++    TargetValue buffer; // m_buffer, a pointer to the first element.
++    size_t size;
++};
++
++inline std::optional<VectorStorage> vectorStorage(const TargetValue& vector)
++{
++    if (!vector)
++        return std::nullopt;
++    TargetValue storage = vector;
++    for (unsigned depth = 0; depth < 2; ++depth) {
++        auto* klass = std::get_if<TargetType::Class>(&storage.type().layout());
++        if (!klass || klass->bases.isEmpty()) {
++            CORPSE_REPORT("The Vector at 0x%llx has no VectorBufferBase", static_cast<unsigned long long>(vector.address().toTargetVMAddress()));
++            return std::nullopt;
++        }
++        storage = storage.base(klass->bases[0]);
++    }
++    TargetValue buffer = storage.properField("m_buffer");
++    auto size = storage.properField("m_size").integer();
++    if (!buffer || !size)
++        return std::nullopt;
++    if (*size < 0 || *size > maxVectorSize) {
++        CORPSE_REPORT("The Vector at 0x%llx claims %lld elements", static_cast<unsigned long long>(vector.address().toTargetVMAddress()), static_cast<long long>(*size));
++        return std::nullopt;
++    }
++    return VectorStorage { WTF::move(buffer), static_cast<size_t>(*size) };
++}
++
++// A HashTable's buckets: m_table, and the table size from the metadata before
++// the buckets. Size 0 for a table with no buckets. Nullopt, and reported, if
++// the size cannot be read or no table reaches it.
++struct HashTableBuckets {
++    TargetValue table; // m_table, a pointer to the first bucket.
++    unsigned size;
++};
++
++inline std::optional<HashTableBuckets> hashTableBuckets(const TargetValue& hashTable)
++{
++    TargetValue table = hashTable.properField("m_table");
++    auto buckets = table.pointerValue();
++    if (!buckets)
++        return std::nullopt;
++    if (!*buckets)
++        return HashTableBuckets { WTF::move(table), 0 };
++    constexpr int tableSizeOffset = -1; // HashTable::tableSizeOffset, in unsigneds before the buckets, which is private.
++    auto tableSize = table.snapshot().memory().ptr<unsigned>(*buckets - static_cast<uint64_t>(-tableSizeOffset) * sizeof(unsigned));
++    if (!tableSize) {
++        CORPSE_REPORT("Could not read the size of the HashTable at 0x%llx", static_cast<unsigned long long>(hashTable.address().toTargetVMAddress()));
++        return std::nullopt;
++    }
++    if (*tableSize > maxHashTableSize) {
++        CORPSE_REPORT("The HashTable at 0x%llx claims %u buckets", static_cast<unsigned long long>(hashTable.address().toTargetVMAddress()), *tableSize);
++        return std::nullopt;
++    }
++    return HashTableBuckets { WTF::move(table), *tableSize };
++}
++
++// A Vector holds its elements, wherever its buffer is.
++template<typename T, size_t inlineCapacity, typename OverflowHandler, size_t minCapacity, typename Malloc>
++struct RemoteTraits<Vector<T, inlineCapacity, OverflowHandler, minCapacity, Malloc>> {
++    using VectorType = Vector<T, inlineCapacity, OverflowHandler, minCapacity, Malloc>;
++
++    static std::optional<size_t> size(const Remote<VectorType>& vector)
++    {
++        auto storage = RemoteTraits::storage(vector);
++        if (!storage)
++            return std::nullopt;
++        return storage->size;
++    }
++
++    static Remote<T> element(const Remote<VectorType>& vector, size_t index)
++    {
++        auto storage = RemoteTraits::storage(vector);
++        if (!storage)
++            return { };
++        return Remote<T*>(WTF::move(storage->buffer)).dereference().offsetBy(index);
++    }
++
++    template<typename Visitor>
++    static void visitChildren(const Remote<VectorType>& vector, Visitor& visitor)
++    {
++        auto size = RemoteTraits::size(vector);
++        if (!size || !*size)
++            return;
++        Remote<T> first = element(vector, 0);
++        for (size_t index = 0; index < *size; ++index)
++            visitor.visit(first.offsetBy(index));
++    }
++
++private:
++    static std::optional<VectorStorage> storage(const Remote<VectorType>& vector)
++    {
++        if (!vector.typed()) {
++            if (vector)
++                CORPSE_REPORT("The Vector at 0x%llx has no type", static_cast<unsigned long long>(vector.address().toTargetVMAddress()));
++            return std::nullopt;
++        }
++        return vectorStorage(*vector.typed());
++    }
++};
++
++// The buckets of a HashSet's or a HashMap's table that are neither empty nor
++// deleted, as HashTable's iterators skip them, told apart by the container's
++// own KeyTraits. False, and reported, if the table cannot be read.
++template<typename Bucket, typename KeyTraits, typename KeyOf, typename Container, typename Functor>
++bool forEachHashTableBucket(const Remote<Container>& container, const KeyOf& keyOf, const Functor& functor)
++{
++    static_assert(std::is_trivially_copyable_v<Bucket>, "A bucket is copied out of the target to test it");
++    Remote<void> impl = container.template field<void>("m_impl");
++    auto buckets = impl.typed() ? hashTableBuckets(*impl.typed()) : std::nullopt;
++    if (!buckets)
++        return false;
++    if (!buckets->size)
++        return true;
++    Remote<Bucket> first = Remote<Bucket*>(WTF::move(buckets->table)).dereference();
++    for (unsigned index = 0; index < buckets->size; ++index) {
++        Remote<Bucket> bucket = first.offsetBy(index);
++        auto value = bucket.template as<Bucket>();
++        if (!value)
++            return false;
++        // HashTable::isEmptyOrDeletedBucket.
++        if (WTF::isHashTraitsEmptyValue<KeyTraits>(keyOf(*value)) || KeyTraits::isDeletedValue(keyOf(*value)))
++            continue;
++        if (functor(bucket) == IterationStatus::Done)
++            return true;
++    }
++    return true;
++}
++
++template<typename Value, typename HashArg, typename TraitsArg, typename TableTraitsArg, WTF::ShouldValidateKey shouldValidateKey>
++struct RemoteTraits<HashSet<Value, HashArg, TraitsArg, TableTraitsArg, shouldValidateKey>> {
++    using SetType = HashSet<Value, HashArg, TraitsArg, TableTraitsArg, shouldValidateKey>;
++    using ValueType = typename SetType::ValueType;
++
++    // Calls `functor` with each value. False, and reported, if the table cannot be read.
++    template<typename Functor>
++    static bool forEach(const Remote<SetType>& set, const Functor& functor)
++    {
++        // A HashSet's IdentityExtractor: the bucket is its key.
++        return forEachHashTableBucket<ValueType, TraitsArg>(set, [](const ValueType& value) -> const ValueType& { return value; }, functor);
++    }
++};
++
++template<typename KeyArg, typename MappedArg, typename HashArg, typename KeyTraitsArg, typename MappedTraitsArg, typename TableTraitsArg, WTF::ShouldValidateKey shouldValidateKey, typename Malloc>
++struct RemoteTraits<HashMap<KeyArg, MappedArg, HashArg, KeyTraitsArg, MappedTraitsArg, TableTraitsArg, shouldValidateKey, Malloc>> {
++    using MapType = HashMap<KeyArg, MappedArg, HashArg, KeyTraitsArg, MappedTraitsArg, TableTraitsArg, shouldValidateKey, Malloc>;
++    using ValueType = typename MapType::KeyValuePairType;
++
++    // Calls `functor` with each entry, a KeyValuePair. False, and reported, if the table cannot be read.
++    template<typename Functor>
++    static bool forEach(const Remote<MapType>& map, const Functor& functor)
++    {
++        // A HashMap's KeyValuePairKeyExtractor.
++        return forEachHashTableBucket<ValueType, KeyTraitsArg>(map, [](const ValueType& entry) -> const KeyArg& { return entry.key; }, functor);
++    }
++};
++
++// A SentinelLinkedList holds the nodes from its sentinel's next back around
++// to the sentinel, as its iterators visit them.
++template<typename T, typename RawNode>
++struct RemoteTraits<SentinelLinkedList<T, RawNode>> {
++    using ListType = SentinelLinkedList<T, RawNode>;
++
++    // Calls `functor` with each node, as a RawNode. False, and reported, if the list cannot be read.
++    template<typename Functor>
++    static bool forEach(const Remote<ListType>& list, const Functor& functor)
++    {
++        Remote<RawNode> sentinel = list.template field<RawNode>("m_sentinel");
++        auto node = sentinel.template field<RawNode*>("m_next").pointerValue();
++        for (unsigned count = 0; node; ++count) {
++            if (*node == sentinel.address())
++                return true;
++            if (count >= maxLinkedListLength) {
++                CORPSE_REPORT("The SentinelLinkedList at 0x%llx has more than %u nodes", static_cast<unsigned long long>(list.address().toTargetVMAddress()), maxLinkedListLength);
++                return false;
++            }
++            Remote<RawNode> current = sentinel.at(*node);
++            if (functor(current) == IterationStatus::Done)
++                return true;
++            node = current.template field<RawNode*>("m_next").pointerValue();
++        }
++        return false;
++    }
++};
++
++} // namespace Corpse
++} // namespace JSC
++
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseSnapshotDebugInfo.cpp b/Source/JavaScriptCore/corpse/CorpseSnapshotDebugInfo.cpp
+new file mode 100644
+index 000000000000..35078a6b73fd
+--- /dev/null
++++ b/Source/JavaScriptCore/corpse/CorpseSnapshotDebugInfo.cpp
+@@ -0,0 +1,1061 @@
++/*
++ * Copyright (C) 2026 Igalia S.L.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "config.h"
++#include "CorpseSnapshotDebugInfo.h"
++
++#if ENABLE(MYA)
++
++#include "CorpseError.h"
++#include "CorpseTargetType.h"
++#include <wtf/TZoneMallocInlines.h>
++
++#if HAVE(LLDB)
++
++#include "CorpseImage.h"
++#include "CorpseLimits.h"
++#include "CorpseProcess.h"
++#include "CorpseSnapshot.h"
++#include <lldb/API/LLDB.h>
++#include <mutex>
++#include <optional>
++#include <string>
++#include <string_view>
++#include <wtf/HexNumber.h>
++#include <wtf/text/MakeString.h>
++#include <wtf/text/StringBuilder.h>
++
++namespace JSC {
++namespace Corpse {
++
++static unsigned long long forReport(Address address)
++{
++    return address.toTargetVMAddress();
++}
++
++WTF_MAKE_TZONE_ALLOCATED_IMPL(SnapshotDebugInfo);
++
++// Itanium C++ ABI: the offset to top is the second word before a vtable's address point.
++static constexpr size_t offsetToTopBeforeAddressPoint = 2 * sizeof(uint64_t);
++
++SnapshotDebugInfo::SnapshotDebugInfo(std::unique_ptr<lldb::SBDebugger>&& debugger, std::unique_ptr<lldb::SBTarget>&& target)
++    : m_debugger(WTF::move(debugger))
++    , m_target(WTF::move(target))
++{
++}
++
++SnapshotDebugInfo::~SnapshotDebugInfo()
++{
++    m_classesOfVTables.clear();
++    m_dynamicTypesOfFirstWords.clear();
++    m_compileUnitClasses.clear();
++    m_types.clear();
++    m_debugger->DeleteTarget(*m_target);
++    lldb::SBDebugger::Destroy(*m_debugger);
++}
++
++// The image's identity, as AddModule takes it: liblldb refuses a file whose
++// UUID or build-id is not this one, so a rebuilt image is refused, not misread.
++static UTF8CString identityString(const Image& image)
++{
++    StringBuilder builder;
++#if OS(DARWIN)
++    const Image::UUID& uuid = image.uuid();
++    for (size_t index = 0; index < uuid.size(); ++index) {
++        if (index == 4 || index == 6 || index == 8 || index == 10)
++            builder.append('-');
++        builder.append(hex(uuid[index], 2));
++    }
++#else
++    for (uint8_t byte : image.buildID())
++        builder.append(hex(byte, 2));
++#endif
++    return builder.toString().utf8();
++}
++
++RefPtr<SnapshotDebugInfo> SnapshotDebugInfo::create(Snapshot& snapshot)
++{
++    const Vector<Image>& images = snapshot.images();
++    if (images.isEmpty())
++        return nullptr; // images() said why.
++    int pid = static_cast<int>(snapshot.process()->pid());
++    CORPSE_DIAGNOSTICS(diagnostics, "opening the debug info of pid %d", pid);
++
++    static std::once_flag once;
++    std::call_once(once, [] {
++        lldb::SBDebugger::Initialize();
++    });
++
++    auto debugger = makeUniqueWithoutFastMallocCheck<lldb::SBDebugger>(lldb::SBDebugger::Create(false));
++    if (!debugger->IsValid()) {
++        CORPSE_REPORT("liblldb could not create a debugger");
++        return nullptr;
++    }
++#if !OS(DARWIN)
++    // Each compile unit's .debug_names lists the type units it emitted, and a
++    // linker that does not merge the indexes (LLD before 19) leaves an entry
++    // for every type unit it discarded as a duplicate, with a tombstone for its
++    // offset. liblldb then reads those entries' DIEs in the wrong unit. Its own
++    // index of the DWARF is as fast here.
++    lldb::SBDebugger::SetInternalVariable("plugin.symbol-file.dwarf.ignore-file-indexes", "true", debugger->GetInstanceName());
++#endif
++    lldb::SBError error;
++    // The target starts empty, so that every module is one of the snapshot's images, where the snapshot has it.
++    auto target = makeUniqueWithoutFastMallocCheck<lldb::SBTarget>(debugger->CreateTarget(nullptr, nullptr, nullptr, false, error));
++    if (!target->IsValid()) {
++        CORPSE_REPORT("liblldb could not create a target: %s", error.GetCString() ? error.GetCString() : "unknown error");
++        lldb::SBDebugger::Destroy(*debugger);
++        return nullptr;
++    }
++    Ref debugInfo = adoptRef(*new SnapshotDebugInfo(WTF::move(debugger), WTF::move(target)));
++    lldb::SBTarget& lldbTarget = *debugInfo->m_target;
++    size_t opened = 0;
++
++    for (const Image& image : images) {
++        lldb::SBModule module = lldbTarget.AddModule(image.path().legacyCStringPointer(), nullptr, identityString(image).legacyCStringPointer());
++        if (!module.IsValid()) {
++            Diagnostics::count(DiagnosticCounter::ImagesWithoutDebugInfo);
++            continue;
++        }
++#if OS(DARWIN)
++        // dyld gives where the header is, and liblldb wants the slide.
++        lldb::addr_t headerFileAddress = module.GetObjectFileHeaderAddress().GetFileAddress();
++        bool loaded = headerFileAddress != LLDB_INVALID_ADDRESS
++            && lldbTarget.SetModuleLoadAddress(module, image.loadAddress().toTargetVMAddress() - headerFileAddress).Success();
++#else
++        bool loaded = lldbTarget.SetModuleLoadAddress(module, image.loadAddress().toTargetVMAddress()).Success();
++#endif
++        if (!loaded) {
++            lldbTarget.RemoveModule(module);
++            Diagnostics::count(DiagnosticCounter::ImagesWithoutDebugInfo);
++            continue;
++        }
++        ++opened;
++    }
++
++    RELEASE_ASSERT(!lldbTarget.GetProcess().IsValid());
++    if (!opened) {
++        CORPSE_REPORT("liblldb could not open any of the %zu images of pid %d", images.size(), pid);
++        return nullptr;
++    }
++    return debugInfo;
++}
++
++const TargetType& SnapshotDebugInfo::type(const lldb::SBType& type)
++{
++    lldb::SBType canonical = lldb::SBType(type).GetCanonicalType();
++    const char* name = canonical.GetName();
++    auto& types = m_types.ensure(String::fromUTF8(name ? name : ""), [] {
++        return Vector<std::unique_ptr<TargetType>> { };
++    }).iterator->value;
++    for (auto& existing : types) {
++        if (*existing->m_type == canonical)
++            return *existing;
++    }
++    types.append(std::unique_ptr<TargetType>(new TargetType(*this, canonical)));
++    return *types.last();
++}
++
++bool SnapshotDebugInfo::isInImage(Address address) const
++{
++    return m_target->ResolveLoadAddress(address.toTargetVMAddress()).GetModule().IsValid();
++}
++
++static bool isDestructor(lldb::SBFunction& function)
++{
++    // DWARF marks a destructor only by its name, "~Class". GetName() is the
++    // qualified name in every build; GetBaseName() and GetMangledName() depend
++    // on whether the debug info has linkage names (-dwarf-linkage-names=Abstract).
++    const char* name = function.GetName();
++    if (!name)
++        return false;
++    std::string_view qualifiedName { name };
++    size_t lastScope = qualifiedName.rfind("::");
++    return lastScope != std::string_view::npos && qualifiedName.substr(lastScope + 2).starts_with('~');
++}
++
++const TargetType* SnapshotDebugInfo::classOfDestructor(Address function, bool& inImage)
++{
++    lldb::SBAddress address = m_target->ResolveLoadAddress(function.toTargetVMAddress());
++    inImage = address.GetModule().IsValid();
++    if (!inImage)
++        return nullptr;
++    lldb::SBFunction destructor = address.GetFunction();
++    if (!destructor.IsValid() || !isDestructor(destructor))
++        return nullptr;
++
++    // A destructor's only parameter is `this`.
++    lldb::SBValueList parameters = destructor.GetBlock().GetVariables(*m_target, true, false, false);
++    if (parameters.GetSize() != 1) {
++        CORPSE_REPORT("The destructor at 0x%llx has %u parameters in its debug info", forReport(function), parameters.GetSize());
++        return nullptr;
++    }
++    lldb::SBType type = parameters.GetValueAtIndex(0).GetType().GetPointeeType();
++    if (!type.IsValid() || !type.IsTypeComplete()) {
++        CORPSE_REPORT("The class of the destructor at 0x%llx is incomplete in its debug info", forReport(function));
++        return nullptr;
++    }
++    return &this->type(type);
++}
++
++const TargetType* SnapshotDebugInfo::dynamicTypeAt(Snapshot& snapshot, Address address, Address& completeObject)
++{
++    return dynamicTypeAt(snapshot, address, completeObject, ReportFailures::Yes);
++}
++
++const TargetType* SnapshotDebugInfo::dynamicTypeIfAnyAt(Snapshot& snapshot, Address address, Address& completeObject)
++{
++    return dynamicTypeAt(snapshot, address, completeObject, ReportFailures::No);
++}
++
++#define CORPSE_REPORT_IF(reportFailures, format, ...) do { \
++        if (reportFailures == ReportFailures::Yes) \
++            CORPSE_REPORT(format __VA_OPT__(, __VA_ARGS__)); \
++    } while (0)
++
++const TargetType* SnapshotDebugInfo::dynamicTypeAt(Snapshot& snapshot, Address address, Address& completeObject, ReportFailures reportFailures)
++{
++    if (!address) {
++        CORPSE_REPORT_IF(reportFailures, "There is no object at a null address");
++        return nullptr;
++    }
++    std::optional<Diagnostics> diagnostics;
++    if (reportFailures == ReportFailures::Yes)
++        diagnostics.emplace(CORPSE_DESCRIBE("resolving the dynamic type of the object at 0x%llx", forReport(address)));
++    Memory& memory = snapshot.memory();
++
++    auto vptr = memory.ptr<uint64_t>(address);
++    if (!vptr) {
++        CORPSE_REPORT_IF(reportFailures, "Could not read the vtable pointer of the object at 0x%llx", forReport(address));
++        return nullptr;
++    }
++    Address vtable = Address { *vptr }.stripped();
++    if (!vtable || vtable == Address::deletedValue()) {
++        CORPSE_REPORT_IF(reportFailures, "The object at 0x%llx has no vtable pointer", forReport(address));
++        return nullptr;
++    }
++    // A vtable fixes where its complete object starts and the class it is, so
++    // each first word is resolved once, including those that are no vtable.
++    if (auto known = m_dynamicTypesOfFirstWords.find(vtable); known != m_dynamicTypesOfFirstWords.end()) {
++        if (!known->value.type) {
++            CORPSE_REPORT_IF(reportFailures, "The object at 0x%llx has no dynamic type, as an earlier lookup of its vtable found", forReport(address));
++            return nullptr;
++        }
++        completeObject = address + static_cast<uint64_t>(known->value.offsetToTop);
++        return known->value.type;
++    }
++    Address firstWord = vtable;
++    auto remember = [&](const TargetType* type) {
++        m_dynamicTypesOfFirstWords.add(firstWord, DynamicTypeOfFirstWord { type ? static_cast<int64_t>(completeObject - address) : 0, type });
++        return type;
++    };
++    // An object that is not polymorphic, read as if it were, holds anything in
++    // its first word; only a pointer into an image's data can be a vtable.
++    if (!isInImage(vtable)) {
++        CORPSE_REPORT_IF(reportFailures, "The vtable at 0x%llx is in no image with debug info", forReport(vtable));
++        return remember(nullptr);
++    }
++    auto offsetToTop = memory.ptr<int64_t>(vtable - offsetToTopBeforeAddressPoint);
++    if (!offsetToTop) {
++        CORPSE_REPORT_IF(reportFailures, "Could not read the offset to top of the vtable at 0x%llx", forReport(vtable));
++        return remember(nullptr);
++    }
++    completeObject = address + static_cast<uint64_t>(*offsetToTop);
++
++    // A base subobject's vtable holds thunks; the complete object's own vtable holds its destructor.
++    if (*offsetToTop) {
++        vptr = memory.ptr<uint64_t>(completeObject);
++        if (!vptr) {
++            CORPSE_REPORT_IF(reportFailures, "Could not read the vtable pointer of the complete object at 0x%llx", forReport(completeObject));
++            return nullptr;
++        }
++        vtable = Address { *vptr }.stripped();
++        if (!isInImage(vtable)) {
++            CORPSE_REPORT_IF(reportFailures, "The vtable at 0x%llx is in no image with debug info", forReport(vtable));
++            return remember(nullptr);
++        }
++    }
++
++    // A heap holds many objects of each class, so each vtable is looked up once.
++    auto entry = m_classesOfVTables.ensure(vtable, [&] {
++        return classOfVTable(snapshot, vtable, reportFailures);
++    });
++    if (!entry.isNewEntry && !entry.iterator->value)
++        CORPSE_REPORT_IF(reportFailures, "The vtable at 0x%llx names no class, as an earlier lookup found", forReport(vtable));
++    return remember(entry.iterator->value);
++}
++
++const TargetType* SnapshotDebugInfo::classOfVTable(Snapshot& snapshot, Address vtable, ReportFailures reportFailures)
++{
++    Memory& memory = snapshot.memory();
++    for (size_t slot = 0; slot < maxVTableSlots; ++slot) {
++        auto entry = memory.ptr<uint64_t>(vtable + slot * sizeof(uint64_t));
++        if (!entry) {
++            CORPSE_REPORT_IF(reportFailures, "Could not read slot %zu of the vtable at 0x%llx", slot, forReport(vtable));
++            return nullptr;
++        }
++        bool inImage = false;
++        Address function = Address { *entry }.stripped();
++        if (auto* type = classOfDestructor(function, inImage))
++            return vtableSymbolNames(snapshot, vtable, *type) ? type : nullptr;
++        if (!inImage)
++            break;
++        Diagnostics::count(DiagnosticCounter::VTableSlotsNotDestructors);
++    }
++    CORPSE_REPORT_IF(reportFailures, "No destructor in the vtable at 0x%llx: its class needs a virtual destructor", forReport(vtable));
++    return nullptr;
++}
++
++// Where an unnamed local type, such as a lambda's closure type, starts in a
++// demangled name, and its length; or no length.
++static size_t unnamedLocalTypeLength(std::string_view name)
++{
++    auto skipDigits = [&](size_t index) {
++        while (index < name.size() && name[index] >= '0' && name[index] <= '9')
++            ++index;
++        return index;
++    };
++    auto skipParentheses = [&](size_t index) -> size_t {
++        unsigned depth = 0;
++        for (; index < name.size(); ++index) {
++            if (name[index] == '(')
++                ++depth;
++            else if (name[index] == ')' && depth && !--depth)
++                return index + 1;
++        }
++        return 0;
++    };
++    if (name.starts_with("$_"))
++        return skipDigits(2);
++    if (name.starts_with("'unnamed"))
++        return name.find('\'', 1) == std::string_view::npos ? 0 : name.find('\'', 1) + 1;
++    if (name.starts_with("'lambda")) {
++        size_t index = skipDigits(7);
++        if (index >= name.size() || name[index] != '\'')
++            return 0;
++        return skipParentheses(index + 1);
++    }
++    if (name.starts_with("{lambda(")) {
++        size_t end = name.find('}');
++        return end == std::string_view::npos ? 0 : end + 1;
++    }
++    return 0;
++}
++
++// The function an unnamed local type is local to, from the scope that
++// qualifies the type: its unqualified name, without template arguments, and
++// its parameters. "WebCore::Timer::Timer<A, B>(A&, void (A::*)())::" and
++// "Timer(A&, void (A::*)())::" both give "Timer(A&, void (A::*)())". Empty if
++// the type is local to no function.
++static std::string enclosingFunctionSignature(std::string_view scope)
++{
++    if (!scope.ends_with("::"))
++        return { };
++    scope.remove_suffix(2);
++    if (scope.ends_with(" const"))
++        scope.remove_suffix(6);
++    if (!scope.ends_with(')'))
++        return { };
++    size_t parametersStart = std::string_view::npos;
++    unsigned depth = 0;
++    for (size_t index = scope.size(); index--;) {
++        if (scope[index] == ')')
++            ++depth;
++        else if (scope[index] == '(' && !--depth) {
++            parametersStart = index;
++            break;
++        }
++    }
++    if (parametersStart == std::string_view::npos)
++        return { };
++    std::string name;
++    depth = 0;
++    for (char character : scope.substr(0, parametersStart)) {
++        if (character == '<')
++            ++depth;
++        else if (character == '>' && depth)
++            --depth;
++        else if (!depth)
++            name += character;
++    }
++    size_t lastScope = name.rfind("::");
++    if (lastScope != std::string::npos)
++        name.erase(0, lastScope + 2);
++    return name + std::string { scope.substr(parametersStart) };
++}
++
++// A demangled name with each template or function argument that is an
++// unnamed local type spelled as '?' and the function it is local to. The two
++// spellings compared below disagree on such a type: the symbol table's names
++// it as the compiler numbered it, in its enclosing function as declared, and
++// liblldb's as it numbered it again in the class it rebuilt, in that function
++// as instantiated. Both name the function's parameters. liblldb unifies
++// classes of one name and size, such as two CallableWrappers of lambdas local
++// to different functions, so the function tells their classes apart; two
++// unnamed local types of one function still match each other.
++enum class KeepsFunction : bool { No, Yes };
++static std::string withUnnamedLocalTypesErased(std::string_view name, KeepsFunction keepsFunction = KeepsFunction::Yes)
++{
++    std::string result;
++    result.reserve(name.size());
++    Vector<size_t, 8> argumentStarts;
++    size_t index = 0;
++    while (index < name.size()) {
++        if (size_t length = unnamedLocalTypeLength(name.substr(index))) {
++            size_t argumentStart = argumentStarts.isEmpty() ? 0 : argumentStarts.last();
++            std::string function = enclosingFunctionSignature(std::string_view { result }.substr(argumentStart));
++            result.resize(argumentStart);
++            result += '?';
++            if (keepsFunction == KeepsFunction::Yes)
++                result += function;
++            index += length;
++            continue;
++        }
++        char character = name[index++];
++        result += character;
++        if (character == '<' || character == '(')
++            argumentStarts.append(result.size());
++        else if ((character == '>' || character == ')') && !argumentStarts.isEmpty())
++            argumentStarts.removeLast();
++        else if (character == ',' && !argumentStarts.isEmpty()) {
++            if (index < name.size() && name[index] == ' ')
++                result += name[index++];
++            argumentStarts.last() = result.size();
++        }
++    }
++    return result;
++}
++
++// Whether `member`, a demangled member function, is a member of the class
++// `className` itself: "className::name(...)", with no further scope in `name`.
++static bool isMemberOf(std::string_view member, std::string_view className)
++{
++    if (!member.starts_with(className) || !member.substr(className.size()).starts_with("::"))
++        return false;
++    std::string_view name = member.substr(className.size() + 2);
++    unsigned depth = 0;
++    for (size_t index = 0; index < name.size(); ++index) {
++        char character = name[index];
++        if (character == '<')
++            ++depth;
++        else if (character == '>' && depth)
++            --depth;
++        else if (!depth && character == '(')
++            return index > 0;
++        else if (!depth && name.substr(index).starts_with("::"))
++            return false;
++    }
++    return false;
++}
++
++// A member function the class declares, demangled: its destructor if liblldb
++// lists one, and otherwise any other. liblldb leaves the implicit members out
++// of a class, so a class whose destructor is implicit lists none. liblldb
++// computes each one's linkage name with clang's mangler from the class itself,
++// and demangles it with LLVM's demangler, as it does the symbol table's names.
++// A class template's instance that liblldb gave no template arguments, such as
++// the PtrHash<WTF::SymbolImpl*> of a WeakGCMap on Linux, is mangled as one
++// identifier, "26PtrHash<WTF::SymbolImpl *>", which no Itanium mangled name
++// holds and whose demangling is not the symbol table's: such a member is
++// skipped.
++static std::string declaredMember(lldb::SBType& type)
++{
++    std::string result;
++    uint32_t count = type.GetNumberOfMemberFunctions();
++    for (uint32_t index = 0; index < count; ++index) {
++        lldb::SBTypeMemberFunction function = type.GetMemberFunctionAtIndex(index);
++        const char* mangledName = function.GetMangledName();
++        if (mangledName && std::string_view { mangledName }.find_first_of("<> ") != std::string_view::npos)
++            continue;
++        const char* demangledName = function.GetDemangledName();
++        std::string member = demangledName ? demangledName : std::string { };
++        if (member.empty())
++            continue;
++        if (function.GetKind() == lldb::eMemberFunctionKindDestructor)
++            return member;
++        if (result.empty())
++            result = WTF::move(member);
++    }
++    return result;
++}
++
++// One function can be the destructor of two classes: clang makes a derived
++// class's destructor an alias of its base's when it does nothing more, and
++// linkers fold identical functions. Neither folds a vtable, which is
++// relocated data, so the vtable's own symbol checks the class.
++std::string SnapshotDebugInfo::vtableClassName(Address vtable)
++{
++    lldb::SBSymbol symbol = m_target->ResolveLoadAddress(vtable.toTargetVMAddress()).GetSymbol();
++    const char* vtableName = symbol.IsValid() ? symbol.GetMangledName() : nullptr;
++    // Anything but a complete object's vtable, such as a construction vtable (_ZTC), names no class.
++    // Debian 12's __cxa_demangle cannot demangle a C++20 constraint, so the name is liblldb's.
++    const char* demangledName = vtableName && std::string_view { vtableName }.starts_with("_ZTV") ? symbol.GetName() : nullptr;
++    constexpr std::string_view vtablePrefix = "vtable for ";
++    if (!demangledName || !std::string_view { demangledName }.starts_with(vtablePrefix))
++        return { };
++    return std::string { std::string_view { demangledName }.substr(vtablePrefix.size()) };
++}
++
++// Where the last scope of a demangled name starts, after its last "::" outside any brackets.
++static size_t lastScopeStart(std::string_view name)
++{
++    size_t start = 0;
++    unsigned depth = 0;
++    for (size_t index = 0; index + 1 < name.size(); ++index) {
++        char character = name[index];
++        if (character == '<' || character == '(' || character == '{')
++            ++depth;
++        else if ((character == '>' || character == ')' || character == '}') && depth)
++            --depth;
++        else if (!depth && character == ':' && name[index + 1] == ':')
++            start = index + 2;
++    }
++    return start;
++}
++
++// The first template argument of a demangled class template specialization: "X" in "N<X, Y>".
++static std::string_view firstTemplateArgument(std::string_view name)
++{
++    size_t open = name.find('<');
++    if (open == std::string_view::npos)
++        return { };
++    unsigned depth = 0;
++    for (size_t index = open + 1; index < name.size(); ++index) {
++        char character = name[index];
++        if (character == '<' || character == '(' || character == '{')
++            ++depth;
++        else if (character == '>' || character == ')' || character == '}') {
++            if (!depth)
++                return name.substr(open + 1, index - open - 1);
++            --depth;
++        } else if (!depth && character == ',')
++            return name.substr(open + 1, index - open - 1);
++    }
++    return { };
++}
++
++// Whether `closure`, the type of a CallableWrapper's m_callable, belongs where `wrapper`, liblldb's
++// class of a CallableWrapper of the same size, has its m_callable.
++static bool closureFits(const TargetType& wrapper, const TargetType& closure)
++{
++    auto* klass = std::get_if<TargetType::Class>(&wrapper.layout());
++    if (!klass || !closure.byteSize())
++        return false;
++    uint64_t basesEnd = 0;
++    for (const TargetType::Base& base : klass->bases)
++        basesEnd = std::max<uint64_t>(basesEnd, base.offset + base.type.byteSize());
++    for (const TargetType::Field& field : klass->properFields) {
++        if (std::string_view { field.name.legacyCStringPointer() } != "m_callable")
++            continue;
++        size_t alignment = std::max(closure.alignment(), wrapper.alignment());
++        return field.offset == roundUpToMultipleOf(closure.alignment(), basesEnd)
++            && wrapper.byteSize() == roundUpToMultipleOf(alignment, field.offset + closure.byteSize());
++    }
++    return false;
++}
++
++const TargetType* SnapshotDebugInfo::closureOfCallableWrapper(Snapshot& snapshot, Address vtable, bool& isUnnamed)
++{
++    Closure& closure = m_closures.ensure(vtable, [&] {
++        constexpr std::string_view wrapperPrefix = "WTF::Detail::CallableWrapper<";
++        std::string wrapper = vtableClassName(vtable);
++        if (!std::string_view { wrapper }.starts_with(wrapperPrefix))
++            return Closure { false, nullptr };
++        std::string_view closureName = firstTemplateArgument(wrapper);
++        std::string_view lastScope = closureName.substr(lastScopeStart(closureName));
++        if (lastScope.empty() || unnamedLocalTypeLength(lastScope) != lastScope.size())
++            return Closure { false, nullptr };
++
++        // CallableWrapper::call(In...) calls the closure's operator() with the same parameters.
++        std::string callPrefix = wrapper + "::call(";
++        std::string parameters;
++        Memory& memory = snapshot.memory();
++        // CallableWrapperBase's virtual functions: the destructor's two entries and call().
++        constexpr size_t callableWrapperSlots = 3;
++        for (size_t slot = 0; slot < callableWrapperSlots && parameters.empty(); ++slot) {
++            auto entry = memory.ptr<uint64_t>(vtable + slot * sizeof(uint64_t));
++            if (!entry)
++                break;
++            lldb::SBSymbol symbol = m_target->ResolveLoadAddress(Address { *entry }.stripped().toTargetVMAddress()).GetSymbol();
++            const char* name = symbol.IsValid() ? symbol.GetName() : nullptr;
++            if (name && std::string_view { name }.starts_with(callPrefix))
++                parameters = std::string_view { name }.substr(callPrefix.size() - 1);
++        }
++        if (parameters.empty()) {
++            CORPSE_REPORT("The vtable at 0x%llx, of '%s', has no call()", forReport(vtable), wrapper.c_str());
++            return Closure { true, nullptr };
++        }
++
++        // The candidate's symbol must have exactly its name, from the demangler that spelled the vtable's.
++        lldb::SBModule module = moduleAt(vtable);
++        for (std::string_view qualifiers : { " const", "" }) {
++            std::string candidate = std::string { closureName } + "::operator()" + parameters + std::string { qualifiers };
++            // The symbol table, not the debug info's index, which finds a function by its base name, operator().
++            lldb::SBSymbolContextList found = module.FindSymbols(candidate.c_str(), lldb::eSymbolTypeCode);
++            for (uint32_t index = 0; index < found.GetSize(); ++index) {
++                lldb::SBSymbol symbol = found.GetContextAtIndex(index).GetSymbol();
++                const char* name = symbol.IsValid() ? symbol.GetName() : nullptr;
++                if (!name || std::string_view { name } != candidate)
++                    continue;
++                lldb::SBFunction function = symbol.GetStartAddress().GetFunction();
++                lldb::SBValueList arguments = function.IsValid() ? function.GetBlock().GetVariables(*m_target, true, false, false) : lldb::SBValueList { };
++                lldb::SBValue self = arguments.IsValid() ? arguments.GetFirstValueByName("this") : lldb::SBValue { };
++                lldb::SBType pointee = self.IsValid() ? self.GetType().GetPointeeType().GetUnqualifiedType() : lldb::SBType { };
++                if (pointee.IsValid() && pointee.IsTypeComplete() && pointee.GetByteSize())
++                    return Closure { true, &type(pointee) };
++            }
++        }
++        Diagnostics::count(DiagnosticCounter::ClosuresWithoutCallOperator);
++        return Closure { true, nullptr };
++    }).iterator->value;
++    isUnnamed = closure.isUnnamed;
++    return closure.type;
++}
++
++// One function can be the destructor of two classes: clang makes a derived
++// class's destructor an alias of its base's when it does nothing more, and
++// linkers fold identical functions. Neither folds a vtable, which is
++// relocated data, so the vtable's own symbol checks the class.
++bool SnapshotDebugInfo::vtableSymbolNames(Snapshot& snapshot, Address vtable, const TargetType& type)
++{
++    lldb::SBSymbol symbol = m_target->ResolveLoadAddress(vtable.toTargetVMAddress()).GetSymbol();
++    const char* vtableName = symbol.IsValid() ? symbol.GetMangledName() : nullptr;
++    if (!vtableName) {
++        // A stripped image: the object is read as its static type.
++        Diagnostics::count(DiagnosticCounter::VTablesWithoutSymbol);
++        return false;
++    }
++    std::string vtableClass = vtableClassName(vtable);
++    if (vtableClass.empty()) {
++        CORPSE_REPORT("The vtable at 0x%llx is in '%s', which is not a class's vtable", forReport(vtable), vtableName);
++        return false;
++    }
++
++    // The class rule 1 found must be the vtable's: its own members are named
++    // as members of that class, and a base's, a derived class's or a nested
++    // class's are not.
++    std::string member = declaredMember(*type.m_type);
++    if (member.empty()) {
++        CORPSE_REPORT("'%s', the class of the destructor in the vtable at 0x%llx, declares no member function with a linkage name", type.name().legacyCStringPointer(), forReport(vtable));
++        return false;
++    }
++    if (isMemberOf(withUnnamedLocalTypesErased(member), withUnnamedLocalTypesErased(vtableClass)))
++        return true;
++    // liblldb's class of a CallableWrapper of another closure of the same size, whose m_callable
++    // the walk reads as the vtable's own closure type.
++    bool isUnnamed = false;
++    if (isMemberOf(withUnnamedLocalTypesErased(member, KeepsFunction::No), withUnnamedLocalTypesErased(vtableClass, KeepsFunction::No))) {
++        if (auto* closure = closureOfCallableWrapper(snapshot, vtable, isUnnamed); closure && closureFits(type, *closure))
++            return true;
++    }
++    CORPSE_REPORT("The vtable at 0x%llx is the vtable of '%s', but the class its destructor gives declares '%s'", forReport(vtable), vtableClass.c_str(), member.c_str());
++    return false;
++}
++
++lldb::SBModule SnapshotDebugInfo::moduleAt(Address address) const
++{
++    return m_target->ResolveLoadAddress(address.toTargetVMAddress()).GetModule();
++}
++
++const TargetType* SnapshotDebugInfo::classNamed(Address inImage, const char* name)
++{
++    lldb::SBType found = moduleAt(inImage).FindFirstType(name);
++    if (!found.IsValid() || !found.IsTypeComplete() || !found.GetByteSize())
++        return nullptr;
++    return &type(found);
++}
++
++const TargetType* SnapshotDebugInfo::classNamedBeside(const TargetType& neighbor, const char* name)
++{
++    auto isComplete = [](lldb::SBType& found) {
++        return found.IsValid() && found.IsTypeComplete() && found.GetByteSize();
++    };
++    lldb::SBModule module = neighbor.m_type->GetModule();
++    lldb::SBType found = module.IsValid() ? module.FindFirstType(name) : lldb::SBType { };
++    // liblldb does not know the module of every type, such as one it completed from another unit.
++    for (uint32_t index = 0; !isComplete(found) && index < m_target->GetNumModules(); ++index)
++        found = m_target->GetModuleAtIndex(index).FindFirstType(name);
++    if (!isComplete(found))
++        return nullptr;
++    return &type(found);
++}
++
++const TargetType* SnapshotDebugInfo::nestedClass(const TargetType& outer, const char* name)
++{
++    lldb::SBType found = outer.m_type->FindDirectNestedType(name);
++    if (!found.IsValid() || !found.IsTypeComplete() || !found.GetByteSize())
++        return nullptr;
++    return &type(found);
++}
++
++const TargetType* SnapshotDebugInfo::definitionInItsImage(const TargetType& declaration)
++{
++    return m_definitions.ensure(&declaration, [&]() -> const TargetType* {
++        auto isDefinition = [](lldb::SBType& found) {
++            return found.IsValid() && found.IsTypeComplete() && found.GetByteSize();
++        };
++        const char* name = declaration.m_type->GetName();
++        lldb::SBModule module = declaration.m_type->GetModule();
++        if (module.IsValid()) {
++            lldb::SBType found = module.FindFirstType(name);
++            return isDefinition(found) ? &type(found) : nullptr;
++        }
++        // Images built with different options may define a class of one name differently.
++        std::optional<lldb::SBType> definition;
++        for (uint32_t index = 0; index < m_target->GetNumModules(); ++index) {
++            lldb::SBType found = m_target->GetModuleAtIndex(index).FindFirstType(name);
++            if (!isDefinition(found))
++                continue;
++            if (definition)
++                return nullptr;
++            definition = found;
++        }
++        return definition ? &type(*definition) : nullptr;
++    }).iterator->value;
++}
++
++struct SnapshotDebugInfo::CompileUnitClasses {
++    Vector<lldb::SBType> classes;
++};
++
++const TargetType* SnapshotDebugInfo::classOfStaticMember(Address variable, const char* member, std::span<const Address> codeOfClass)
++{
++    lldb::SBAddress resolved = m_target->ResolveLoadAddress(variable.toTargetVMAddress());
++    lldb::SBSymbol symbol = resolved.GetSymbol();
++    const char* linkageName = symbol.IsValid() ? symbol.GetMangledName() : nullptr;
++    const char* demangledName = symbol.IsValid() ? symbol.GetName() : nullptr;
++    if (!linkageName || !demangledName || symbol.GetStartAddress().GetLoadAddress(*m_target) != variable.toTargetVMAddress()) {
++        CORPSE_REPORT("No variable with a linkage name starts at 0x%llx", forReport(variable));
++        return nullptr;
++    }
++    std::string_view name { demangledName };
++    std::string scopedMember = std::string { "::" } + member;
++    if (!name.ends_with(scopedMember)) {
++        CORPSE_REPORT("The variable at 0x%llx is '%s', not a static member '%s'", forReport(variable), demangledName, member);
++        return nullptr;
++    }
++    std::string className { name.substr(0, name.size() - scopedMember.size()) };
++
++    // liblldb names a static member with clang's own mangler, from the class
++    // it built, so a match means this class declares that member.
++    std::string_view expected { linkageName };
++    auto declaresVariable = [&](lldb::SBType& candidate) {
++        lldb::SBTypeStaticField field = candidate.GetStaticFieldWithName(member);
++        const char* candidateName = field.IsValid() ? field.GetMangledName() : nullptr;
++        return candidateName && std::string_view { candidateName } == expected;
++    };
++    // liblldb spells a template's closing brackets as clang prints C++98.
++    std::string spelledName = className;
++    for (size_t index = spelledName.find(">>"); index != std::string::npos; index = spelledName.find(">>", index))
++        spelledName.insert(index + 1, " ");
++    lldb::SBTypeList named = resolved.GetModule().FindTypes(spelledName.c_str());
++    for (uint32_t index = 0; index < named.GetSize(); ++index) {
++        lldb::SBType candidate = named.GetTypeAtIndex(index);
++        if (candidate.IsTypeComplete() && declaresVariable(candidate))
++            return &type(candidate);
++    }
++
++    // The demangler and liblldb spell some template arguments differently, such
++    // as an enumerator, so an instance of a class template is found among the
++    // classes of a compile unit that has code of the class, by the template's
++    // name. A code address finds its compile unit from the unit's code ranges.
++    size_t arguments = className.find('<');
++    if (arguments == std::string::npos) {
++        CORPSE_REPORT("No class named '%s' declares '%s'", className.c_str(), linkageName);
++        return nullptr;
++    }
++    std::string_view templateName = std::string_view { className }.substr(0, arguments + 1);
++    auto inUnitOf = [&](lldb::SBAddress codeAddress) {
++        lldb::SBCompileUnit unit = codeAddress.GetCompileUnit();
++        return classInCompileUnit(unit, codeAddress.GetModule(), templateName, [&](lldb::SBType& candidate) {
++            return declaresVariable(candidate);
++        });
++    };
++    for (Address code : codeOfClass) {
++        if (auto* klass = inUnitOf(m_target->ResolveLoadAddress(code.stripped().toTargetVMAddress())))
++            return klass;
++    }
++    // A class that inherits every function of its method table has code of its
++    // own elsewhere, whose symbol the demangler names as a member of it.
++    std::string memberPrefix = className + "::";
++    lldb::SBModule module = resolved.GetModule();
++    size_t symbolCount = module.GetNumSymbols();
++    for (size_t index = 0; index < symbolCount; ++index) {
++        lldb::SBSymbol code = module.GetSymbolAtIndex(index);
++        const char* name = code.GetType() == lldb::eSymbolTypeCode ? code.GetName() : nullptr;
++        if (!name || !std::string_view { name }.starts_with(memberPrefix))
++            continue;
++        if (auto* klass = inUnitOf(code.GetStartAddress()))
++            return klass;
++    }
++    CORPSE_REPORT("No class of the compile units of the code of '%s' declares '%s'", className.c_str(), linkageName);
++    return nullptr;
++}
++
++const TargetType* SnapshotDebugInfo::classInCompileUnit(lldb::SBCompileUnit& unit, const lldb::SBModule& module, std::string_view namePrefix, const Function<bool(lldb::SBType&)>& matches)
++{
++    lldb::SBFileSpec unitFile = unit.GetFileSpec();
++    lldb::SBFileSpec moduleFile = module.GetFileSpec();
++    if (!unit.IsValid() || !unitFile.GetFilename())
++        return nullptr;
++    auto string = [](const char* characters) {
++        return String::fromUTF8(characters ? characters : "");
++    };
++    String key = makeString(string(moduleFile.GetDirectory()), '/', string(moduleFile.GetFilename()), '\n', string(unitFile.GetDirectory()), '/', string(unitFile.GetFilename()));
++    auto& unitClasses = m_compileUnitClasses.ensure(key, [&] {
++        auto result = makeUniqueWithoutFastMallocCheck<CompileUnitClasses>();
++        lldb::SBTypeList types = unit.GetTypes(lldb::eTypeClassClass | lldb::eTypeClassStruct);
++        for (uint32_t index = 0; index < types.GetSize(); ++index)
++            result->classes.append(types.GetTypeAtIndex(index));
++        return result;
++    }).iterator->value;
++    std::optional<lldb::SBType> match;
++    for (lldb::SBType& candidate : unitClasses->classes) {
++        const char* candidateName = candidate.GetName();
++        if (!candidateName || !std::string_view { candidateName }.starts_with(namePrefix) || !matches(candidate))
++            continue;
++        if (match && !(*match == candidate)) {
++            CORPSE_REPORT("Two classes of the compile unit '%s' match", unitFile.GetFilename());
++            return nullptr;
++        }
++        match = candidate;
++    }
++    return match ? &type(*match) : nullptr;
++}
++
++auto SnapshotDebugInfo::dataSymbolsEndingWith(Address inImage, const char* suffix) -> Vector<Symbol>
++{
++    Vector<Symbol> result;
++    lldb::SBModule module = moduleAt(inImage);
++    std::string_view expected { suffix };
++    size_t count = module.GetNumSymbols();
++    for (size_t index = 0; index < count; ++index) {
++        lldb::SBSymbol symbol = module.GetSymbolAtIndex(index);
++        const char* mangledName = symbol.GetMangledName();
++        if (symbol.GetType() != lldb::eSymbolTypeData || !mangledName || !std::string_view { mangledName }.ends_with(expected))
++            continue;
++        lldb::addr_t address = symbol.GetStartAddress().GetLoadAddress(*m_target);
++        if (address == LLDB_INVALID_ADDRESS)
++            continue;
++        result.append({ Address { address }, String::fromUTF8(symbol.GetName()) });
++    }
++    return result;
++}
++
++std::optional<Address> SnapshotDebugInfo::symbolAddress(Address inImage, const char* name)
++{
++    lldb::SBSymbol symbol = moduleAt(inImage).FindSymbol(name);
++    lldb::addr_t address = symbol.IsValid() ? symbol.GetStartAddress().GetLoadAddress(*m_target) : LLDB_INVALID_ADDRESS;
++    if (address == LLDB_INVALID_ADDRESS)
++        return std::nullopt;
++    return Address { address };
++}
++
++String SnapshotDebugInfo::symbolAt(Address address)
++{
++    lldb::SBAddress resolved = m_target->ResolveLoadAddress(address.toTargetVMAddress());
++    lldb::SBSymbol symbol = resolved.GetSymbol();
++    if (!symbol.IsValid() || !symbol.GetName())
++        return { };
++    lldb::addr_t start = symbol.GetStartAddress().GetLoadAddress(*m_target);
++    String name = String::fromUTF8(symbol.GetName());
++    if (start == LLDB_INVALID_ADDRESS || start == address.toTargetVMAddress())
++        return name;
++    return makeString(name, "+0x"_s, hex(address.toTargetVMAddress() - start));
++}
++
++// The static variables of `block` and of the blocks nested in it.
++static void appendStaticVariables(lldb::SBTarget& target, lldb::SBBlock block, Vector<lldb::SBValue>& variables, unsigned depth = 0)
++{
++    // A function nests blocks a few deep; a cycle would be a liblldb bug.
++    if (!block.IsValid() || depth > 256)
++        return;
++    lldb::SBValueList list = block.GetVariables(target, false, false, true);
++    for (uint32_t index = 0; index < list.GetSize(); ++index)
++        variables.append(list.GetValueAtIndex(index));
++    for (lldb::SBBlock child = block.GetFirstChild(); child.IsValid(); child = child.GetSibling())
++        appendStaticVariables(target, child, variables, depth + 1);
++}
++
++// The function-local static `mangledName`, at `address`. Its name is "_ZZ",
++// then its function's name without "_Z", then "E" and its own name, so its
++// function's symbol is "_Z" and a prefix of the rest that ends before an "E".
++// The function is the one of those that declares a static at `address`.
++static std::optional<lldb::SBValue> functionLocalStatic(lldb::SBTarget& target, lldb::SBModule& module, std::string_view mangledName, lldb::addr_t address)
++{
++    std::string_view rest = mangledName.substr(3);
++    for (size_t end = rest.find('E'); end != std::string_view::npos; end = rest.find('E', end + 1)) {
++        std::string functionName = "_Z";
++        functionName += rest.substr(0, end);
++        lldb::SBSymbol symbol = module.FindSymbol(functionName.c_str());
++        if (!symbol.IsValid())
++            continue;
++        lldb::SBFunction function = symbol.GetStartAddress().GetFunction();
++        if (!function.IsValid())
++            continue;
++        Vector<lldb::SBValue> variables;
++        appendStaticVariables(target, function.GetBlock(), variables);
++        for (lldb::SBValue& variable : variables) {
++            if (variable.GetLoadAddress() == address)
++                return variable;
++        }
++    }
++    return std::nullopt;
++}
++
++auto SnapshotDebugInfo::globalVariables(const Function<bool(Address)>& isCandidate, size_t& untyped, Vector<Range>& merged) -> Vector<GlobalVariable>
++{
++    CORPSE_DIAGNOSTICS(diagnostics, "listing the global variables of the images with debug info");
++    Vector<GlobalVariable> result;
++    untyped = 0;
++    merged.clear();
++    uint32_t moduleCount = m_target->GetNumModules();
++    for (uint32_t moduleIndex = 0; moduleIndex < moduleCount; ++moduleIndex) {
++        lldb::SBModule module = m_target->GetModuleAtIndex(moduleIndex);
++        size_t symbolCount = module.GetNumSymbols();
++        for (size_t index = 0; index < symbolCount; ++index) {
++            lldb::SBSymbol symbol = module.GetSymbolAtIndex(index);
++            if (symbol.GetType() != lldb::eSymbolTypeData)
++                continue;
++            const char* name = symbol.GetMangledName() ? symbol.GetMangledName() : symbol.GetName();
++            lldb::addr_t address = symbol.GetStartAddress().GetLoadAddress(*m_target);
++            if (!name || address == LLDB_INVALID_ADDRESS || !isCandidate(Address { address }))
++                continue;
++            // liblldb lists a global by its linkage name too, so the symbol's
++            // name finds the variable it is, without a spelling of its own.
++            std::string_view mangledName { name };
++            std::optional<lldb::SBValue> variable;
++            if (mangledName.starts_with("_ZZ"))
++                variable = functionLocalStatic(*m_target, module, mangledName, address);
++            else {
++                lldb::SBValueList candidates = module.FindGlobalVariables(*m_target, name, 8);
++                for (uint32_t candidate = 0; candidate < candidates.GetSize() && !variable; ++candidate) {
++                    lldb::SBValue value = candidates.GetValueAtIndex(candidate);
++                    if (value.GetLoadAddress() == address)
++                        variable = value;
++                }
++            }
++            lldb::SBType variableType = variable ? variable->GetType() : lldb::SBType { };
++            if (!variableType.IsValid()) {
++                ++untyped;
++                // A Mach-O symbol has no size, so liblldb ends it where the next symbol starts.
++                std::string_view symbolName { symbol.GetName() ? symbol.GetName() : "" };
++                lldb::addr_t end = symbol.GetEndAddress().GetLoadAddress(*m_target);
++                if ((symbolName.starts_with("_MergedGlobals") || symbolName.starts_with(".L_MergedGlobals")) && end != LLDB_INVALID_ADDRESS && end > address)
++                    merged.append({ Address { address }, end - address });
++                continue;
++            }
++            result.append({ Address { address }, type(variableType) });
++        }
++    }
++    return result;
++}
++
++} // namespace Corpse
++} // namespace JSC
++
++#else // HAVE(LLDB)
++
++// Complete stand-ins for the liblldb classes the members point to, so that
++// the destructor compiles. No instance is ever made.
++namespace lldb {
++class SBDebugger { };
++class SBTarget { };
++}
++
++namespace JSC {
++namespace Corpse {
++
++WTF_MAKE_TZONE_ALLOCATED_IMPL(SnapshotDebugInfo);
++
++SnapshotDebugInfo::~SnapshotDebugInfo() = default;
++
++RefPtr<SnapshotDebugInfo> SnapshotDebugInfo::create(Snapshot&)
++{
++    CORPSE_REPORT("This build has no liblldb, so it cannot read debug info");
++    return nullptr;
++}
++
++const TargetType* SnapshotDebugInfo::dynamicTypeAt(Snapshot&, Address, Address&)
++{
++    RELEASE_ASSERT_NOT_REACHED();
++}
++
++const TargetType* SnapshotDebugInfo::dynamicTypeIfAnyAt(Snapshot&, Address, Address&)
++{
++    RELEASE_ASSERT_NOT_REACHED();
++}
++
++const TargetType* SnapshotDebugInfo::classNamed(Address, const char*)
++{
++    RELEASE_ASSERT_NOT_REACHED();
++}
++
++const TargetType* SnapshotDebugInfo::classNamedBeside(const TargetType&, const char*)
++{
++    RELEASE_ASSERT_NOT_REACHED();
++}
++
++const TargetType* SnapshotDebugInfo::nestedClass(const TargetType&, const char*)
++{
++    RELEASE_ASSERT_NOT_REACHED();
++}
++
++const TargetType* SnapshotDebugInfo::definitionInItsImage(const TargetType&)
++{
++    RELEASE_ASSERT_NOT_REACHED();
++}
++
++const TargetType* SnapshotDebugInfo::classOfStaticMember(Address, const char*, std::span<const Address>)
++{
++    RELEASE_ASSERT_NOT_REACHED();
++}
++
++auto SnapshotDebugInfo::dataSymbolsEndingWith(Address, const char*) -> Vector<Symbol>
++{
++    RELEASE_ASSERT_NOT_REACHED();
++}
++
++std::optional<Address> SnapshotDebugInfo::symbolAddress(Address, const char*)
++{
++    RELEASE_ASSERT_NOT_REACHED();
++}
++
++String SnapshotDebugInfo::symbolAt(Address)
++{
++    RELEASE_ASSERT_NOT_REACHED();
++}
++
++auto SnapshotDebugInfo::globalVariables(const Function<bool(Address)>&, size_t&, Vector<Range>&) -> Vector<GlobalVariable>
++{
++    RELEASE_ASSERT_NOT_REACHED();
++}
++
++} // namespace Corpse
++} // namespace JSC
++
++#endif // HAVE(LLDB)
++
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseSnapshotDebugInfo.h b/Source/JavaScriptCore/corpse/CorpseSnapshotDebugInfo.h
+new file mode 100644
+index 000000000000..f18f3accbcfd
+--- /dev/null
++++ b/Source/JavaScriptCore/corpse/CorpseSnapshotDebugInfo.h
+@@ -0,0 +1,204 @@
++/*
++ * Copyright (C) 2026 Igalia S.L.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#pragma once
++
++#include <JavaScriptCore/CorpsePlatform.h>
++
++#if ENABLE(MYA)
++
++#include <JavaScriptCore/CorpseAddress.h>
++#include <memory>
++#include <optional>
++#include <span>
++#include <string>
++#include <string_view>
++#include <wtf/Function.h>
++#include <wtf/HashMap.h>
++#include <wtf/RefCounted.h>
++#include <wtf/RefPtr.h>
++#include <wtf/TZoneMalloc.h>
++#include <wtf/Vector.h>
++#include <wtf/text/StringHash.h>
++#include <wtf/text/WTFString.h>
++
++namespace lldb {
++class SBDebugger;
++class SBCompileUnit;
++class SBModule;
++class SBTarget;
++class SBType;
++}
++
++namespace JSC {
++namespace Corpse {
++
++class Snapshot;
++class TargetType;
++
++// The debug info of the images in a snapshot, opened through liblldb. liblldb
++// only ever reads files here: it is never given a process. An image whose
++// debug info cannot be opened is left out, and a lookup that lands in it fails.
++class SnapshotDebugInfo : public RefCounted<SnapshotDebugInfo> {
++    WTF_MAKE_TZONE_ALLOCATED(SnapshotDebugInfo);
++public:
++    static RefPtr<SnapshotDebugInfo> create(Snapshot&);
++    ~SnapshotDebugInfo();
++
++    // The class of the complete object containing the polymorphic object at
++    // `address`, and where that complete object starts. The class must have a
++    // virtual destructor: its vtable's destructor is what names the class.
++    const TargetType* dynamicTypeAt(Snapshot&, Address, Address& completeObject);
++
++    // dynamicTypeAt, for a walk that expects some objects to have none: a
++    // failure is counted, not reported. A class without a virtual destructor
++    // has no dynamic type, and nor does an object that is not polymorphic. A
++    // vtable whose symbol refuses the class its destructor gives is reported
++    // either way.
++    const TargetType* dynamicTypeIfAnyAt(Snapshot&, Address, Address& completeObject);
++
++    // The complete class liblldb names `name` in the image mapped at
++    // `inImage`. `name` is spelled as liblldb spells it. Null, silently, if
++    // that image has none.
++    const TargetType* classNamed(Address inImage, const char* name);
++    // The same, in the image that describes `neighbor`, such as WebCore for one
++    // of its classes, or else in the first image that has one.
++    const TargetType* classNamedBeside(const TargetType& neighbor, const char* name);
++    // The class `name` that `type` declares within itself, such as a class
++    // template instance's nested class, whose qualified name spells the
++    // template's arguments as the instance's own name may not.
++    const TargetType* nestedClass(const TargetType&, const char* name);
++    // The class `declaration` declares, as the image that describes the
++    // declaration defines it, or, if liblldb knows no image for it, as the one
++    // image that defines a class of its name; or null. liblldb does not
++    // complete every declaration a type of an image refers to from that
++    // image's definition.
++    const TargetType* definitionInItsImage(const TargetType& declaration);
++
++    // The class whose static data member `member` is the variable starting at
++    // `variable`, such as a JS cell class's s_info: the one class whose member
++    // has the linkage name of the symbol there. `codeOfClass`, functions that
++    // may be the class's, finds an instance of a class template whose name
++    // liblldb spells differently. Null, having reported why, if there is none.
++    const TargetType* classOfStaticMember(Address variable, const char* member, std::span<const Address> codeOfClass);
++
++    struct Symbol {
++        Address address;
++        String name; // Demangled.
++    };
++    // Every data symbol of the image mapped at `inImage` whose mangled name
++    // ends in `suffix`.
++    Vector<Symbol> dataSymbolsEndingWith(Address inImage, const char* suffix);
++
++    // Where the symbol `name`, a mangled name, is in the image mapped at `inImage`.
++    std::optional<Address> symbolAddress(Address inImage, const char* name);
++
++    // The closure type of the WTF::Detail::CallableWrapper whose vtable is at
++    // `vtable`, if it is an unnamed local type, such as a lambda's: the pointee
++    // of `this` in the closure's call operator. liblldb may give the
++    // CallableWrappers of unnamed closure types of one size one class, whose
++    // m_callable is of only one of their closure types. Null, with `isUnnamed`
++    // false, if the closure type has a name; or, with `isUnnamed` true, if its
++    // call operator is not found.
++    const TargetType* closureOfCallableWrapper(Snapshot&, Address vtable, bool& isUnnamed);
++
++    // The symbol `address` lies in, as "name" or "name+0x10". Null if none does.
++    String symbolAt(Address);
++
++    struct GlobalVariable {
++        Address address;
++        const TargetType& type;
++    };
++    struct Range {
++        Address address;
++        uint64_t size;
++    };
++    // Every global variable of every image with debug info at an address
++    // `isCandidate` accepts, as its declared type: each data symbol the debug
++    // info describes as a variable at the symbol's address. A function-local
++    // static is found in its function. The candidate data symbols that are no
++    // variable the debug info describes, such as guard variables, are counted
++    // in `untyped`, and the blocks of statics LLVM's GlobalMerge merged into
++    // one symbol, whose variables have no symbol of their own, are listed in
++    // `merged`.
++    Vector<GlobalVariable> globalVariables(const Function<bool(Address)>& isCandidate, size_t& untyped, Vector<Range>& merged);
++
++private:
++    friend class TargetType;
++
++    SnapshotDebugInfo(std::unique_ptr<lldb::SBDebugger>&&, std::unique_ptr<lldb::SBTarget>&&);
++
++    // The one TargetType for `type`, made the first time it is asked for, so
++    // that each type's layout is read from the debug info once.
++    const TargetType& type(const lldb::SBType&);
++
++    enum class ReportFailures : bool { No, Yes };
++    const TargetType* dynamicTypeAt(Snapshot&, Address, Address& completeObject, ReportFailures);
++
++    // The class the vtable at `vtable` belongs to, or null, having reported why.
++    const TargetType* classOfVTable(Snapshot&, Address vtable, ReportFailures);
++
++    // Whether the symbol the vtable at `vtable` lies in names the class whose
++    // destructor gave `type`. It never supplies a type, only refuses one, and
++    // reports why unless the image has no symbol table.
++    bool vtableSymbolNames(Snapshot&, Address vtable, const TargetType&);
++    // The class the symbol the vtable at `vtable` lies in names, demangled; empty if it names none.
++    std::string vtableClassName(Address vtable);
++    struct Closure {
++        bool isUnnamed;
++        const TargetType* type;
++    };
++    HashMap<Address, Closure> m_closures; // By the CallableWrapper's vtable.
++
++    // The class whose destructor starts at `function`, or null. `inImage` is
++    // false when no image with debug info is mapped there, which is how a walk
++    // over vtable slots ends.
++    const TargetType* classOfDestructor(Address function, bool& inImage);
++    bool isInImage(Address) const;
++    // The one class of `unit` whose name starts with `namePrefix` that `matches`.
++    const TargetType* classInCompileUnit(lldb::SBCompileUnit&, const lldb::SBModule&, std::string_view namePrefix, const Function<bool(lldb::SBType&)>& matches);
++    // The module of the image mapped at `address`, which may be invalid.
++    lldb::SBModule moduleAt(Address) const;
++
++    std::unique_ptr<lldb::SBDebugger> m_debugger;
++    std::unique_ptr<lldb::SBTarget> m_target;
++    // By name; types of one name from different images or anonymous namespaces share an entry.
++    HashMap<String, Vector<std::unique_ptr<TargetType>>> m_types;
++    HashMap<Address, const TargetType*> m_classesOfVTables;
++    HashMap<const TargetType*, const TargetType*> m_definitions;
++    struct DynamicTypeOfFirstWord {
++        int64_t offsetToTop;
++        const TargetType* type; // Null if an object with this first word has none.
++    };
++    HashMap<Address, DynamicTypeOfFirstWord> m_dynamicTypesOfFirstWords;
++    struct CompileUnitClasses;
++    // By the compile unit's image and source file.
++    HashMap<String, std::unique_ptr<CompileUnitClasses>> m_compileUnitClasses;
++};
++
++} // namespace Corpse
++} // namespace JSC
++
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseTargetType.cpp b/Source/JavaScriptCore/corpse/CorpseTargetType.cpp
+new file mode 100644
+index 000000000000..2c0f7f34665e
+--- /dev/null
++++ b/Source/JavaScriptCore/corpse/CorpseTargetType.cpp
+@@ -0,0 +1,410 @@
++/*
++ * Copyright (C) 2026 Igalia S.L.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "config.h"
++#include "CorpseTargetType.h"
++
++#if ENABLE(MYA)
++
++#include "CorpseSnapshotDebugInfo.h"
++#include <wtf/TZoneMallocInlines.h>
++
++#if HAVE(LLDB)
++
++#include <lldb/API/LLDB.h>
++#include <string>
++#include <string_view>
++#include <wtf/StdLibExtras.h>
++#include <wtf/text/StringCommon.h>
++
++namespace JSC {
++namespace Corpse {
++
++WTF_MAKE_TZONE_ALLOCATED_IMPL(TargetType);
++
++// A copy of a string liblldb owns, since it stays the type's to keep. An
++// anonymous member has no name, and is found by the empty one.
++static UTF8CString copyOf(const char* string)
++{
++    if (!string)
++        return UTF8CString { ""_s };
++    return UTF8CString(byteCast<char8_t>(unsafeSpan(string)));
++}
++
++TargetType::TargetType(SnapshotDebugInfo& debugInfo, const lldb::SBType& canonicalType)
++    : m_debugInfo(debugInfo)
++    , m_type(makeUniqueWithoutFastMallocCheck<lldb::SBType>(canonicalType))
++{
++}
++
++TargetType::~TargetType() = default;
++
++UTF8CString TargetType::name() const
++{
++    return copyOf(m_type->GetName());
++}
++
++static bool isSignedInteger(lldb::SBType type)
++{
++    switch (type.GetBasicType()) {
++    case lldb::eBasicTypeSignedChar:
++    case lldb::eBasicTypeSignedWChar:
++    case lldb::eBasicTypeShort:
++    case lldb::eBasicTypeInt:
++    case lldb::eBasicTypeLong:
++    case lldb::eBasicTypeLongLong:
++    case lldb::eBasicTypeInt128:
++        return true;
++    case lldb::eBasicTypeChar:
++    case lldb::eBasicTypeWChar:
++        // Plain char and wchar_t are unsigned in the AArch64 Linux ABI.
++#if OS(LINUX) && CPU(ARM64)
++        return false;
++#else
++        return true;
++#endif
++    default:
++        return false;
++    }
++}
++
++static bool isIntegerBasicType(lldb::BasicType type)
++{
++    switch (type) {
++    case lldb::eBasicTypeBool:
++    case lldb::eBasicTypeChar:
++    case lldb::eBasicTypeSignedChar:
++    case lldb::eBasicTypeUnsignedChar:
++    case lldb::eBasicTypeWChar:
++    case lldb::eBasicTypeSignedWChar:
++    case lldb::eBasicTypeUnsignedWChar:
++    case lldb::eBasicTypeChar16:
++    case lldb::eBasicTypeChar32:
++    case lldb::eBasicTypeChar8:
++    case lldb::eBasicTypeShort:
++    case lldb::eBasicTypeUnsignedShort:
++    case lldb::eBasicTypeInt:
++    case lldb::eBasicTypeUnsignedInt:
++    case lldb::eBasicTypeLong:
++    case lldb::eBasicTypeUnsignedLong:
++    case lldb::eBasicTypeLongLong:
++    case lldb::eBasicTypeUnsignedLongLong:
++    case lldb::eBasicTypeInt128:
++    case lldb::eBasicTypeUnsignedInt128:
++        return true;
++    default:
++        return false;
++    }
++}
++
++const TargetType::Layout& TargetType::layout() const
++{
++    if (!m_layout)
++        m_layout.emplace(readLayout());
++    return *m_layout;
++}
++
++// The class the `index`th argument in liblldb's own name for an instance of a
++// class template names, in the image that describes the instance.
++static const TargetType* templateArgumentFromName(SnapshotDebugInfo& debugInfo, const TargetType& type, std::string_view name, unsigned index)
++{
++    size_t start = name.find('<');
++    if (start == std::string_view::npos)
++        return nullptr;
++    unsigned depth = 0;
++    unsigned argument = 0;
++    for (size_t position = ++start; position < name.size(); ++position) {
++        char character = name[position];
++        if (character == '<' || character == '(')
++            ++depth;
++        else if ((character == '>' || character == ')') && depth)
++            --depth;
++        else if (!depth && (character == ',' || character == '>')) {
++            if (argument++ == index) {
++                std::string_view spelled = name.substr(start, position - start);
++                if (spelled.starts_with("const "))
++                    spelled.remove_prefix(6);
++                return debugInfo.classNamedBeside(type, std::string { spelled }.c_str());
++            }
++            if (character == '>')
++                return nullptr;
++            start = position + 1;
++            while (start < name.size() && name[start] == ' ')
++                ++start;
++        }
++    }
++    return nullptr;
++}
++
++const TargetType* TargetType::templateArgument(unsigned index) const
++{
++    // liblldb gives some instances no template arguments, such as one it
++    // completed from another compile unit; their names still spell them.
++    if (!m_type->GetNumberOfTemplateArguments()) {
++        const char* name = m_type->GetName();
++        return name ? templateArgumentFromName(m_debugInfo, *this, name, index) : nullptr;
++    }
++    if (index >= m_type->GetNumberOfTemplateArguments() || m_type->GetTemplateArgumentKind(index) != lldb::eTemplateArgumentKindType)
++        return nullptr;
++    lldb::SBType argument = m_type->GetTemplateArgumentType(index);
++    if (!argument.IsValid())
++        return nullptr;
++    return &m_debugInfo.type(argument);
++}
++
++size_t TargetType::alignment() const
++{
++    if (m_alignment)
++        return *m_alignment;
++    size_t result = static_cast<size_t>(m_type->GetByteAlign());
++    const Layout& layout = this->layout();
++    if (auto* klass = std::get_if<Class>(&layout)) {
++        auto memberAlignment = [&](const TargetType& member) {
++            const TargetType* definition = &member;
++            if (std::holds_alternative<Class>(member.layout()) && !member.byteSize())
++                definition = m_debugInfo.definitionInItsImage(member);
++            return definition ? definition->alignment() : 1;
++        };
++        for (const Field& field : klass->properFields)
++            result = std::max(result, memberAlignment(field.type));
++        for (const Base& base : klass->bases)
++            result = std::max(result, memberAlignment(base.type));
++        for (const Base& base : klass->virtualBases)
++            result = std::max(result, memberAlignment(base.type));
++    } else if (auto* array = std::get_if<Array>(&layout))
++        result = std::max(result, array->element.alignment());
++    else if (std::holds_alternative<Pointer>(layout) || std::holds_alternative<Integer>(layout))
++        result = std::max(result, byteSize());
++    m_alignment = result;
++    return result;
++}
++
++size_t TargetType::readByteSize() const
++{
++    m_byteSize = static_cast<size_t>(m_type->GetByteSize());
++    return *m_byteSize;
++}
++
++std::optional<uint64_t> TargetType::templateIntegerArgument(unsigned index) const
++{
++    if (index >= m_type->GetNumberOfTemplateArguments() || m_type->GetTemplateArgumentKind(index) != lldb::eTemplateArgumentKindIntegral)
++        return std::nullopt;
++    lldb::SBValue argument = m_type->GetTemplateArgumentValue(*m_debugInfo.m_target, index);
++    if (!argument.IsValid())
++        return std::nullopt;
++    lldb::SBError error;
++    uint64_t value = argument.GetValueAsUnsigned(error, 0);
++    if (error.Fail())
++        return std::nullopt;
++    return value;
++}
++
++auto TargetType::enumerators() const -> Vector<Enumerator>
++{
++    Vector<Enumerator> result;
++    lldb::SBTypeEnumMemberList members = m_type->GetEnumMembers();
++    if (!members.IsValid())
++        return result;
++    for (uint32_t index = 0; index < members.GetSize(); ++index) {
++        lldb::SBTypeEnumMember member = members.GetTypeEnumMemberAtIndex(index);
++        result.append({ copyOf(member.GetName()), member.GetValueAsSigned() });
++    }
++    return result;
++}
++
++std::optional<int64_t> TargetType::enumeratorValue(std::string_view name) const
++{
++    for (const Enumerator& enumerator : enumerators()) {
++        if (std::string_view { enumerator.name.legacyCStringPointer() } == name)
++            return enumerator.value;
++    }
++    return std::nullopt;
++}
++
++const TargetType* TargetType::staticFieldType(const char* name) const
++{
++    lldb::SBTypeStaticField field = m_type->GetStaticFieldWithName(name);
++    if (!field.IsValid())
++        return nullptr;
++    lldb::SBType type = field.GetType();
++    if (!type.IsValid())
++        return nullptr;
++    return &m_debugInfo.type(type);
++}
++
++const TargetType* TargetType::returnTypeOfMemberFunction(const char* name) const
++{
++    uint32_t count = m_type->GetNumberOfMemberFunctions();
++    for (uint32_t index = 0; index < count; ++index) {
++        lldb::SBTypeMemberFunction function = m_type->GetMemberFunctionAtIndex(index);
++        const char* functionName = function.GetName();
++        if (!functionName || std::string_view { functionName } != name)
++            continue;
++        lldb::SBType returnType = function.GetReturnType();
++        return returnType.IsValid() ? &m_debugInfo.type(returnType) : nullptr;
++    }
++    return nullptr;
++}
++
++TargetType::Layout TargetType::readLayout() const
++{
++    uint32_t typeClass = m_type->GetTypeClass();
++
++    if (typeClass & (lldb::eTypeClassClass | lldb::eTypeClassStruct | lldb::eTypeClassUnion)) {
++        Class result { m_type->IsPolymorphicClass(), !!(typeClass & lldb::eTypeClassUnion), { }, { }, { } };
++
++        uint32_t fieldCount = m_type->GetNumberOfFields();
++        for (uint32_t index = 0; index < fieldCount; ++index) {
++            lldb::SBTypeMember member = m_type->GetFieldAtIndex(index);
++            uint64_t offsetInBits = member.GetOffsetInBits();
++            bool isBitfield = member.IsBitfield();
++            // A flexible array member, like CStringBuffer's characters, starts where
++            // the class ends: it is storage after the class, not part of it.
++            if (offsetInBits / 8 >= byteSize())
++                continue;
++            result.properFields.append(Field {
++                copyOf(member.GetName()),
++                static_cast<size_t>(offsetInBits / 8),
++                m_debugInfo.type(member.GetType()),
++                isBitfield ? static_cast<unsigned>(offsetInBits % 8) : 0,
++                isBitfield ? member.GetBitfieldSizeInBits() : 0,
++            });
++        }
++
++        uint32_t virtualBaseCount = m_type->GetNumberOfVirtualBaseClasses();
++        for (uint32_t index = 0; index < virtualBaseCount; ++index) {
++            lldb::SBTypeMember member = m_type->GetVirtualBaseClassAtIndex(index);
++            result.virtualBases.append(Base { static_cast<size_t>(member.GetOffsetInBytes()), m_debugInfo.type(member.GetType()) });
++        }
++
++        uint32_t baseCount = m_type->GetNumberOfDirectBaseClasses();
++        for (uint32_t index = 0; index < baseCount; ++index) {
++            lldb::SBTypeMember member = m_type->GetDirectBaseClassAtIndex(index);
++            lldb::SBType baseType = member.GetType();
++            // liblldb lists a direct virtual base among the direct bases as well.
++            bool isVirtual = false;
++            for (uint32_t virtualIndex = 0; virtualIndex < virtualBaseCount && !isVirtual; ++virtualIndex) {
++                lldb::SBType virtualBaseType = m_type->GetVirtualBaseClassAtIndex(virtualIndex).GetType();
++                isVirtual = baseType == virtualBaseType;
++            }
++            if (isVirtual)
++                continue;
++            result.bases.append(Base { static_cast<size_t>(member.GetOffsetInBytes()), m_debugInfo.type(baseType) });
++        }
++        return result;
++    }
++
++    if (typeClass & lldb::eTypeClassArray) {
++        const TargetType& element = m_debugInfo.type(m_type->GetArrayElementType());
++        return Array { element, element.byteSize() ? byteSize() / element.byteSize() : 0 };
++    }
++
++    if (typeClass & lldb::eTypeClassPointer)
++        return Pointer { m_debugInfo.type(m_type->GetPointeeType()) };
++    if (typeClass & lldb::eTypeClassReference)
++        return Pointer { m_debugInfo.type(m_type->GetDereferencedType()) };
++
++    if (typeClass & lldb::eTypeClassEnumeration)
++        return Integer { isSignedInteger(m_type->GetEnumerationIntegerType()), true };
++    if ((typeClass & lldb::eTypeClassBuiltin) && isIntegerBasicType(m_type->GetBasicType()))
++        return Integer { isSignedInteger(*m_type), false };
++
++    return Other { };
++}
++
++} // namespace Corpse
++} // namespace JSC
++
++#else // HAVE(LLDB)
++
++// A complete stand-in for the liblldb class the member points to, so that the
++// destructor compiles. No TargetType is made without liblldb.
++namespace lldb {
++class SBType { };
++}
++
++namespace JSC {
++namespace Corpse {
++
++WTF_MAKE_TZONE_ALLOCATED_IMPL(TargetType);
++
++TargetType::~TargetType() = default;
++
++UTF8CString TargetType::name() const
++{
++    RELEASE_ASSERT_NOT_REACHED();
++}
++
++const TargetType::Layout& TargetType::layout() const
++{
++    RELEASE_ASSERT_NOT_REACHED();
++}
++
++const TargetType* TargetType::templateArgument(unsigned) const
++{
++    RELEASE_ASSERT_NOT_REACHED();
++}
++
++size_t TargetType::alignment() const
++{
++    RELEASE_ASSERT_NOT_REACHED();
++}
++
++size_t TargetType::readByteSize() const
++{
++    RELEASE_ASSERT_NOT_REACHED();
++}
++
++std::optional<uint64_t> TargetType::templateIntegerArgument(unsigned) const
++{
++    RELEASE_ASSERT_NOT_REACHED();
++}
++
++auto TargetType::enumerators() const -> Vector<Enumerator>
++{
++    RELEASE_ASSERT_NOT_REACHED();
++}
++
++std::optional<int64_t> TargetType::enumeratorValue(std::string_view) const
++{
++    RELEASE_ASSERT_NOT_REACHED();
++}
++
++const TargetType* TargetType::staticFieldType(const char*) const
++{
++    RELEASE_ASSERT_NOT_REACHED();
++}
++
++const TargetType* TargetType::returnTypeOfMemberFunction(const char*) const
++{
++    RELEASE_ASSERT_NOT_REACHED();
++}
++
++} // namespace Corpse
++} // namespace JSC
++
++#endif // HAVE(LLDB)
++
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseTargetType.h b/Source/JavaScriptCore/corpse/CorpseTargetType.h
+new file mode 100644
+index 000000000000..4cf7c9754cfc
+--- /dev/null
++++ b/Source/JavaScriptCore/corpse/CorpseTargetType.h
+@@ -0,0 +1,144 @@
++/*
++ * Copyright (C) 2026 Igalia S.L.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#pragma once
++
++#include <JavaScriptCore/CorpsePlatform.h>
++
++#if ENABLE(MYA)
++
++#include <JavaScriptCore/CorpseAddress.h>
++#include <memory>
++#include <optional>
++#include <string_view>
++#include <wtf/Noncopyable.h>
++#include <wtf/TZoneMalloc.h>
++#include <wtf/Variant.h>
++#include <wtf/Vector.h>
++#include <wtf/text/CString.h>
++
++namespace lldb {
++class SBType;
++}
++
++namespace JSC {
++namespace Corpse {
++
++class SnapshotDebugInfo;
++
++// A canonical type from a snapshot's debug info, described by its layout. The
++// SnapshotDebugInfo makes one TargetType per type, and owns it.
++class TargetType {
++    WTF_MAKE_TZONE_ALLOCATED(TargetType);
++    WTF_MAKE_NONCOPYABLE(TargetType);
++public:
++    ~TargetType();
++
++    UTF8CString name() const;
++    // Read the first time it is asked for: liblldb completes a class to size
++    // it, which a pointee the walk never follows does not need.
++    size_t byteSize() const { return m_byteSize ? *m_byteSize : readByteSize(); }
++    // alignof the type: liblldb's, or the largest of its members' if that is larger. liblldb
++    // gives a class whose member's class it only has declared too small an alignment.
++    size_t alignment() const;
++
++    SnapshotDebugInfo& debugInfo() const { return m_debugInfo; }
++
++    struct Field {
++        UTF8CString name;
++        size_t offset;
++        const TargetType& type;
++        // A bitfield starts bitOffset bits into the byte at `offset`; bitSize is 0 for any other field.
++        unsigned bitOffset { 0 };
++        unsigned bitSize { 0 };
++    };
++    struct Base {
++        size_t offset;
++        const TargetType& type;
++    };
++
++    struct Class {
++        bool isPolymorphic;
++        bool isUnion; // Every field starts at the start; which one is live is the holder's to say.
++        Vector<Field> properFields; // Declared by this class itself, not by a base.
++        Vector<Base> bases; // Direct and non-virtual.
++        Vector<Base> virtualBases; // Direct and indirect, at their offsets in a complete object of this class.
++    };
++    struct Pointer {
++        const TargetType& pointee; // Pointers and references.
++    };
++    struct Array {
++        const TargetType& element;
++        size_t count; // Zero for an array of unknown bound.
++    };
++    struct Integer {
++        bool isSigned; // Integers, enumerations and bool.
++        bool isEnumeration;
++    };
++    struct Other { }; // Anything else, readable only as bytes.
++    using Layout = Variant<Class, Pointer, Array, Integer, Other>;
++
++    // Read from the debug info the first time it is asked for.
++    const Layout& layout() const;
++
++    // The type of the `index`th template argument of a class template
++    // specialization, or null if it has no such type argument. Of an instance
++    // liblldb gives no template arguments, the class its name spells there, in
++    // the image that describes the instance.
++    const TargetType* templateArgument(unsigned index) const;
++    // The `index`th template argument, if it is an integer, such as PackedAlignedPtr's alignment.
++    std::optional<uint64_t> templateIntegerArgument(unsigned index) const;
++
++    struct Enumerator {
++        UTF8CString name; // Unqualified.
++        int64_t value;
++    };
++    // The enumerators of an enumeration, in declaration order; empty for any other type.
++    Vector<Enumerator> enumerators() const;
++    std::optional<int64_t> enumeratorValue(std::string_view name) const;
++    // The type of the static data member `name` this class declares itself, or null.
++    const TargetType* staticFieldType(const char* name) const;
++    // The return type of the member function `name` this class declares itself, or null.
++    const TargetType* returnTypeOfMemberFunction(const char* name) const;
++
++private:
++    TargetType(SnapshotDebugInfo&, const lldb::SBType&);
++
++    Layout readLayout() const;
++    size_t readByteSize() const;
++
++    SnapshotDebugInfo& m_debugInfo;
++    const std::unique_ptr<lldb::SBType> m_type;
++    mutable std::optional<size_t> m_byteSize;
++    mutable std::optional<Layout> m_layout;
++    mutable std::optional<size_t> m_alignment;
++
++    friend class SnapshotDebugInfo;
++};
++
++} // namespace Corpse
++} // namespace JSC
++
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseTargetValue.cpp b/Source/JavaScriptCore/corpse/CorpseTargetValue.cpp
+new file mode 100644
+index 000000000000..0aa64bf6dc83
+--- /dev/null
++++ b/Source/JavaScriptCore/corpse/CorpseTargetValue.cpp
+@@ -0,0 +1,281 @@
++/*
++ * Copyright (C) 2026 Igalia S.L.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "config.h"
++#include "CorpseTargetValue.h"
++
++#if ENABLE(MYA)
++
++#include "CorpseError.h"
++#include "CorpseLimits.h"
++#include "CorpseSnapshot.h"
++#include "CorpseSnapshotDebugInfo.h"
++#include "CorpseTargetType.h"
++#include <string_view>
++#include <wtf/StdLibExtras.h>
++
++namespace JSC {
++namespace Corpse {
++
++static unsigned long long forReport(Address address)
++{
++    return address.toTargetVMAddress();
++}
++
++TargetValue::TargetValue(Snapshot& snapshot, Address address, const TargetType& type, bool isValid)
++    : m_snapshot(&snapshot)
++    , m_address(address)
++    , m_debugInfo(type.debugInfo())
++    , m_type(&type)
++    , m_isValid(isValid)
++{
++}
++
++TargetValue TargetValue::at(Snapshot& snapshot, Address address, const TargetType& type)
++{
++    if (!address)
++        return TargetValue(snapshot, address, type, false);
++    if (!type.byteSize()) {
++        CORPSE_REPORT("Type '%s' has no size, so nothing can be read as it", type.name());
++        return TargetValue(snapshot, address, type, false);
++    }
++    return TargetValue(snapshot, address, type, true);
++}
++
++TargetValue TargetValue::at(Address address) const
++{
++    return at(*m_snapshot, address, *m_type);
++}
++
++TargetValue TargetValue::offsetBy(size_t count) const
++{
++    if (!m_isValid)
++        return invalidated();
++    return at(m_address + count * m_type->byteSize());
++}
++
++TargetValue TargetValue::member(size_t offset, const TargetType& type) const
++{
++    if (!m_isValid)
++        return TargetValue(*m_snapshot, m_address, type, false);
++    size_t total = m_type->byteSize();
++    size_t size = type.byteSize();
++    if (offset > total || size > total - offset) {
++        CORPSE_REPORT("Bytes %zu to %zu are outside the %zu-byte '%s'", offset, offset + size, total, m_type->name());
++        return TargetValue(*m_snapshot, m_address, type, false);
++    }
++    return at(*m_snapshot, m_address + offset, type);
++}
++
++TargetValue TargetValue::properField(const char* name) const
++{
++    if (!m_isValid)
++        return invalidated();
++    const TargetType::Layout& layout = m_type->layout();
++    auto* klass = std::get_if<TargetType::Class>(&layout);
++    if (!klass) {
++        CORPSE_REPORT("Type '%s' is not a class, so it has no field '%s'", m_type->name(), name);
++        return invalidated();
++    }
++    std::string_view wanted { name };
++    for (const TargetType::Field& field : klass->properFields) {
++        if (std::string_view { field.name.legacyCStringPointer() } == wanted)
++            return this->field(field);
++    }
++    CORPSE_REPORT("Type '%s' declares no field '%s'", m_type->name(), name);
++    return invalidated();
++}
++
++TargetValue TargetValue::field(const TargetType::Field& field) const
++{
++    if (!field.bitSize)
++        return member(field.offset, field.type);
++    if (!m_isValid)
++        return TargetValue(*m_snapshot, m_address, field.type, false);
++    TargetValue value(*m_snapshot, m_address + field.offset, field.type, true);
++    value.m_bitOffset = field.bitOffset;
++    value.m_bitSize = field.bitSize;
++    size_t total = m_type->byteSize();
++    size_t size = value.bitfieldByteSize();
++    if (size > sizeof(uint64_t) || field.offset > total || size > total - field.offset) {
++        CORPSE_REPORT("The %u-bit field '%s' at bit %u of byte %zu does not fit in the %zu-byte '%s'", field.bitSize, field.name.legacyCStringPointer(), field.bitOffset, field.offset, total, m_type->name());
++        return value.invalidated();
++    }
++    return value;
++}
++
++TargetValue TargetValue::base(const TargetType::Base& base) const
++{
++    return member(base.offset, base.type);
++}
++
++void TargetValue::forEachField(const Function<void(const TargetType::Field&, const TargetValue&)>& functor) const
++{
++    forEachNonVirtualField(functor);
++    const TargetType::Layout& layout = m_type->layout();
++    if (auto* klass = std::get_if<TargetType::Class>(&layout)) {
++        for (const TargetType::Base& virtualBase : klass->virtualBases)
++            base(virtualBase).forEachNonVirtualField(functor);
++    }
++}
++
++void TargetValue::forEachNonVirtualField(const Function<void(const TargetType::Field&, const TargetValue&)>& functor) const
++{
++    if (!m_isValid)
++        return;
++    const TargetType::Layout& layout = m_type->layout();
++    auto* klass = std::get_if<TargetType::Class>(&layout);
++    if (!klass)
++        return;
++    for (const TargetType::Field& field : klass->properFields)
++        functor(field, this->field(field));
++    for (const TargetType::Base& base : klass->bases)
++        this->base(base).forEachNonVirtualField(functor);
++}
++
++std::optional<Address> TargetValue::pointerValue() const
++{
++    if (!m_isValid)
++        return std::nullopt;
++    if (!std::holds_alternative<TargetType::Pointer>(m_type->layout())) {
++        CORPSE_REPORT("Type '%s' is not a pointer", m_type->name());
++        return std::nullopt;
++    }
++    uint64_t raw = 0;
++    if (!readWhole(asMutableByteSpan(raw)))
++        return std::nullopt;
++    return Address { raw }.stripped();
++}
++
++TargetValue TargetValue::dereference() const
++{
++    auto pointer = pointerValue();
++    if (!pointer)
++        return invalidated();
++    return pointeeAt(*pointer);
++}
++
++TargetValue TargetValue::pointeeAt(Address address) const
++{
++    if (!m_isValid)
++        return invalidated();
++    const TargetType::Layout& layout = m_type->layout();
++    auto* pointer = std::get_if<TargetType::Pointer>(&layout);
++    if (!pointer) {
++        CORPSE_REPORT("Type '%s' is not a pointer", m_type->name());
++        return invalidated();
++    }
++    return at(*m_snapshot, address, pointer->pointee);
++}
++
++bool TargetValue::readWhole(std::span<uint8_t> destination) const
++{
++    if (!m_isValid)
++        return false;
++    if (m_bitSize) {
++        CORPSE_REPORT("The %u-bit field of type '%s' at 0x%llx can only be read as an integer", m_bitSize, m_type->name(), forReport(m_address));
++        return false;
++    }
++    if (destination.size() != m_type->byteSize()) {
++        CORPSE_REPORT("Reading the %zu-byte '%s' as %zu bytes", m_type->byteSize(), m_type->name(), destination.size());
++        return false;
++    }
++    auto bytes = m_snapshot->memory().span<uint8_t>(m_address, destination.size());
++    if (!bytes) {
++        CORPSE_REPORT("Could not read the %zu-byte '%s' at 0x%llx", destination.size(), m_type->name(), forReport(m_address));
++        return false;
++    }
++    memcpySpan(destination, std::span<const uint8_t> { bytes });
++    return true;
++}
++
++// The low `bits` bits of `raw`, as an integer of that width.
++static int64_t signExtend(uint64_t raw, unsigned bits, bool isSigned)
++{
++    if (bits < 64)
++        raw &= (1ull << bits) - 1;
++    if (isSigned && bits < 64 && ((raw >> (bits - 1)) & 1))
++        raw |= ~0ull << bits;
++    return static_cast<int64_t>(raw);
++}
++
++std::optional<int64_t> TargetValue::integer() const
++{
++    if (!m_isValid)
++        return std::nullopt;
++    const TargetType::Layout& layout = m_type->layout();
++    auto* integer = std::get_if<TargetType::Integer>(&layout);
++    if (!integer) {
++        CORPSE_REPORT("Type '%s' is not an integer", m_type->name());
++        return std::nullopt;
++    }
++    if (m_bitSize) {
++        auto bytes = m_snapshot->memory().span<uint8_t>(m_address, bitfieldByteSize());
++        if (!bytes) {
++            CORPSE_REPORT("Could not read the %u-bit field of type '%s' at 0x%llx", m_bitSize, m_type->name(), forReport(m_address));
++            return std::nullopt;
++        }
++        uint64_t raw = 0;
++        memcpySpan(asMutableByteSpan(raw).first(bytes.size()), std::span<const uint8_t> { bytes });
++        return signExtend(raw >> m_bitOffset, m_bitSize, integer->isSigned);
++    }
++    size_t size = m_type->byteSize();
++    if (size != 1 && size != 2 && size != 4 && size != 8) {
++        CORPSE_REPORT("'%s' is a %zu-byte integer, which does not fit in 64 bits", m_type->name(), size);
++        return std::nullopt;
++    }
++    uint64_t raw = 0;
++    if (!readWhole(asMutableByteSpan(raw).first(size)))
++        return std::nullopt;
++    return signExtend(raw, size * 8, integer->isSigned);
++}
++
++
++std::optional<TargetValue> TargetValue::completeObjectAt(Snapshot& snapshot, SnapshotDebugInfo& debugInfo, Address address)
++{
++    Address completeObject;
++    auto* type = debugInfo.dynamicTypeAt(snapshot, address, completeObject);
++    if (!type)
++        return std::nullopt;
++    return at(snapshot, completeObject, *type);
++}
++
++const TargetType* TargetValue::dynamicType(Address& completeObject) const
++{
++    if (!m_isValid)
++        return nullptr;
++    const TargetType::Layout& layout = m_type->layout();
++    auto* klass = std::get_if<TargetType::Class>(&layout);
++    if (!klass || !klass->isPolymorphic) {
++        CORPSE_REPORT("Type '%s' is not polymorphic, so it has no dynamic type", m_type->name());
++        return nullptr;
++    }
++    return m_type->debugInfo().dynamicTypeAt(*m_snapshot, m_address, completeObject);
++}
++
++} // namespace Corpse
++} // namespace JSC
++
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseTargetValue.h b/Source/JavaScriptCore/corpse/CorpseTargetValue.h
+new file mode 100644
+index 000000000000..8a856e458513
+--- /dev/null
++++ b/Source/JavaScriptCore/corpse/CorpseTargetValue.h
+@@ -0,0 +1,138 @@
++/*
++ * Copyright (C) 2026 Igalia S.L.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#pragma once
++
++#include <JavaScriptCore/CorpsePlatform.h>
++
++#if ENABLE(MYA)
++
++#include <JavaScriptCore/CorpseAddress.h>
++#include <JavaScriptCore/CorpseSnapshotDebugInfo.h>
++#include <JavaScriptCore/CorpseTargetType.h>
++#include <optional>
++#include <span>
++#include <stdint.h>
++#include <type_traits>
++#include <wtf/Function.h>
++#include <wtf/Ref.h>
++#include <wtf/RefPtr.h>
++#include <wtf/StdLibExtras.h>
++#include <wtf/Vector.h>
++
++namespace JSC {
++namespace Corpse {
++
++class Snapshot;
++class SnapshotDebugInfo;
++
++// A value in a corpse: an address and the type to read it as. Nothing is read
++// until a scalar is asked for, so a field of a large object costs one read of
++// that field.
++//
++// A failure reports once and gives an invalid value; everything asked of an
++// invalid value is invalid or nullopt without another report, so a chain of
++// lookups reports the step that failed and nothing more.
++class TargetValue {
++public:
++    // Invalid, and silent, for a null address: a null pointer is a state of
++    // the heap, not a failure.
++    static TargetValue at(Snapshot&, Address, const TargetType&);
++
++    // The complete object containing the polymorphic object at `address`, as
++    // its dynamic type. Reported and nullopt if there is none.
++    static std::optional<TargetValue> completeObjectAt(Snapshot&, SnapshotDebugInfo&, Address);
++
++    // A value of this type at another address, and the one `count` values on
++    // from this one, for a buffer of them.
++    TargetValue at(Address) const;
++    TargetValue offsetBy(size_t count) const;
++
++    bool isValid() const { return m_isValid; }
++    explicit operator bool() const { return m_isValid; }
++
++    Address address() const { return m_address; }
++    const TargetType& type() const { return *m_type; }
++    Snapshot& snapshot() const { return *m_snapshot; }
++
++    // Sub-values, by type().layout(). Only the fields a class declares itself
++    // are its proper fields; a base's fields are read through its subobject.
++    TargetValue properField(const char* name) const;
++    TargetValue field(const TargetType::Field&) const;
++    TargetValue base(const TargetType::Base&) const;
++
++    // Every field of this value, superclass by superclass: its own fields,
++    // its non-virtual bases' in turn, then each virtual base's once. A virtual
++    // base's offset is only known in a complete object, so this value must be one.
++    void forEachField(const Function<void(const TargetType::Field&, const TargetValue&)>&) const;
++
++    std::optional<Address> pointerValue() const; // Pointers and references, PAC stripped.
++    TargetValue dereference() const;
++
++    // For a pointer: the value it would point at if it pointed at `address`.
++    TargetValue pointeeAt(Address) const;
++
++    template<typename T>
++    std::optional<T> as() const
++    {
++        static_assert(std::is_trivially_copyable_v<T>);
++        T value;
++        if (!readWhole(asMutableByteSpan(value)))
++            return std::nullopt;
++        return value;
++    }
++    std::optional<int64_t> integer() const; // By the type's width and sign.
++
++private:
++    TargetValue(Snapshot&, Address, const TargetType&, bool isValid);
++
++    TargetValue invalidated() const { return TargetValue(*m_snapshot, m_address, *m_type, false); }
++
++    // The value at `offset` within this one, reporting if it does not fit.
++    TargetValue member(size_t offset, const TargetType&) const;
++
++    void forEachNonVirtualField(const Function<void(const TargetType::Field&, const TargetValue&)>&) const;
++
++    // Fills `destination`, which must be type().byteSize() long, reporting if it cannot.
++    bool readWhole(std::span<uint8_t> destination) const;
++
++    size_t bitfieldByteSize() const { return (m_bitOffset + m_bitSize + 7) / 8; }
++
++    // The dynamic type, and where the complete object starts.
++    const TargetType* dynamicType(Address& completeObject) const;
++
++    Snapshot* m_snapshot;
++    Address m_address;
++    Ref<SnapshotDebugInfo> m_debugInfo; // Which owns m_type.
++    const TargetType* m_type;
++    bool m_isValid;
++    unsigned m_bitOffset { 0 };
++    unsigned m_bitSize { 0 }; // Nonzero for a bitfield, which only integer() reads.
++};
++
++} // namespace Corpse
++} // namespace JSC
++
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/DebugInfoTest.cpp b/Source/JavaScriptCore/corpse/tests/DebugInfoTest.cpp
+new file mode 100644
+index 000000000000..9ace843feb25
+--- /dev/null
++++ b/Source/JavaScriptCore/corpse/tests/DebugInfoTest.cpp
+@@ -0,0 +1,486 @@
++/*
++ * Copyright (C) 2026 Igalia S.L.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "config.h"
++
++#include "LibJSCToolsTestUtilities.h"
++#include <JavaScriptCore/CorpsePlatform.h>
++
++#if HAVE(LLDB)
++
++#include <JavaScriptCore/CorpseAddress.h>
++#include <JavaScriptCore/CorpseImage.h>
++#include <JavaScriptCore/CorpseRemote.h>
++#include <JavaScriptCore/CorpseSnapshot.h>
++#include <JavaScriptCore/CorpseSnapshotDebugInfo.h>
++#include <JavaScriptCore/CorpseTargetType.h>
++#include <JavaScriptCore/CorpseTargetValue.h>
++#include <JavaScriptCore/UnlinkedCodeBlock.h>
++#include <JavaScriptCore/Watchpoint.h>
++#include <lldb/API/LLDB.h>
++#include <algorithm>
++#include <bit>
++#include <stdexcept>
++#include <string_view>
++#include <unistd.h>
++#include <wtf/HashMap.h>
++#include <wtf/HashSet.h>
++#include <wtf/SentinelLinkedList.h>
++#include <wtf/NeverDestroyed.h>
++#include <wtf/text/StringHash.h>
++#include <wtf/text/WTFString.h>
++
++#endif // HAVE(LLDB)
++
++namespace JSCToolsTest {
++
++#if HAVE(LLDB)
++
++namespace {
++
++using JSC::Corpse::Address;
++using JSC::Corpse::Image;
++using JSC::Corpse::Remote;
++using JSC::Corpse::RemoteTraits;
++using JSC::Corpse::Snapshot;
++using JSC::Corpse::SnapshotDebugInfo;
++using JSC::Corpse::TargetType;
++using JSC::Corpse::TargetValue;
++
++constexpr const char* sameImageString = "debug-info-target";
++constexpr uint64_t crossImageMarker = 0x6d79612d74657374;
++
++// Defined here and derived from a JavaScriptCore class, so its vtable and
++// debug info are in this executable while its base's are in JavaScriptCore.
++class CrossImageFireDetail final : public JSC::FireDetail {
++public:
++    ~CrossImageFireDetail() final = default;
++    void dump(PrintStream&) const final { }
++
++    uint64_t m_marker { crossImageMarker };
++    bool m_flag : 1 { true };
++    unsigned m_small : 5 { 21 };
++    int m_signed : 4 { -3 };
++};
++
++// The first vtable slot of LaterDestructor is SlotZeroBase::first, which it
++// does not override, so only the destructor names the class.
++class SlotZeroBase {
++public:
++    virtual void first() { }
++    virtual ~SlotZeroBase() = default;
++};
++
++class LaterDestructor final : public SlotZeroBase {
++public:
++    ~LaterDestructor() final = default;
++
++    uint64_t m_marker { crossImageMarker };
++};
++
++// Diamond reaches VirtualBase through both Left and Right, and holds one VirtualBase.
++class VirtualBase {
++public:
++    virtual ~VirtualBase() = default;
++
++    uint64_t m_base { 1 };
++};
++
++class Left : public virtual VirtualBase {
++public:
++    uint64_t m_left { 2 };
++};
++
++class Right : public virtual VirtualBase {
++public:
++    uint64_t m_right { 3 };
++};
++
++class Diamond final : public Left, public Right {
++public:
++    ~Diamond() final = default;
++
++    uint64_t m_diamond { 4 };
++};
++
++// The complete object at `object`, as its dynamic type.
++std::optional<TargetValue> completeObjectAt(Snapshot& snapshot, Address object)
++{
++    RefPtr debugInfo = SnapshotDebugInfo::create(snapshot);
++    TEST_ASSERT(debugInfo, "a snapshot has debug info");
++    if (!debugInfo)
++        return std::nullopt;
++    auto value = TargetValue::completeObjectAt(snapshot, *debugInfo, object);
++    TEST_ASSERT(value, "an object with a virtual destructor has a dynamic type");
++    TEST_ASSERT(!value || value->address() == object, "an object held through its primary base starts where its complete object does");
++    return value;
++}
++
++// liblldb lays out UnlinkedSimpleJumpTable with its FixedVector<int32_t> only
++// declared, and gives it too small an alignment: the members give it.
++void analyzeAlignment(Snapshot& snapshot, Address object)
++{
++    RefPtr debugInfo = SnapshotDebugInfo::create(snapshot);
++    auto vtable = snapshot.memory().ptr<uint64_t>(object);
++    const TargetType* jumpTable = debugInfo && vtable ? debugInfo->classNamed(Address { *vtable }.stripped(), "JSC::UnlinkedSimpleJumpTable") : nullptr;
++    TEST_ASSERT(jumpTable && jumpTable->alignment() == alignof(JSC::UnlinkedSimpleJumpTable), "a class's alignment is its members' largest");
++}
++
++Address createSameImageObject()
++{
++    static JSC::StringFireDetail object(sameImageString);
++    return Address { static_cast<JSC::FireDetail*>(&object) };
++}
++
++void analyzeSameImageObject(Snapshot& snapshot, Address object)
++{
++    auto value = completeObjectAt(snapshot, object);
++    if (!value)
++        return;
++    TEST_ASSERT(std::string_view { value->type().name().legacyCStringPointer() } == "JSC::StringFireDetail",
++        "the dynamic type is the class the object really is, not the one it is held as");
++    TEST_ASSERT_EQ(value->type().byteSize(), sizeof(JSC::StringFireDetail), "the debug info gives the class its size");
++
++    auto string = value->properField("m_string").as<uint64_t>();
++    if (!string)
++        return;
++    std::string_view expected { sameImageString };
++    auto characters = snapshot.memory().span<char>(Address { *string }.stripped(), expected.size() + 1);
++    TEST_ASSERT(characters && (std::string_view { characters.data(), expected.size() } == expected) && !characters[expected.size()],
++        "the field holds the target's string");
++}
++
++Address createCrossImageObject()
++{
++    static CrossImageFireDetail object;
++    return Address { static_cast<JSC::FireDetail*>(&object) };
++}
++
++void analyzeCrossImageObject(Snapshot& snapshot, Address object)
++{
++    auto value = completeObjectAt(snapshot, object);
++    if (!value)
++        return;
++    TEST_ASSERT(std::string_view { value->type().name().legacyCStringPointer() } == "JSCToolsTest::(anonymous namespace)::CrossImageFireDetail",
++        "the dynamic type is the test's own class, in its anonymous namespace");
++    TEST_ASSERT_EQ(value->type().byteSize(), sizeof(CrossImageFireDetail), "the debug info gives the class its size");
++    auto marker = value->properField("m_marker").as<uint64_t>();
++    TEST_ASSERT(marker && *marker == crossImageMarker, "the field holds the target's value");
++    TEST_ASSERT(value->properField("m_flag").integer() == 1, "a one-bit field reads alone");
++    TEST_ASSERT(value->properField("m_small").integer() == 21, "an unsigned bitfield reads without its neighbours");
++    TEST_ASSERT(value->properField("m_signed").integer() == -3, "a signed bitfield is sign extended");
++    ExpectedErrors expectedErrors;
++    TEST_ASSERT(!value->properField("m_small").as<uint32_t>(), "a bitfield reads only as an integer");
++}
++
++Address createLaterDestructorObject()
++{
++    static LaterDestructor object;
++    return Address { static_cast<SlotZeroBase*>(&object) };
++}
++
++void analyzeLaterDestructorObject(Snapshot& snapshot, Address object)
++{
++    auto value = completeObjectAt(snapshot, object);
++    if (!value)
++        return;
++    TEST_ASSERT(std::string_view { value->type().name().legacyCStringPointer() } == "JSCToolsTest::(anonymous namespace)::LaterDestructor",
++        "a class whose slot 0 is an inherited function is found by its destructor, not as its base");
++    TEST_ASSERT_EQ(value->type().byteSize(), sizeof(LaterDestructor), "a class whose destructor is not its first virtual function is found by its destructor");
++    auto marker = value->properField("m_marker").as<uint64_t>();
++    TEST_ASSERT(marker && *marker == crossImageMarker, "the field holds the target's value");
++}
++
++Address createDiamondObject()
++{
++    static NeverDestroyed<Diamond> object;
++    return Address { static_cast<Left*>(&object.get()) };
++}
++
++void analyzeDiamondObject(Snapshot& snapshot, Address object)
++{
++    auto value = completeObjectAt(snapshot, object);
++    if (!value)
++        return;
++    HashMap<String, uint64_t> fields;
++    unsigned visits = 0;
++    value->forEachField([&](const TargetType::Field& field, const TargetValue& fieldValue) {
++        ++visits;
++        if (auto bits = fieldValue.as<uint64_t>())
++            fields.set(String::fromUTF8(field.name.legacyCStringPointer()), *bits);
++    });
++    TEST_ASSERT_EQ(visits, 4u, "every field is visited once, the shared virtual base's included");
++    TEST_ASSERT(fields.get("m_diamond"_s) == 4 && fields.get("m_left"_s) == 2 && fields.get("m_right"_s) == 3 && fields.get("m_base"_s) == 1,
++        "every field is read where the complete object puts it");
++}
++
++Address createSystemLibraryObject()
++{
++    static NeverDestroyed<std::runtime_error> object("debug-info-system-library");
++    return Address { static_cast<std::exception*>(&object.get()) };
++}
++
++void analyzeSystemLibraryObject(Snapshot& snapshot, Address object)
++{
++#if OS(DARWIN)
++    // The OS ships no debug info for the libraries in the shared cache.
++    RefPtr debugInfo = SnapshotDebugInfo::create(snapshot);
++    TEST_ASSERT(debugInfo, "a snapshot has debug info");
++    if (!debugInfo)
++        return;
++    ExpectedErrors expectedErrors;
++    Address completeObject;
++    TEST_ASSERT(!debugInfo->dynamicTypeAt(snapshot, object, completeObject), "a class in the shared cache has no dynamic type");
++#else
++    // From /usr/lib/debug/.build-id, where libstdc++6-<version>-dbg puts it.
++    auto value = completeObjectAt(snapshot, object);
++    TEST_ASSERT(value && value->type().byteSize() == sizeof(std::runtime_error),
++        "a class in a system library resolves through that library's separate debug info");
++#endif
++}
++
++// An object of a class this executable defines, and one of a class JavaScriptCore does.
++struct ObjectsInBothImages {
++    uint64_t crossImage;
++    uint64_t sameImage;
++};
++
++Address createObjectsInBothImages()
++{
++    static ObjectsInBothImages objects { createCrossImageObject().toTargetVMAddress(), createSameImageObject().toTargetVMAddress() };
++    return Address { &objects };
++}
++
++// The target's executable was replaced after it was loaded, so its file is not
++// the image the target runs: its identity differs, and liblldb refuses it.
++void analyzeObjectsInReplacedExecutable(Snapshot& snapshot, Address address)
++{
++    auto objects = snapshot.memory().ptr<ObjectsInBothImages>(address);
++    TEST_ASSERT(objects, "the target's objects read");
++    // liblldb keeps every module it opened, by identity, for the life of the
++    // process, and would find the original executable among them. A rebuilt
++    // image is one liblldb has not seen.
++    lldb::SBDebugger::MemoryPressureDetected();
++#if OS(LINUX)
++    // The kernel marks the old file's mappings deleted, and the image is
++    // reported and left out, so liblldb never reads the new file as it.
++    RefPtr<SnapshotDebugInfo> debugInfo;
++    {
++        ExpectedErrors expectedErrors;
++        debugInfo = SnapshotDebugInfo::create(snapshot);
++    }
++    TEST_ASSERT(std::ranges::none_of(snapshot.images(), [](const Image& image) {
++        return std::string_view { image.path().legacyCStringPointer() }.find(".replaced-") != std::string_view::npos;
++    }), "the replaced executable is not among the images");
++#else
++    // liblldb refuses the new file, whose UUID is not the image's.
++    RefPtr debugInfo = SnapshotDebugInfo::create(snapshot);
++#endif
++    TEST_ASSERT(debugInfo, "a snapshot whose executable was replaced still has the debug info of its other images");
++    if (!objects || !debugInfo)
++        return;
++    Address completeObject;
++    {
++        ExpectedErrors expectedErrors;
++        TEST_ASSERT(!debugInfo->dynamicTypeAt(snapshot, Address { objects->crossImage }, completeObject), "a class of the replaced executable has no type");
++    }
++    const TargetType* type = debugInfo->dynamicTypeAt(snapshot, Address { objects->sameImage }, completeObject);
++    TEST_ASSERT(type && std::string_view { type->name().legacyCStringPointer() } == "JSC::StringFireDetail", "a class of JavaScriptCore still has its type");
++}
++
++// No object: the analysis asks about addresses that hold none.
++Address createNothing()
++{
++    return { };
++}
++
++void analyzeNullAndUnreadable(Snapshot& snapshot, Address)
++{
++    RefPtr debugInfo = SnapshotDebugInfo::create(snapshot);
++    TEST_ASSERT(debugInfo, "a snapshot has debug info");
++    if (!debugInfo)
++        return;
++    Address completeObject;
++    ExpectedErrors expectedErrors(2);
++    TEST_ASSERT(!debugInfo->dynamicTypeAt(snapshot, Address { }, completeObject), "a null address has no dynamic type");
++    TEST_ASSERT(!debugInfo->dynamicTypeAt(snapshot, Address { static_cast<uint64_t>(0x10) }, completeObject), "unreadable memory has no dynamic type");
++}
++
++// What the container wrappers read. The class is polymorphic so that its vtable gives its type.
++struct ContainerNode : public BasicRawSentinelNode<ContainerNode> {
++    uint64_t value { 0 };
++};
++using ContainerList = SentinelLinkedList<ContainerNode, BasicRawSentinelNode<ContainerNode>>;
++
++class Containers {
++public:
++    virtual ~Containers() = default;
++
++    Vector<uint64_t> vector;
++    HashSet<uint64_t> set;
++    HashMap<uint64_t, ContainerNode*> map;
++    ContainerList list;
++    std::array<ContainerNode, 3> nodes;
++    ContainerNode* const node { nullptr }; // Only for its type.
++};
++
++Address createContainers()
++{
++    static NeverDestroyed<Containers> object;
++    Containers& containers = object.get();
++    containers.vector = { 10, 20, 30 };
++    // Removing half the values leaves deleted buckets among the full and empty ones.
++    for (uint64_t value = 1; value <= 100; ++value)
++        containers.set.add(value);
++    for (uint64_t value = 2; value <= 100; value += 2)
++        containers.set.remove(value);
++    for (size_t index = 0; index < containers.nodes.size(); ++index) {
++        containers.nodes[index].value = 7 + index;
++        containers.list.append(&containers.nodes[index]);
++    }
++    // A deleted entry's value is destroyed, and, in an ENABLE(MYA_HEAP) build, cleared.
++    for (uint64_t key = 1; key <= 20; ++key)
++        containers.map.add(key, &containers.nodes[key % containers.nodes.size()]);
++    for (uint64_t key = 2; key <= 20; key += 2)
++        containers.map.remove(key);
++    return Address { &containers };
++}
++
++void analyzeContainers(Snapshot& snapshot, Address object)
++{
++    auto value = completeObjectAt(snapshot, object);
++    if (!value)
++        return;
++
++    Remote<Vector<uint64_t>> vector { value->properField("vector") };
++    Vector<uint64_t> elements;
++    auto size = RemoteTraits<Vector<uint64_t>>::size(vector);
++    for (size_t index = 0; size && index < *size; ++index) {
++        if (auto element = RemoteTraits<Vector<uint64_t>>::element(vector, index).as<uint64_t>())
++            elements.append(*element);
++    }
++    TEST_ASSERT(elements == Vector<uint64_t>({ 10, 20, 30 }), "a Vector reads its elements");
++
++    Vector<uint64_t> values;
++    bool readable = RemoteTraits<HashSet<uint64_t>>::forEach(Remote<HashSet<uint64_t>> { value->properField("set") }, [&](const Remote<uint64_t>& bucket) {
++        if (auto element = bucket.as<uint64_t>())
++            values.append(*element);
++        return IterationStatus::Continue;
++    });
++    std::ranges::sort(values);
++    Vector<uint64_t> odd;
++    for (uint64_t element = 1; element <= 100; element += 2)
++        odd.append(element);
++    TEST_ASSERT(readable && values == odd, "a HashSet reads its values, and skips its empty and deleted buckets");
++
++    using Map = HashMap<uint64_t, ContainerNode*>;
++    using Entry = Map::KeyValuePairType;
++    Vector<std::pair<uint64_t, uint64_t>> entries;
++    readable = RemoteTraits<Map>::forEach(Remote<Map> { value->properField("map") }, [&](const Remote<Entry>& bucket) {
++        if (auto entry = bucket.as<Entry>())
++            entries.append({ entry->key, std::bit_cast<uint64_t>(entry->value) });
++        return IterationStatus::Continue;
++    });
++    std::ranges::sort(entries);
++    Address nodeArray = value->properField("nodes").address();
++    Vector<std::pair<uint64_t, uint64_t>> expectedEntries;
++    for (uint64_t key = 1; key <= 20; key += 2)
++        expectedEntries.append({ key, (nodeArray + (key % 3) * sizeof(ContainerNode)).toTargetVMAddress() });
++    TEST_ASSERT(readable && entries == expectedEntries, "a HashMap reads its entries, and skips its empty and deleted buckets");
++
++    // Every bucket, as the reach walk reads it: a deleted one holds its deleted key and zeros.
++    auto buckets = hashTableBuckets(value->properField("map").properField("m_impl"));
++    unsigned deleted = 0;
++    unsigned stale = 0;
++    for (unsigned index = 0; buckets && index < buckets->size; ++index) {
++        auto entry = Remote<Entry*>(TargetValue { buckets->table }).dereference().offsetBy(index).as<Entry>();
++        if (!entry || !HashTraits<uint64_t>::isDeletedValue(entry->key))
++            continue;
++        ++deleted;
++        if (entry->value)
++            ++stale;
++    }
++    TEST_ASSERT(deleted, "the HashMap has deleted buckets");
++    TEST_ASSERT_EQ(stale, 0u, "a deleted HashMap bucket's value reads as zero");
++
++    Remote<ContainerNode*> nodePointer { value->properField("node") };
++    Vector<uint64_t> nodes;
++    readable = RemoteTraits<ContainerList>::forEach(Remote<ContainerList> { value->properField("list") }, [&](const Remote<BasicRawSentinelNode<ContainerNode>>& node) {
++        if (auto element = nodePointer.pointeeAt(node.address()).field<uint64_t>("value").as<uint64_t>())
++            nodes.append(*element);
++        return IterationStatus::Continue;
++    });
++    TEST_ASSERT(readable && nodes == Vector<uint64_t>({ 7, 8, 9 }), "a SentinelLinkedList reads its nodes in order");
++}
++
++} // anonymous namespace
++
++void testDebugInfo()
++{
++    SuiteTracer tracer("DebugInfo");
++    if (!tracer.shouldRun())
++        return;
++
++    analyzeInAndOutOfProcess(createSameImageObject, analyzeSameImageObject);
++    analyzeInAndOutOfProcess(createCrossImageObject, analyzeCrossImageObject);
++    analyzeInAndOutOfProcess(createLaterDestructorObject, analyzeLaterDestructorObject);
++    analyzeInAndOutOfProcess(createDiamondObject, analyzeDiamondObject);
++    analyzeInAndOutOfProcess(createSystemLibraryObject, analyzeSystemLibraryObject);
++    analyzeInAndOutOfProcess(createContainers, analyzeContainers);
++    analyzeInAndOutOfProcess(createSameImageObject, analyzeAlignment);
++
++    // Everything is read from the snapshot, so the process may be gone.
++    analyzeAfterTargetExits(createSameImageObject, analyzeSameImageObject);
++    analyzeAfterTargetExits(createCrossImageObject, analyzeCrossImageObject);
++    analyzeAfterTargetExits(createLaterDestructorObject, analyzeLaterDestructorObject);
++    analyzeAfterTargetExits(createDiamondObject, analyzeDiamondObject);
++    analyzeAfterTargetExits(createSystemLibraryObject, analyzeSystemLibraryObject);
++    analyzeAfterTargetExits(createContainers, analyzeContainers);
++
++    analyzeAfterTargetExits(createNothing, analyzeNullAndUnreadable);
++    analyzeAfterExecutableReplacedAndTargetExits(createObjectsInBothImages, analyzeObjectsInReplacedExecutable);
++
++    analyzeAfterExecutableReplaced(createObjectsInBothImages, analyzeObjectsInReplacedExecutable);
++    analyzeInAndOutOfProcess(createNothing, analyzeNullAndUnreadable);
++}
++
++#else // No SB API, so there is nothing to ask.
++
++void testDebugInfo()
++{
++    SuiteTracer tracer("DebugInfo");
++    if (!tracer.shouldRun())
++        return;
++
++#if ENABLE(MYA_HEAP)
++    TEST_ASSERT(false, "mya_heap is enabled but liblldb's headers were not found");
++#else
++    skipSuite("DebugInfo", "mya_heap is not enabled");
++#endif
++}
++
++#endif // HAVE(LLDB)
++
++} // namespace JSCToolsTest
+diff --git a/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.cpp b/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.cpp
+index 7632fd2819a5..56ecf904ed5e 100644
+--- a/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.cpp
++++ b/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.cpp
+@@ -292,6 +292,8 @@ void ParkedThreads::stopAndJoin()
+ 
+ using CreateTargetObject = JSC::Corpse::Address (*)();
+ 
++enum class TargetAfterSnapshot : bool { KeepsRunning, Exits };
++
+ static uintptr_t executableBase()
+ {
+     Dl_info info;
+@@ -363,7 +365,7 @@ static bool readAll(int fd, std::span<uint8_t> destination)
+     return true;
+ }
+ 
+-static void spawnAndAnalyze(const char* executable, char* const* arguments, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze, NOESCAPE const Function<void(pid_t target, pid_t copy)>& afterRelease)
++static void spawnAndAnalyze(const char* executable, char* const* arguments, TargetAfterSnapshot after, NOESCAPE const Function<void()>& afterReport, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze, NOESCAPE const Function<void(pid_t target, pid_t copy)>& afterRelease)
+ {
+     // Every end is close-on-exec, so that no other spawned program keeps one.
+     std::array<int, 2> addressPipe { -1, -1 };
+@@ -421,6 +423,7 @@ static void spawnAndAnalyze(const char* executable, char* const* arguments, NOES
+     TEST_ASSERT(reported, "the target reports the address of its object");
+     if (!reported)
+         return;
++    afterReport();
+ 
+ #if OS(DARWIN)
+     auto snapshot = takeSnapshot(child);
+@@ -430,6 +433,11 @@ static void spawnAndAnalyze(const char* executable, char* const* arguments, NOES
+ #endif
+     if (!snapshot || !snapshot->isValid())
+         return;
++    if (after == TargetAfterSnapshot::Exits) {
++        killChild.release();
++        kill(child, SIGKILL);
++        while (waitpid(child, nullptr, 0) < 0 && errno == EINTR) { }
++    }
+     analyze(*snapshot, JSC::Corpse::Address { address });
+     snapshot = nullptr;
+     afterRelease(child, static_cast<pid_t>(copy));
+@@ -446,6 +454,21 @@ static std::optional<uint64_t> createOffset(CreateTargetObject create)
+     return createAddress - executableBase();
+ }
+ 
++static void analyzeOutOfProcess(const char* executablePath, CreateTargetObject create, TargetAfterSnapshot after, NOESCAPE const Function<void()>& afterReport, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze, NOESCAPE const Function<void(pid_t, pid_t)>& afterRelease = [](pid_t, pid_t) { })
++{
++    auto offset = createOffset(create);
++    if (!offset)
++        return;
++    auto offsetText = makeString(hex(*offset)).utf8();
++    char* const arguments[] = {
++        const_cast<char*>(executablePath),
++        const_cast<char*>("--target"),
++        const_cast<char*>(offsetText.legacyCStringPointer()),
++        nullptr
++    };
++    spawnAndAnalyze(executablePath, arguments, after, afterReport, analyze, afterRelease);
++}
++
+ static UTF8CString thisExecutablePath()
+ {
+     UTF8CString executablePath = JSC::Corpse::Process::create(getpid())->executablePath();
+@@ -453,22 +476,11 @@ static UTF8CString thisExecutablePath()
+     return executablePath;
+ }
+ 
+-static void analyzeOutOfProcess(CreateTargetObject create, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze, NOESCAPE const Function<void(pid_t, pid_t)>& afterRelease = [](pid_t, pid_t) { })
++static void analyzeOutOfProcess(CreateTargetObject create, TargetAfterSnapshot after, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
+ {
+     UTF8CString executablePath = thisExecutablePath();
+-    if (executablePath.isNull())
+-        return;
+-    auto offset = createOffset(create);
+-    if (!offset)
+-        return;
+-    auto offsetText = makeString(hex(*offset)).utf8();
+-    char* const arguments[] = {
+-        const_cast<char*>(executablePath.legacyCStringPointer()),
+-        const_cast<char*>("--target"),
+-        const_cast<char*>(offsetText.legacyCStringPointer()),
+-        nullptr
+-    };
+-    spawnAndAnalyze(executablePath.legacyCStringPointer(), arguments, analyze, afterRelease);
++    if (!executablePath.isNull())
++        analyzeOutOfProcess(executablePath.legacyCStringPointer(), create, after, [] { }, analyze);
+ }
+ 
+ void analyzeInAndOutOfProcess(CreateTargetObject create, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
+@@ -478,21 +490,84 @@ void analyzeInAndOutOfProcess(CreateTargetObject create, NOESCAPE const Function
+         if (auto snapshot = takeSnapshot(getpid()))
+             analyze(*snapshot, object);
+     }
+-    analyzeOutOfProcess(create, analyze);
++    analyzeOutOfProcess(create, TargetAfterSnapshot::KeepsRunning, analyze);
+ }
+ 
+ void analyzeInSeparateProcess(CreateTargetObject create, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
+ {
+-    analyzeOutOfProcess(create, analyze);
++    analyzeOutOfProcess(create, TargetAfterSnapshot::KeepsRunning, analyze);
+ }
+ 
+ #if OS(LINUX)
+ void analyzeOutOfProcessThenRelease(CreateTargetObject create, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze, NOESCAPE const Function<void(pid_t target, pid_t copy)>& afterRelease)
+ {
+-    analyzeOutOfProcess(create, analyze, afterRelease);
++    UTF8CString executablePath = thisExecutablePath();
++    if (!executablePath.isNull())
++        analyzeOutOfProcess(executablePath.legacyCStringPointer(), create, TargetAfterSnapshot::KeepsRunning, [] { }, analyze, afterRelease);
+ }
+ #endif
+ 
++void analyzeAfterTargetExits(CreateTargetObject create, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
++{
++    analyzeOutOfProcess(create, TargetAfterSnapshot::Exits, analyze);
++}
++
++static bool copyFile(const char* from, const char* to)
++{
++    int source = open(from, O_RDONLY | O_CLOEXEC);
++    int destination = open(to, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0755);
++    bool copied = source >= 0 && destination >= 0;
++    std::array<uint8_t, 64 * 1024> buffer;
++    while (copied) {
++        ssize_t length = read(source, buffer.data(), buffer.size());
++        if (length < 0 && errno == EINTR)
++            continue;
++        if (length <= 0) {
++            copied = !length;
++            break;
++        }
++        copied = write(destination, buffer.data(), static_cast<size_t>(length)) == length;
++    }
++    if (source >= 0)
++        close(source);
++    if (destination >= 0)
++        close(destination);
++    return copied;
++}
++
++static void analyzeAfterExecutableReplaced(CreateTargetObject create, TargetAfterSnapshot after, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
++{
++    UTF8CString executablePath = thisExecutablePath();
++    if (executablePath.isNull())
++        return;
++    // Next to this executable, so that it finds the same libraries.
++    auto copyPath = makeString(String::fromUTF8(executablePath.legacyCStringPointer()), ".replaced-"_s, getpid()).utf8();
++    auto replacementPath = makeString(String::fromUTF8(copyPath.legacyCStringPointer()), ".new"_s).utf8();
++    auto removeCopies = makeScopeExit([&] {
++        unlink(copyPath.legacyCStringPointer());
++        unlink(replacementPath.legacyCStringPointer());
++    });
++    bool copied = copyFile(executablePath.legacyCStringPointer(), copyPath.legacyCStringPointer());
++    TEST_ASSERT(copied, "a copy of this executable is made");
++    if (!copied)
++        return;
++    analyzeOutOfProcess(copyPath.legacyCStringPointer(), create, after, [&] {
++        // A new file at the path, as a linker writes one; the target keeps the old one mapped.
++        bool replaced = copyFile("/usr/bin/true", replacementPath.legacyCStringPointer()) && !rename(replacementPath.legacyCStringPointer(), copyPath.legacyCStringPointer());
++        TEST_ASSERT(replaced, "the target's executable is replaced by another");
++    }, analyze);
++}
++
++void analyzeAfterExecutableReplaced(CreateTargetObject create, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
++{
++    analyzeAfterExecutableReplaced(create, TargetAfterSnapshot::KeepsRunning, analyze);
++}
++
++void analyzeAfterExecutableReplacedAndTargetExits(CreateTargetObject create, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
++{
++    analyzeAfterExecutableReplaced(create, TargetAfterSnapshot::Exits, analyze);
++}
++
+ #endif // ENABLE(MYA)
+ 
+ } // namespace JSCToolsTest
+diff --git a/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h b/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h
+index a1a0abcd30f3..6e83a9ca8c6c 100644
+--- a/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h
++++ b/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h
+@@ -71,6 +71,7 @@ void skipSuite(const char* name, const char* why);
+ 
+ void testAddress();
+ void testByteParser();
++void testDebugInfo();
+ void testDiagnostics();
+ void testExportsTrie();
+ void testProcess();
+@@ -242,6 +243,17 @@ void analyzeInSeparateProcess(JSC::Corpse::Address (*create)(), NOESCAPE const F
+ void analyzeOutOfProcessThenRelease(JSC::Corpse::Address (*create)(), NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address object)>& analyze, NOESCAPE const Function<void(pid_t target, pid_t copy)>& afterRelease);
+ #endif
+ 
++// create() an object in a separate process, snapshot it, and analyze() the
++// snapshot only after that process has exited.
++void analyzeAfterTargetExits(JSC::Corpse::Address (*create)(), NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address object)>& analyze);
++
++// create() an object in a separate process run from a copy of this executable,
++// replace that copy's file with another executable once the object is
++// reported, then snapshot it and analyze() it: a rebuilt executable.
++void analyzeAfterExecutableReplaced(JSC::Corpse::Address (*create)(), NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address object)>& analyze);
++// The same, with the snapshot analyzed only after the target has exited.
++void analyzeAfterExecutableReplacedAndTargetExits(JSC::Corpse::Address (*create)(), NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address object)>& analyze);
++
+ // The main function for a copy of this process launched as `--target <offset>`: runs the
+ // create function at `offset` into this executable and holds its object.
+ int runCorpseTarget(const char* offsetText);
+diff --git a/Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp b/Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp
+index 3a51264a59d0..d1c6305bf103 100644
+--- a/Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp
++++ b/Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp
+@@ -144,6 +144,7 @@ int main(int argc, char** argv)
+     else {
+         JSCToolsTest::fuzzExportsTrie(fuzzSeed, static_cast<unsigned>(fuzzIterations));
+         runCorpseSuite();
++        JSCToolsTest::testDebugInfo();
+         JSCToolsTest::testVM();
+     }
+ 
+diff --git a/Source/JavaScriptCore/shell/CMakeLists.txt b/Source/JavaScriptCore/shell/CMakeLists.txt
+index 81a246fece58..50af33e4f0a0 100644
+--- a/Source/JavaScriptCore/shell/CMakeLists.txt
++++ b/Source/JavaScriptCore/shell/CMakeLists.txt
+@@ -121,6 +121,7 @@ if (DEVELOPER_MODE)
+             ../corpse/tests/CorpseSymbolTest.cpp
+             ../corpse/tests/CorpseThreadTest.cpp
+             ../corpse/tests/CorpseVMTest.cpp
++            ../corpse/tests/DebugInfoTest.cpp
+             ../corpse/tests/LibJSCToolsTestUtilities.cpp
+             ../corpse/tests/testLibJSCTools.cpp
+         )
+-- 
+2.54.0 (Apple Git-157)
+

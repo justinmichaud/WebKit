@@ -1,0 +1,1313 @@
+From 4ec4f748371493b019565e871ec7226e4ceed7b8 Mon Sep 17 00:00:00 2001
+From: Justin Michaud <jmichaud@igalia.com>
+Date: Tue, 6 Oct 2026 10:52:48 -0600
+Subject: [PATCH 08/17] [mya] Snapshot, attach to and read the threads of any
+ process on Linux Need the bug URL (OOPS!).
+
+Reviewed by NOBODY (OOPS!).
+
+On Linux, mya could only attach to its own process, and a "snapshot" read
+that live process, so nothing it read held still. This gives Linux the
+equivalent of a Darwin corpse.
+
+- Snapshots are copies. forkCopy(lifetime) forks the calling process with
+  _Fork (no atfork handlers, no glibc lock resets) into a child that only
+  waits on a lifetime pipe: its memory is the process's at the moment of the
+  fork, copy-on-write, and it lives until every write end of the pipe is
+  closed. A Snapshot of this process makes such a copy and reads it through
+  process_vm_readv; destroying the Snapshot closes the pipe and reaps the
+  copy. A cooperating target makes its own copy and hands its pid and the
+  pipe's write end to the analysis, Snapshot(process, copy, lifetime). A
+  Snapshot of another process that made no copy still reads it live, as a
+  best-effort view.
+- Process::attach accepts any pid that exists; holdsLiveTask checks it still
+  does. executablePathOf reads /proc/<pid>/exe.
+- Thread::platformCollect lists /proc/<pid>/task: each thread's name, run
+  state, user and system time, and, for a thread blocked in the kernel, its
+  stack pointer from /proc/<pid>/task/<tid>/syscall, and so its stack region.
+  A copy has only the forking thread, so the threads are the target's, read
+  when the snapshot is made.
+- Memory tells a hole from an unreadable page after a failed
+  process_vm_readv, which says only EFAULT for both, by consulting the
+  region list, as mach_vm_remap's error does on Darwin.
+
+Tests:
+- The out-of-process harness works on Linux: the target gets the read end of
+  a lifetime pipe as its standard input, forks its copy when it reports its
+  object (reportTargetObject), and reports the copy's pid; testLibJSCTools is
+  a child subreaper so that copies outliving their target are reaped by it.
+  analyzeInSeparateProcess and analyzeOutOfProcessThenRelease are added, and
+  takeSnapshot is shared.
+- The Memory suite's arenas are laid out portably and the suite runs on
+  Linux; the Thread suite runs in and out of process, on both platforms.
+- The Snapshot suite checks that a snapshot holds still while the target
+  changes, that no atfork handler runs, that two snapshots are two copies, and
+  on Linux that a copy lives as long as its snapshot and is reaped.
+
+* Source/JavaScriptCore/corpse/CorpseMemory.cpp:
+* Source/JavaScriptCore/corpse/CorpseMemory.h:
+* Source/JavaScriptCore/corpse/CorpseProcess.cpp:
+* Source/JavaScriptCore/corpse/CorpseProcess.h:
+* Source/JavaScriptCore/corpse/CorpseSnapshot.cpp:
+* Source/JavaScriptCore/corpse/CorpseSnapshot.h:
+* Source/JavaScriptCore/corpse/CorpseThread.cpp:
+* Source/JavaScriptCore/corpse/tests/CorpseMemoryTest.cpp:
+* Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.cpp:
+* Source/JavaScriptCore/corpse/tests/CorpseThreadTest.cpp:
+* Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.cpp:
+* Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h:
+* Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp:
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/JavaScriptCore/corpse/CorpseMemory.cpp |  25 ++-
+ Source/JavaScriptCore/corpse/CorpseMemory.h   |  10 ++
+ .../JavaScriptCore/corpse/CorpseProcess.cpp   |  51 +++++-
+ Source/JavaScriptCore/corpse/CorpseProcess.h  |  10 ++
+ .../JavaScriptCore/corpse/CorpseSnapshot.cpp  |  85 +++++++--
+ Source/JavaScriptCore/corpse/CorpseSnapshot.h |  17 +-
+ Source/JavaScriptCore/corpse/CorpseThread.cpp | 145 +++++++++++++++-
+ .../corpse/tests/CorpseMemoryTest.cpp         |  69 +++++---
+ .../corpse/tests/CorpseSnapshotTest.cpp       | 112 +++++++++++-
+ .../corpse/tests/CorpseThreadTest.cpp         |  90 ++++++----
+ .../corpse/tests/LibJSCToolsTestUtilities.cpp | 162 ++++++++++++++----
+ .../corpse/tests/LibJSCToolsTestUtilities.h   |  23 +++
+ .../corpse/tests/testLibJSCTools.cpp          |   9 +
+ 13 files changed, 693 insertions(+), 115 deletions(-)
+
+diff --git a/Source/JavaScriptCore/corpse/CorpseMemory.cpp b/Source/JavaScriptCore/corpse/CorpseMemory.cpp
+index 4d94cf404c08..b4f169f182a8 100644
+--- a/Source/JavaScriptCore/corpse/CorpseMemory.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseMemory.cpp
+@@ -107,7 +107,7 @@ Memory::MapResult Memory::Region::create(Memory& memory, Address remoteBase, siz
+     if (copied != static_cast<ssize_t>(size)) {
+         KernelResult result = copied < 0 ? errno : EFAULT;
+         munmap(target, size);
+-        return MapResult { .error = Error::Unknown, .kernResult = result };
++        return MapResult { .error = result == EFAULT ? memory.errorOfFailedCopy(remoteBase, size) : Error::Unknown, .kernResult = result };
+     }
+ 
+     auto* localBase = static_cast<const uint8_t*>(target);
+@@ -120,6 +120,29 @@ Memory::Region::~Region()
+     munmap(const_cast<uint8_t*>(m_localBase), m_pageCount * pageSize());
+ }
+ 
++// The first byte of the range that no readable region holds says why, as
++// mach_vm_remap does on Darwin: a gap is a hole, and a region without read
++// access is not readable.
++auto Memory::errorOfFailedCopy(Address base, size_t size) -> Error
++{
++    if (!m_regionsOfFailedCopies)
++        m_regionsOfFailedCopies = JSC::Corpse::Region::all(m_corpsePort);
++    Address cursor = base;
++    Address end = base + size;
++    for (const auto& region : *m_regionsOfFailedCopies) {
++        if (region.end() <= cursor)
++            continue;
++        if (region.base() > cursor)
++            return Error::UnmappedHole;
++        if (!region.isReadable())
++            return Error::NotReadable;
++        cursor = region.end();
++        if (cursor >= end)
++            return Error::Unknown;
++    }
++    return Error::UnmappedHole;
++}
++
+ #endif // OS(DARWIN)
+ 
+ Memory::Region::Region(Memory& memory, Address remoteBase, size_t pageCount, const uint8_t* localBase)
+diff --git a/Source/JavaScriptCore/corpse/CorpseMemory.h b/Source/JavaScriptCore/corpse/CorpseMemory.h
+index 5a3f7b840838..41f00083c9c5 100644
+--- a/Source/JavaScriptCore/corpse/CorpseMemory.h
++++ b/Source/JavaScriptCore/corpse/CorpseMemory.h
+@@ -30,6 +30,10 @@
+ #if ENABLE(MYA)
+ 
+ #include <JavaScriptCore/CorpseAddress.h>
++#if !OS(DARWIN)
++#include <JavaScriptCore/CorpseRegion.h>
++#include <optional>
++#endif
+ #include <stdint.h>
+ #include <wtf/ForbidHeapAllocation.h>
+ #include <wtf/HashMap.h>
+@@ -174,6 +178,12 @@ private:
+     size_t m_nextRecentRegion { 0 };
+     HashSet<target_address_t> m_unmappableWindows; // Windows with a hole, which reads map page by page.
+     HashMap<target_address_t, std::pair<Error, KernelResult>> m_unmappablePages;
++#if !OS(DARWIN)
++    // Why a copy failed: process_vm_readv says only EFAULT, for a hole and an
++    // unreadable page alike. Listed at the first failure.
++    Error errorOfFailedCopy(Address, size_t);
++    std::optional<Vector<JSC::Corpse::Region>> m_regionsOfFailedCopies;
++#endif
+ };
+ 
+ } // namespace Corpse
+diff --git a/Source/JavaScriptCore/corpse/CorpseProcess.cpp b/Source/JavaScriptCore/corpse/CorpseProcess.cpp
+index 8655a99c818a..a1608d347a52 100644
+--- a/Source/JavaScriptCore/corpse/CorpseProcess.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseProcess.cpp
+@@ -46,7 +46,9 @@
+ #include <errno.h>
+ #include <fcntl.h>
+ #include <limits.h>
++#include <signal.h>
+ #include <unistd.h>
++#include <wtf/SafeStrerror.h>
+ #include <wtf/text/MakeString.h>
+ #endif
+ 
+@@ -120,18 +122,20 @@ UTF8CString Process::executablePath() const
+ 
+ #else
+ 
++// The handle is the pid, which process_vm_readv reads through. Reading needs
++// the permission ptrace needs, which a parent has over its child.
+ bool Process::holdsLiveTask() const
+ {
+-    return isAttached();
++    return isAttached() && !(kill(m_pid, 0) && errno == ESRCH);
+ }
+ 
+ bool Process::isTranslated() const { return false; }
+ 
+-// FIXME: Attach to processes other than this one.
+ bool Process::attach()
+ {
+-    if (m_pid != getpid()) {
+-        Error::report("Could not attach to PID %d: only this process can be attached to", static_cast<int>(m_pid));
++    if (kill(m_pid, 0) && errno == ESRCH) {
++        detach();
++        Error::report("No process with PID %d", static_cast<int>(m_pid));
+         return false;
+     }
+     m_taskPort = OwnedTaskHandle::adopt(m_pid);
+@@ -160,16 +164,51 @@ std::optional<std::string> readProcFile(pid_t pid, const char* path)
+     }
+ }
+ 
+-UTF8CString Process::executablePath() const
++UTF8CString executablePathOf(pid_t pid)
+ {
+     std::array<char, PATH_MAX> path;
+-    ASCIICString link = makeString("/proc/"_s, m_pid, "/exe"_s).ascii();
++    ASCIICString link = makeString("/proc/"_s, pid, "/exe"_s).ascii();
+     ssize_t length = readlink(link.data(), path.data(), path.size());
+     if (length <= 0 || static_cast<size_t>(length) >= path.size())
+         return { };
+     return UTF8CString(byteCast<char8_t>(std::span { path }.first(length)));
+ }
+ 
++UTF8CString Process::executablePath() const
++{
++    return executablePathOf(m_pid);
++}
++
++pid_t forkCopy(int lifetime)
++{
++    // Unlike fork(), _Fork runs no pthread_atfork handlers and resets none of
++    // glibc's internal locks, such as malloc's: nothing runs in this process
++    // that could take a lock in the middle of the copy, and nothing in the copy
++    // changes it beyond what glibc needs for async-signal-safe calls.
++    pid_t copy = _Fork();
++    if (copy < 0) {
++        CORPSE_REPORT("Could not copy pid %d: %s", static_cast<int>(getpid()), safeStrerror(errno).legacyCStringPointer());
++        return -1;
++    }
++    if (copy)
++        return copy;
++
++    // In the copy, only async-signal-safe calls: this process's other threads
++    // do not exist here, and may have held any lock. Every other descriptor is
++    // closed, so that a later copy does not keep an earlier one alive through
++    // the write end of its lifetime pipe.
++    if (lifetime != STDIN_FILENO)
++        dup2(lifetime, STDIN_FILENO);
++    close_range(STDIN_FILENO + 1, ~0U, 0);
++    for (;;) {
++        char byte;
++        ssize_t result = read(STDIN_FILENO, &byte, 1);
++        if (!result || (result < 0 && errno != EINTR))
++            break;
++    }
++    _exit(0);
++}
++
+ #endif // OS(DARWIN)
+ 
+ } // namespace Corpse
+diff --git a/Source/JavaScriptCore/corpse/CorpseProcess.h b/Source/JavaScriptCore/corpse/CorpseProcess.h
+index dc6897faed26..233f14b0dd93 100644
+--- a/Source/JavaScriptCore/corpse/CorpseProcess.h
++++ b/Source/JavaScriptCore/corpse/CorpseProcess.h
+@@ -81,6 +81,16 @@ private:
+ // nullopt if it cannot be read. Reading most of them needs the permission
+ // ptrace needs.
+ std::optional<std::string> readProcFile(pid_t, const char* path);
++
++// The file /proc/<pid>/exe names, or null.
++UTF8CString executablePathOf(pid_t);
++
++// Copies the calling process, as a Darwin corpse copies a task: the copy is a
++// child that does nothing but wait, and whose memory is this process's at the
++// moment of the fork, copy-on-write. It lives until every write end of the
++// pipe whose read end is `lifetime` is closed. Returns the copy's pid, or -1,
++// having reported why.
++pid_t forkCopy(int lifetime);
+ #endif
+ 
+ } // namespace Corpse
+diff --git a/Source/JavaScriptCore/corpse/CorpseSnapshot.cpp b/Source/JavaScriptCore/corpse/CorpseSnapshot.cpp
+index a99503510fe5..86f16d741c30 100644
+--- a/Source/JavaScriptCore/corpse/CorpseSnapshot.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseSnapshot.cpp
+@@ -34,6 +34,13 @@
+ #if OS(DARWIN)
+ #include <mach/mach.h>
+ #include <mach/mach_error.h>
++#else
++#include <array>
++#include <errno.h>
++#include <fcntl.h>
++#include <sys/wait.h>
++#include <unistd.h>
++#include <wtf/SafeStrerror.h>
+ #endif
+ #include <wtf/TZoneMallocInlines.h>
+ 
+@@ -118,20 +125,6 @@ static OwnedTaskHandle takeSnapshot(Process* process)
+     return { };
+ }
+ 
+-#else
+-
+-// There is no corpse on Linux yet: the snapshot reads the live process.
+-static OwnedTaskHandle takeSnapshot(Process* process)
+-{
+-    if (!process || !process->isAttached()) {
+-        CORPSE_REPORT("Could not snapshot: No process attached");
+-        return { };
+-    }
+-    return OwnedTaskHandle::adopt(process->taskPort());
+-}
+-
+-#endif // OS(DARWIN)
+-
+ Snapshot::Snapshot(RefPtr<Process> process)
+     : m_process(WTF::move(process))
+     , m_corpsePort(takeSnapshot(m_process.get()))
+@@ -142,6 +135,70 @@ Snapshot::Snapshot(RefPtr<Process> process)
+ 
+ Snapshot::~Snapshot() = default;
+ 
++#else
++
++// This process is copied; any other is read live, as a best-effort view of a
++// target that made no copy of itself.
++static OwnedTaskHandle takeSnapshot(Process* process, int& lifetime)
++{
++    if (!process || !process->isAttached()) {
++        CORPSE_REPORT("Could not snapshot: No process attached");
++        return { };
++    }
++    if (process->pid() != getpid())
++        return OwnedTaskHandle::adopt(process->taskPort());
++
++    std::array<int, 2> lifetimePipe { -1, -1 };
++    if (pipe2(lifetimePipe.data(), O_CLOEXEC)) {
++        CORPSE_REPORT("Could not make the lifetime pipe of a copy of pid %d: %s", static_cast<int>(process->pid()), safeStrerror(errno).legacyCStringPointer());
++        return { };
++    }
++    pid_t copy = forkCopy(lifetimePipe[0]);
++    close(lifetimePipe[0]);
++    if (copy < 0) {
++        close(lifetimePipe[1]);
++        return { };
++    }
++    lifetime = lifetimePipe[1];
++    return OwnedTaskHandle::adopt(copy);
++}
++
++Snapshot::Snapshot(RefPtr<Process> process)
++    : m_process(WTF::move(process))
++    , m_corpsePort(takeSnapshot(m_process.get(), m_lifetime))
++    , m_id(s_nextId++)
++    , m_memory(corpsePort())
++{
++    // The copy has only the forking thread, so the threads are this process's, read now.
++    if (m_lifetime >= 0)
++        m_threads = Thread::collect(*this);
++}
++
++Snapshot::Snapshot(RefPtr<Process> process, pid_t copy, int lifetime)
++    : m_process(WTF::move(process))
++    , m_lifetime(lifetime)
++    , m_corpsePort(OwnedTaskHandle::adopt(copy))
++    , m_id(s_nextId++)
++    , m_memory(corpsePort())
++{
++    RELEASE_ASSERT(copy > 0 && lifetime >= 0);
++    m_threads = Thread::collect(*this);
++}
++
++Snapshot::~Snapshot()
++{
++    if (m_lifetime < 0)
++        return;
++    // Closing the last write end ends the copy. A copy of another process is
++    // that process's child until it exits, and is reaped there; a copy of this
++    // process, or one this process became the subreaper of, is reaped here.
++    close(m_lifetime);
++    pid_t copy = corpsePort();
++    while (waitpid(copy, nullptr, 0) < 0 && errno == EINTR) { }
++}
++
++#endif // OS(DARWIN)
++
+ } // namespace Corpse
+ } // namespace JSC
+ 
+diff --git a/Source/JavaScriptCore/corpse/CorpseSnapshot.h b/Source/JavaScriptCore/corpse/CorpseSnapshot.h
+index 2575ab78a841..7324b91d5169 100644
+--- a/Source/JavaScriptCore/corpse/CorpseSnapshot.h
++++ b/Source/JavaScriptCore/corpse/CorpseSnapshot.h
+@@ -51,7 +51,10 @@
+ namespace JSC {
+ namespace Corpse {
+ 
+-// Owns a corpse (a read-only Mach snapshot of a process)
++// Owns a corpse: a read-only Mach snapshot of a process on Darwin, and on
++// Linux a copy of the process that forkCopy made. A snapshot of another
++// Linux process that made no copy reads that live process, as a best-effort
++// view of a target that does not cooperate.
+ // Check isValid() to see whether acquisition succeeded.
+ //
+ // Snapshots are linked into a DoublyLinkedList by their owner. The list is
+@@ -60,7 +63,15 @@ namespace Corpse {
+ class Snapshot : public DoublyLinkedListNode<Snapshot> {
+     WTF_MAKE_TZONE_ALLOCATED(Snapshot);
+ public:
++    // On Linux, a snapshot of this process copies it.
+     explicit Snapshot(RefPtr<Process>);
++#if !OS(DARWIN)
++    // The copy `copy` that the target `process` made of itself with forkCopy,
++    // which `lifetime`, the write end of its lifetime pipe, keeps alive. The
++    // snapshot owns `lifetime`. The target's threads are read now, while it
++    // waits for the snapshot to exist.
++    Snapshot(RefPtr<Process>, pid_t copy, int lifetime);
++#endif
+     ~Snapshot();
+ 
+     Snapshot(const Snapshot&) = delete;
+@@ -74,6 +85,7 @@ public:
+     unsigned id() const { return m_id; }
+ 
+     Process* process() const { return m_process.get(); }
++    // On Linux, the pid of the copy, or of the live process.
+     TaskHandle corpsePort() const { return taskHandle(m_corpsePort); }
+ 
+     Memory& memory() LIFETIME_BOUND
+@@ -94,6 +106,9 @@ private:
+     static unsigned s_nextId;
+ 
+     RefPtr<Process> m_process;
++#if !OS(DARWIN)
++    int m_lifetime { -1 }; // The write end of the copy's lifetime pipe, if this snapshot owns a copy.
++#endif
+     OwnedTaskHandle m_corpsePort;
+     unsigned m_id;
+ 
+diff --git a/Source/JavaScriptCore/corpse/CorpseThread.cpp b/Source/JavaScriptCore/corpse/CorpseThread.cpp
+index c0ad1490ffe1..438e755dfea3 100644
+--- a/Source/JavaScriptCore/corpse/CorpseThread.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseThread.cpp
+@@ -43,6 +43,15 @@
+ #include <mach/thread_status.h>
+ #endif
+ #include <optional>
++#if !OS(DARWIN)
++#include <charconv>
++#include <dirent.h>
++#include <errno.h>
++#include <string_view>
++#include <unistd.h>
++#include <wtf/SafeStrerror.h>
++#include <wtf/text/MakeString.h>
++#endif
+ 
+ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
+ 
+@@ -172,9 +181,141 @@ Vector<Thread> Thread::platformCollect(const Snapshot& snapshot)
+ 
+ #else
+ 
+-const char* Thread::runStateDescription() const { return "unknown"; }
++// The state letter of /proc/<pid>/task/<tid>/stat.
++const char* Thread::runStateDescription() const
++{
++    switch (m_runState) {
++    case 'R':
++        return "running";
++    case 'S':
++        return "sleeping";
++    case 'D':
++        return "uninterruptible";
++    case 'T':
++    case 't':
++        return "stopped";
++    case 'Z':
++        return "zombie";
++    case 'X':
++        return "dead";
++    case 'I':
++        return "idle";
++    default:
++        return "unknown";
++    }
++}
+ 
+-Vector<Thread> Thread::platformCollect(const Snapshot&) { return { }; }
++// The fields of /proc/<pid>/task/<tid>/stat after the name, which is in
++// parentheses and may hold spaces: the first is the state, and the twelfth and
++// thirteenth the user and system times, in clock ticks.
++static Vector<std::string_view> statFieldsAfterName(std::string_view stat)
++{
++    Vector<std::string_view> fields;
++    size_t nameEnd = stat.rfind(')');
++    if (nameEnd == std::string_view::npos)
++        return fields;
++    std::string_view rest = stat.substr(nameEnd + 1);
++    while (!rest.empty()) {
++        size_t start = rest.find_first_not_of(" \n");
++        if (start == std::string_view::npos)
++            break;
++        rest.remove_prefix(start);
++        size_t end = std::min(rest.find_first_of(" \n"), rest.size());
++        fields.append(rest.substr(0, end));
++        rest.remove_prefix(end);
++    }
++    return fields;
++}
++
++// /proc/<pid>/task/<tid>/syscall holds, for a thread blocked in the kernel,
++// the syscall's number and arguments, then the stack pointer and the program
++// counter; or "running".
++static std::optional<Address> readStackPointer(pid_t pid, const std::string& task)
++{
++    auto syscall = readProcFile(pid, (task + "/syscall").c_str());
++    if (!syscall || syscall->starts_with("running"))
++        return std::nullopt;
++    std::string_view line { *syscall };
++    while (!line.empty() && (line.back() == '\n' || line.back() == ' '))
++        line.remove_suffix(1);
++    size_t pcStart = line.rfind(' ');
++    if (pcStart == std::string_view::npos)
++        return std::nullopt;
++    size_t spStart = line.rfind(' ', pcStart - 1);
++    std::string_view sp = line.substr(spStart == std::string_view::npos ? 0 : spStart + 1, pcStart - (spStart == std::string_view::npos ? 0 : spStart + 1));
++    if (sp.starts_with("0x"))
++        sp.remove_prefix(2);
++    uint64_t value = 0;
++    if (std::from_chars(sp.data(), sp.data() + sp.size(), value, 16).ec != std::errc { } || !value)
++        return std::nullopt;
++    return Address { value };
++}
++
++// The threads are the target's: a copy of it has only the thread that forked
++// it, which runs on that thread's stack.
++Vector<Thread> Thread::platformCollect(const Snapshot& snapshot)
++{
++    Vector<Thread> result;
++    pid_t pid = snapshot.process()->pid();
++    pid_t copy = snapshot.corpsePort();
++    // In a copy of this process, the forking thread is this one, which is running.
++    std::optional<uint64_t> forkingThread;
++    if (copy != pid && pid == getpid())
++        forkingThread = static_cast<uint64_t>(gettid());
++    ASCIICString taskPath = makeString("/proc/"_s, pid, "/task"_s).ascii();
++    DIR* directory = opendir(taskPath.data());
++    if (!directory) {
++        CORPSE_REPORT("Could not list the threads of pid %d: %s", static_cast<int>(pid), safeStrerror(errno).legacyCStringPointer());
++        return result;
++    }
++    long ticksPerSecond = sysconf(_SC_CLK_TCK);
++    // Read once: a JS process has a GC thread for each core.
++    Vector<Region> regions = Region::allWithPageCounts(copy);
++    while (struct dirent* entry = readdir(directory)) {
++        uint64_t tid = 0;
++        std::string_view name { entry->d_name };
++        if (std::from_chars(name.data(), name.data() + name.size(), tid).ec != std::errc { } || !tid)
++            continue;
++        Diagnostics::count(DiagnosticCounter::ThreadsListed);
++        std::string task = "task/" + std::string(name);
++
++        Thread thread;
++        thread.m_id = tid;
++        if (auto comm = readProcFile(pid, (task + "/comm").c_str())) {
++            if (!comm->empty() && comm->back() == '\n')
++                comm->pop_back();
++            thread.m_name = WTF::move(*comm);
++        }
++        if (auto stat = readProcFile(pid, (task + "/stat").c_str())) {
++            auto fields = statFieldsAfterName(*stat);
++            if (!fields.isEmpty() && !fields[0].empty())
++                thread.m_runState = fields[0][0];
++            uint64_t userTicks = 0;
++            uint64_t systemTicks = 0;
++            if (fields.size() > 12 && ticksPerSecond > 0) {
++                std::from_chars(fields[11].data(), fields[11].data() + fields[11].size(), userTicks);
++                std::from_chars(fields[12].data(), fields[12].data() + fields[12].size(), systemTicks);
++                thread.m_userTimeUsec = userTicks * 1000000 / static_cast<uint64_t>(ticksPerSecond);
++                thread.m_systemTimeUsec = systemTicks * 1000000 / static_cast<uint64_t>(ticksPerSecond);
++            }
++        }
++
++        // The stack is the region the stack pointer points into. A running thread has
++        // no stack pointer to read without stopping it.
++        auto stackPointer = readStackPointer(pid, task);
++        if (!stackPointer && forkingThread == tid)
++            stackPointer = readStackPointer(copy, "task/" + std::to_string(copy));
++        if (stackPointer) {
++            Diagnostics::count(DiagnosticCounter::ThreadStatesRead);
++            thread.m_stackPointer = *stackPointer;
++            if (auto region = Region::findContaining(regions, thread.m_stackPointer))
++                thread.m_stackRegion = *region;
++        }
++        result.append(WTF::move(thread));
++    }
++    closedir(directory);
++    return result;
++}
+ 
+ #endif // OS(DARWIN)
+ 
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseMemoryTest.cpp b/Source/JavaScriptCore/corpse/tests/CorpseMemoryTest.cpp
+index 8c2d3a7b7fdb..dad22ebd2471 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseMemoryTest.cpp
++++ b/Source/JavaScriptCore/corpse/tests/CorpseMemoryTest.cpp
+@@ -43,6 +43,8 @@
+ #if OS(DARWIN)
+ #include <mach/mach.h>
+ #include <mach/mach_vm.h>
++#else
++#include <sys/mman.h>
+ #endif
+ 
+ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
+@@ -54,10 +56,13 @@ using JSC::Corpse::Memory;
+ using JSC::Corpse::Process;
+ using JSC::Corpse::Snapshot;
+ 
+-#if OS(DARWIN)
+-
+ namespace {
+ 
++#if !OS(DARWIN)
++using mach_vm_address_t = uint64_t;
++using mach_vm_size_t = uint64_t;
++#endif
++
+ // The arena's page layout, all of it set up before the corpse is taken. The pages the
+ // kernel will not hand back are what the error cases below are about.
+ enum ArenaPage : unsigned {
+@@ -81,8 +86,41 @@ uint64_t tailPatternFor(unsigned page) { return tailPatternBase | page; }
+ // Memory at the start of a mapping window, so that every page of `size` bytes is in one.
+ static bool allocateAtWindowStart(mach_vm_address_t& base, mach_vm_size_t size)
+ {
++#if OS(DARWIN)
+     return mach_vm_map(mach_task_self(), &base, size, Memory::mappingWindowSize - 1, VM_FLAGS_ANYWHERE, MEMORY_OBJECT_NULL, 0, FALSE,
+         VM_PROT_DEFAULT, VM_PROT_ALL, VM_INHERIT_DEFAULT) == KERN_SUCCESS;
++#else
++    // A window more than asked for, less what lies outside the aligned part.
++    size_t reserved = size + Memory::mappingWindowSize;
++    void* mapped = mmap(nullptr, reserved, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
++    if (mapped == MAP_FAILED)
++        return false;
++    uint64_t start = std::bit_cast<uintptr_t>(mapped);
++    base = roundUpToMultipleOf(Memory::mappingWindowSize, start);
++    if (base > start)
++        munmap(mapped, base - start);
++    if (uint64_t after = start + reserved - (base + size))
++        munmap(std::bit_cast<void*>(static_cast<uintptr_t>(base + size)), after);
++    return true;
++#endif
++}
++
++static bool deallocate(mach_vm_address_t address, size_t size)
++{
++#if OS(DARWIN)
++    return mach_vm_deallocate(mach_task_self(), address, size) == KERN_SUCCESS;
++#else
++    return !munmap(std::bit_cast<void*>(static_cast<uintptr_t>(address)), size);
++#endif
++}
++
++static bool protect(mach_vm_address_t address, size_t size, bool isReadable)
++{
++#if OS(DARWIN)
++    return mach_vm_protect(mach_task_self(), address, size, FALSE, isReadable ? VM_PROT_READ : VM_PROT_NONE) == KERN_SUCCESS;
++#else
++    return !mprotect(std::bit_cast<void*>(static_cast<uintptr_t>(address)), size, isReadable ? PROT_READ : PROT_NONE);
++#endif
+ }
+ 
+ // Each page holds one pattern at its first word and another at its last, so a read can
+@@ -101,13 +139,7 @@ public:
+             *tailOf(page) = tailPatternFor(page);
+         }
+ 
+-        if (mach_vm_deallocate(mach_task_self(), addressOf(Hole), m_pageSize) != KERN_SUCCESS)
+-            return false;
+-        if (mach_vm_protect(mach_task_self(), addressOf(ReadOnly), m_pageSize, FALSE, VM_PROT_READ) != KERN_SUCCESS)
+-            return false;
+-        if (mach_vm_protect(mach_task_self(), addressOf(NoAccess), m_pageSize, FALSE, VM_PROT_NONE) != KERN_SUCCESS)
+-            return false;
+-        return true;
++        return deallocate(addressOf(Hole), m_pageSize) && protect(addressOf(ReadOnly), m_pageSize, true) && protect(addressOf(NoAccess), m_pageSize, false);
+     }
+ 
+     size_t pageSize() const { return m_pageSize; }
+@@ -165,6 +197,7 @@ uint64_t firstWordOf(std::span<const uint8_t> bytes)
+ // Checks whether `address` is mapped in this process.
+ bool isMappedLocally(const void* address)
+ {
++#if OS(DARWIN)
+     mach_vm_address_t regionAddress = reinterpret_cast<mach_vm_address_t>(address);
+     mach_vm_size_t regionSize = 0;
+     vm_region_basic_info_data_64_t info;
+@@ -176,6 +209,13 @@ bool isMappedLocally(const void* address)
+         return false;
+     auto queried = reinterpret_cast<mach_vm_address_t>(address);
+     return queried >= regionAddress && queried < regionAddress + regionSize;
++#else
++    // mincore fails with ENOMEM for a page that is not mapped.
++    size_t pageSize = Memory::pageSize();
++    unsigned char residency = 0;
++    void* page = std::bit_cast<void*>(std::bit_cast<uintptr_t>(address) & ~(pageSize - 1));
++    return !mincore(page, pageSize, &residency);
++#endif
+ }
+ 
+ } // anonymous namespace
+@@ -520,17 +560,6 @@ void testMemory()
+     }
+ }
+ 
+-#else
+-
+-void testMemory()
+-{
+-    SuiteTracer tracer("Memory");
+-    if (!tracer.shouldRun())
+-        return;
+-    skipSuite("Memory", "the test arena is laid out with Mach VM calls");
+-}
+-
+-#endif // OS(DARWIN)
+ 
+ } // namespace JSCToolsTest
+ 
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.cpp b/Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.cpp
+index bb8913d98844..8003c61b8156 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.cpp
++++ b/Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.cpp
+@@ -31,17 +31,126 @@
+ 
+ #include <JavaScriptCore/CorpseProcess.h>
+ #include <JavaScriptCore/CorpseSnapshot.h>
++#include <errno.h>
++#include <mutex>
++#include <pthread.h>
++#include <signal.h>
++#include <stdlib.h>
+ #if OS(DARWIN)
+ #include <mach/mach.h>
++#else
++#include <sys/wait.h>
+ #endif
+ #include <unistd.h>
+ 
+ namespace JSCToolsTest {
+ 
++using JSC::Corpse::Address;
+ using JSC::Corpse::Process;
+ using JSC::Corpse::Snapshot;
+ using JSC::Corpse::TaskHandle;
+ 
++// A global the target changes after the snapshot is taken.
++static volatile uint64_t changingGlobal;
++
++static Address createChangingGlobal()
++{
++    changingGlobal = 1;
++    reportTargetObject(Address { const_cast<uint64_t*>(&changingGlobal) });
++    for (;;) {
++        changingGlobal = changingGlobal + 1;
++        usleep(1000);
++    }
++}
++
++// Out of process, the target changes the global from when it reports it, so
++// what it was at the snapshot is not known, only that it stays so.
++static void analyzeChangingGlobal(Snapshot& snapshot, Address global)
++{
++    auto before = snapshot.memory().ptr<uint64_t>(global);
++    usleep(20 * 1000);
++    auto after = snapshot.memory().ptr<uint64_t>(global);
++    TEST_ASSERT(before && after && *before && *before == *after, "a global the target changes after the snapshot reads as it was");
++}
++
++// Set by a pthread_atfork child handler, which a snapshot must not run.
++static uint64_t atforkChildHandlerRan;
++
++static Address createAtforkHandler()
++{
++    static std::once_flag once;
++    std::call_once(once, [] {
++        pthread_atfork(nullptr, nullptr, [] {
++            atforkChildHandlerRan = 1;
++        });
++    });
++    return Address { &atforkChildHandlerRan };
++}
++
++static void analyzeAtforkHandler(Snapshot& snapshot, Address flag)
++{
++    auto ran = snapshot.memory().ptr<uint64_t>(flag);
++    TEST_ASSERT(ran && !*ran, "taking a snapshot runs no atfork handler in it");
++}
++
++static void testCopies()
++{
++    {
++        changingGlobal = 1;
++        auto snapshot = takeSnapshot(getpid());
++        changingGlobal = 2;
++        if (snapshot) {
++            auto value = snapshot->memory().ptr<uint64_t>(Address { const_cast<uint64_t*>(&changingGlobal) });
++            TEST_ASSERT(value && *value == 1, "a global this process changes after the snapshot reads as it was");
++        }
++    }
++    analyzeInSeparateProcess(createChangingGlobal, analyzeChangingGlobal);
++    analyzeInAndOutOfProcess(createAtforkHandler, analyzeAtforkHandler);
++
++#if OS(LINUX)
++    // A copy lives as long as its snapshot, and is reaped with it.
++    pid_t firstCopy = 0;
++    pid_t secondCopy = 0;
++    {
++        auto second = takeSnapshot(getpid());
++        {
++            auto first = takeSnapshot(getpid());
++            if (!first || !second)
++                return;
++            firstCopy = first->corpsePort();
++            secondCopy = second->corpsePort();
++            TEST_ASSERT(firstCopy != secondCopy && firstCopy != getpid() && !kill(firstCopy, 0), "a snapshot of this process is a live copy of it");
++        }
++        TEST_ASSERT(kill(firstCopy, 0) && errno == ESRCH, "releasing a snapshot ends its copy, and reaps it");
++        TEST_ASSERT(!kill(secondCopy, 0), "and leaves the copy of another snapshot");
++    }
++    TEST_ASSERT(kill(secondCopy, 0) && errno == ESRCH, "which ends with its own snapshot");
++
++    // Out of process, the copy is the target's child: released, it ends, and
++    // stays the target's zombie until the target exits and this process, its
++    // subreaper, inherits and reaps it.
++    analyzeOutOfProcessThenRelease(createChangingGlobal, analyzeChangingGlobal, [](pid_t target, pid_t copy) {
++        auto isZombie = [&] {
++            auto stat = JSC::Corpse::readProcFile(copy, "stat");
++            size_t end = stat ? stat->rfind(')') : std::string::npos;
++            return end != std::string::npos && end + 2 < stat->size() && (*stat)[end + 2] == 'Z';
++        };
++        bool ended = false;
++        for (unsigned attempt = 0; attempt < 1000 && !ended; ++attempt) {
++            ended = isZombie();
++            if (!ended)
++                usleep(10 * 1000);
++        }
++        TEST_ASSERT(ended, "releasing a snapshot of another process ends its copy");
++        kill(target, SIGKILL);
++        while (waitpid(target, nullptr, 0) < 0 && errno == EINTR) { }
++        pid_t reaped = -1;
++        while ((reaped = waitpid(copy, nullptr, 0)) < 0 && errno == EINTR) { }
++        TEST_ASSERT(reaped == copy, "and once the target exits, this process reaps it");
++    });
++#endif
++}
++
+ void testSnapshot()
+ {
+     SuiteTracer tracer("Snapshot");
+@@ -69,10 +178,8 @@ void testSnapshot()
+         Snapshot second(process);
+         TEST_ASSERT(second.isValid(), "a second snapshot of the same process is valid");
+         TEST_ASSERT(second.id() > firstId, "identifiers increase");
+-#if OS(DARWIN) // FIXME: linux
+         TEST_ASSERT(second.corpsePort() != snapshot.corpsePort(),
+             "two snapshots hold two different corpses");
+-#endif
+         secondCorpsePort = second.corpsePort();
+     }
+ #if OS(DARWIN)
+@@ -111,6 +218,7 @@ void testSnapshot()
+         TEST_ASSERT(!snapshot.symbol(nullptr), "an unnamed symbol resolves to nothing");
+         TEST_ASSERT(!snapshot.symbol(""), "an empty symbol name resolves to nothing");
+     }
++    testCopies();
+ 
+ #if OS(DARWIN)
+     {
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseThreadTest.cpp b/Source/JavaScriptCore/corpse/tests/CorpseThreadTest.cpp
+index e9311ae97a7a..93332e3c02d1 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseThreadTest.cpp
++++ b/Source/JavaScriptCore/corpse/tests/CorpseThreadTest.cpp
+@@ -34,41 +34,52 @@
+ #include <JavaScriptCore/CorpseThread.h>
+ #include <string>
+ #include <string_view>
++#include <wtf/NeverDestroyed.h>
+ 
+ namespace JSCToolsTest {
+ 
++using JSC::Corpse::Address;
++using JSC::Corpse::Snapshot;
+ using JSC::Corpse::Thread;
+ 
+-void testThreads()
++static constexpr const char* alphaName = "jsctools alpha";
++static constexpr const char* betaName = "jsctools beta";
++// Longer than a pthread name can hold, so that truncation is exercised.
++static constexpr const char* longName =
++    "jsctools a thread whose name is far too long to fit in the space a pthread name has";
++
++static ParkedThreads& parkedThreads()
+ {
+-    SuiteTracer tracer("Thread");
+-    if (!tracer.shouldRun())
+-        return;
+-    if (linuxSkip("Thread", "corpses are not implemented on Linux yet"))
++    static NeverDestroyed<ParkedThreads> parked;
++    return parked;
++}
++
++struct ParkedThreadsFixture {
++    uint64_t count;
++};
++
++// In the target: threads parked under known names, until the process exits.
++static Address createParkedThreads()
++{
++    static ParkedThreadsFixture fixture { };
++    ParkedThreads& parked = parkedThreads();
++    bool spawned = parked.spawn(alphaName) && parked.spawn(betaName) && parked.spawn(longName);
++    if (!spawned || !parked.waitUntilAllParked())
++        return { };
++    fixture.count = parked.count();
++    return Address { &fixture };
++}
++
++static void analyzeParkedThreads(Snapshot& snapshot, Address address)
++{
++    auto fixture = snapshot.memory().ptr<ParkedThreadsFixture>(address);
++    TEST_ASSERT(fixture && fixture->count == 3, "the target's threads parked themselves");
++    if (!fixture)
+         return;
+ 
+-    static constexpr const char* alphaName = "jsctools alpha";
+-    static constexpr const char* betaName = "jsctools beta";
+-    // Longer than a pthread name can hold, so that truncation is exercised.
+-    static constexpr const char* longName =
+-        "jsctools a thread whose name is far too long to fit in the space a pthread name has";
+-
+-    ParkedThreads parked;
+-    TEST_ASSERT(parked.spawn(alphaName), "a named thread starts");
+-    TEST_ASSERT(parked.spawn(betaName), "a second named thread starts");
+-    TEST_ASSERT(parked.spawn(longName), "a thread with an overlong name starts");
+-    if (!parked.waitUntilAllParked()) {
+-        TEST_ASSERT(false, "the spawned threads parked themselves");
+-        return;
+-    }
+-
+-    SelfSnapshot self;
+-    if (!self.isValid())
+-        return;
+-
+-    const Vector<Thread>& threads = self.snapshot().threads();
+-    TEST_ASSERT(threads.size() >= 1 + parked.count(),
+-        "the corpse holds at least this process's own threads");
++    const Vector<Thread>& threads = snapshot.threads();
++    TEST_ASSERT(threads.size() >= 1 + fixture->count,
++        "the snapshot holds at least the target's own threads");
+ 
+     bool foundAlpha = false;
+     bool foundBeta = false;
+@@ -76,19 +87,25 @@ void testThreads()
+     std::string expectedTruncated(std::string_view(longName).substr(0, ParkedThreads::maximumNameLength));
+ 
+     for (const Thread& thread : threads) {
++        bool parked = true;
+         if (thread.name() == alphaName)
+             foundAlpha = true;
+         else if (thread.name() == betaName)
+             foundBeta = true;
+         else if (thread.name() == expectedTruncated)
+             foundTruncated = true;
++        else
++            parked = false;
+ 
+         TEST_ASSERT(thread.id(), "every thread has an identifier");
+         TEST_ASSERT(thread.name().length() <= ParkedThreads::maximumNameLength,
+             "no thread name is longer than a pthread name can be");
+ 
+-        // The stack is defined as the region the stack pointer points into, so if
+-        // both were read they have to agree.
++        // A parked thread is blocked, so its stack pointer was read. A running
++        // thread's may not be. The stack is the region the stack pointer points
++        // into, so if both were read they have to agree.
++        if (parked)
++            TEST_ASSERT(thread.stackPointer(), "a parked thread has a stack pointer");
+         if (thread.stackPointer()) {
+             TEST_ASSERT(thread.hasStack(), "a thread with a stack pointer has a stack region");
+             if (thread.hasStack()) {
+@@ -103,15 +120,24 @@ void testThreads()
+             "a thread's run state has a name");
+     }
+ 
+-    TEST_ASSERT(foundAlpha, "a named thread appears in the corpse under its name");
++    TEST_ASSERT(foundAlpha, "a named thread appears in the snapshot under its name");
+     TEST_ASSERT(foundBeta, "a second named thread appears under its name");
+     TEST_ASSERT(foundTruncated, "an overlong thread name appears cut to what a pthread name holds");
+ 
+     // Reading the threads is the expensive part, so it happens once.
+-    const Vector<Thread>& again = self.snapshot().threads();
++    const Vector<Thread>& again = snapshot.threads();
+     TEST_ASSERT(&again == &threads, "the threads of a snapshot are read once and kept");
++}
+ 
+-    parked.stopAndJoin();
++void testThreads()
++{
++    SuiteTracer tracer("Thread");
++    if (!tracer.shouldRun())
++        return;
++
++    analyzeInAndOutOfProcess(createParkedThreads, analyzeParkedThreads);
++    // The target's threads end with it; this process's are stopped here.
++    parkedThreads().stopAndJoin();
+ }
+ 
+ } // namespace JSCToolsTest
+diff --git a/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.cpp b/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.cpp
+index da066d3b0377..76d37dd688b3 100644
+--- a/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.cpp
++++ b/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.cpp
+@@ -40,7 +40,10 @@
+ #endif
+ #include <array>
+ #include <dlfcn.h>
++#include <optional>
++#include <utility>
+ #include <errno.h>
++#include <fcntl.h>
+ #include <pthread.h>
+ #include <signal.h>
+ #include <spawn.h>
+@@ -320,16 +323,33 @@ int runCorpseTarget(const char* offsetText)
+     }
+     // Warning: do not ever move this into a production binary!
+     auto create = tagCodePtr<CreateTargetObject, CFunctionPtrTag>(std::bit_cast<void*>(base + *offset));
+-    uint64_t address = create().toTargetVMAddress();
+-    if (write(STDOUT_FILENO, &address, sizeof(address)) != sizeof(address))
+-        return 1;
++    reportTargetObjectAndPark(create());
++}
++
++// The target is spawned with the read end of its copy's lifetime pipe as its
++// standard input, and reports its object, then on Linux its copy, on its
++// standard output.
++void reportTargetObject(JSC::Corpse::Address object)
++{
++    uint64_t address = object.toTargetVMAddress();
++    RELEASE_ASSERT(write(STDOUT_FILENO, &address, sizeof(address)) == sizeof(address));
++#if !OS(DARWIN)
++    uint64_t copy = static_cast<uint64_t>(JSC::Corpse::forkCopy(STDIN_FILENO));
++    RELEASE_ASSERT(static_cast<pid_t>(copy) > 0);
++    RELEASE_ASSERT(write(STDOUT_FILENO, &copy, sizeof(copy)) == sizeof(copy));
++#endif
++}
++
++void reportTargetObjectAndPark(JSC::Corpse::Address object)
++{
++    reportTargetObject(object);
+ 
+     // The analysis kills this process when it is done with the object.
+     while (true)
+         pause();
+ }
+ 
+-static std::unique_ptr<JSC::Corpse::Snapshot> takeSnapshot(pid_t pid)
++std::unique_ptr<JSC::Corpse::Snapshot> takeSnapshot(pid_t pid)
+ {
+     RefPtr<JSC::Corpse::Process> process = JSC::Corpse::Process::create(pid);
+     bool attached = process->attach();
+@@ -343,25 +363,50 @@ static std::unique_ptr<JSC::Corpse::Snapshot> takeSnapshot(pid_t pid)
+     return snapshot;
+ }
+ 
+-static void spawnAndAnalyze(const char* executable, char* const* arguments, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
++static bool readAll(int fd, std::span<uint8_t> destination)
+ {
++    while (!destination.empty()) {
++        ssize_t length = read(fd, destination.data(), destination.size());
++        if (length < 0 && errno == EINTR)
++            continue;
++        if (length <= 0)
++            return false;
++        destination = destination.subspan(static_cast<size_t>(length));
++    }
++    return true;
++}
++
++static void spawnAndAnalyze(const char* executable, char* const* arguments, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze, NOESCAPE const Function<void(pid_t target, pid_t copy)>& afterRelease)
++{
++    // Every end is close-on-exec, so that no other spawned program keeps one.
+     std::array<int, 2> addressPipe { -1, -1 };
+-    bool opened = !pipe(addressPipe.data());
+-    TEST_ASSERT(opened, "a pipe from the target opens");
+-    auto closePipe = makeScopeExit([&] {
++    std::array<int, 2> lifetimePipe { -1, -1 };
++    auto closePipes = makeScopeExit([&] {
+         for (int fd : addressPipe) {
+             if (fd >= 0)
+                 close(fd);
+         }
++        for (int fd : lifetimePipe) {
++            if (fd >= 0)
++                close(fd);
++        }
+     });
++    auto openPipe = [](std::array<int, 2>& ends) {
++        if (pipe(ends.data()))
++            return false;
++        for (int fd : ends)
++            fcntl(fd, F_SETFD, FD_CLOEXEC);
++        return true;
++    };
++    bool opened = openPipe(addressPipe) && openPipe(lifetimePipe);
++    TEST_ASSERT(opened, "the pipes to and from the target open");
+     if (!opened)
+         return;
+ 
+     posix_spawn_file_actions_t actions;
+     posix_spawn_file_actions_init(&actions);
+     posix_spawn_file_actions_adddup2(&actions, addressPipe[1], STDOUT_FILENO);
+-    posix_spawn_file_actions_addclose(&actions, addressPipe[0]);
+-    posix_spawn_file_actions_addclose(&actions, addressPipe[1]);
++    posix_spawn_file_actions_adddup2(&actions, lifetimePipe[0], STDIN_FILENO);
+     pid_t child = 0;
+     int error = posix_spawn(&child, executable, &actions, nullptr, arguments, environ);
+     posix_spawn_file_actions_destroy(&actions);
+@@ -370,19 +415,73 @@ static void spawnAndAnalyze(const char* executable, char* const* arguments, NOES
+         dataLogLn("    posix_spawn ", executable, ": ", safeStrerror(error));
+         return;
+     }
++    close(std::exchange(lifetimePipe[0], -1));
++    uint64_t copy = 0;
+     auto killChild = makeScopeExit([&] {
+         kill(child, SIGKILL);
+         while (waitpid(child, nullptr, 0) < 0 && errno == EINTR) { }
++        // A copy that ended while its target lived is a zombie this process
++        // inherited as the subreaper when the target exited.
++        if (copy)
++            while (waitpid(static_cast<pid_t>(copy), nullptr, 0) < 0 && errno == EINTR) { }
+     });
+ 
+     uint64_t address = 0;
+-    bool reported = read(addressPipe[0], &address, sizeof(address)) == sizeof(address);
++    bool reported = readAll(addressPipe[0], asMutableByteSpan(address));
++#if !OS(DARWIN)
++    reported = reported && readAll(addressPipe[0], asMutableByteSpan(copy)) && copy;
++#endif
+     TEST_ASSERT(reported, "the target reports the address of its object");
+     if (!reported)
+         return;
+ 
+-    if (auto snapshot = takeSnapshot(child))
+-        analyze(*snapshot, JSC::Corpse::Address { address });
++#if OS(DARWIN)
++    auto snapshot = takeSnapshot(child);
++#else
++    auto snapshot = WTF::makeUnique<JSC::Corpse::Snapshot>(JSC::Corpse::Process::create(child), static_cast<pid_t>(copy), std::exchange(lifetimePipe[1], -1));
++    TEST_ASSERT(snapshot->isValid(), "a snapshot of the target process is valid");
++#endif
++    if (!snapshot || !snapshot->isValid())
++        return;
++    analyze(*snapshot, JSC::Corpse::Address { address });
++    snapshot = nullptr;
++    afterRelease(child, static_cast<pid_t>(copy));
++}
++
++static std::optional<uint64_t> createOffset(CreateTargetObject create)
++{
++    uintptr_t createAddress = reinterpret_cast<uintptr_t>(removeCodePtrTag(create));
++    Dl_info info;
++    bool inThisExecutable = dladdr(std::bit_cast<void*>(createAddress), &info) && reinterpret_cast<uintptr_t>(info.dli_fbase) == executableBase();
++    TEST_ASSERT(inThisExecutable, "the target's create function is in this executable");
++    if (!inThisExecutable)
++        return std::nullopt;
++    return createAddress - executableBase();
++}
++
++static UTF8CString thisExecutablePath()
++{
++    UTF8CString executablePath = JSC::Corpse::Process::create(getpid())->executablePath();
++    TEST_ASSERT(!executablePath.isNull(), "this process's executable path is readable");
++    return executablePath;
++}
++
++static void analyzeOutOfProcess(CreateTargetObject create, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze, NOESCAPE const Function<void(pid_t, pid_t)>& afterRelease = [](pid_t, pid_t) { })
++{
++    UTF8CString executablePath = thisExecutablePath();
++    if (executablePath.isNull())
++        return;
++    auto offset = createOffset(create);
++    if (!offset)
++        return;
++    auto offsetText = makeString(hex(*offset)).utf8();
++    char* const arguments[] = {
++        const_cast<char*>(executablePath.legacyCStringPointer()),
++        const_cast<char*>("--target"),
++        const_cast<char*>(offsetText.legacyCStringPointer()),
++        nullptr
++    };
++    spawnAndAnalyze(executablePath.legacyCStringPointer(), arguments, analyze, afterRelease);
+ }
+ 
+ void analyzeInAndOutOfProcess(CreateTargetObject create, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
+@@ -392,32 +491,21 @@ void analyzeInAndOutOfProcess(CreateTargetObject create, NOESCAPE const Function
+         if (auto snapshot = takeSnapshot(getpid()))
+             analyze(*snapshot, object);
+     }
+-
+-    if (linuxSkip("analysis of a separate process", "attaching to another process is not implemented on Linux yet"))
+-        return;
+-
+-    uintptr_t createAddress = reinterpret_cast<uintptr_t>(removeCodePtrTag(create));
+-    Dl_info info;
+-    bool inThisExecutable = dladdr(std::bit_cast<void*>(createAddress), &info) && reinterpret_cast<uintptr_t>(info.dli_fbase) == executableBase();
+-    TEST_ASSERT(inThisExecutable, "the target's create function is in this executable");
+-    if (!inThisExecutable)
+-        return;
+-
+-    UTF8CString executablePath = JSC::Corpse::Process::create(getpid())->executablePath();
+-    TEST_ASSERT(!executablePath.isNull(), "this process's executable path is readable");
+-    if (executablePath.isNull())
+-        return;
+-
+-    CString offsetText = makeString(hex(createAddress - executableBase())).utf8();
+-    char* const arguments[] = {
+-        const_cast<char*>(executablePath.legacyCStringPointer()),
+-        const_cast<char*>("--target"),
+-        const_cast<char*>(offsetText.legacyCStringPointer()),
+-        nullptr
+-    };
+-    spawnAndAnalyze(executablePath.legacyCStringPointer(), arguments, analyze);
++    analyzeOutOfProcess(create, analyze);
+ }
+ 
++void analyzeInSeparateProcess(CreateTargetObject create, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze)
++{
++    analyzeOutOfProcess(create, analyze);
++}
++
++#if OS(LINUX)
++void analyzeOutOfProcessThenRelease(CreateTargetObject create, NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address)>& analyze, NOESCAPE const Function<void(pid_t target, pid_t copy)>& afterRelease)
++{
++    analyzeOutOfProcess(create, analyze, afterRelease);
++}
++#endif
++
+ #endif // ENABLE(MYA)
+ 
+ } // namespace JSCToolsTest
+diff --git a/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h b/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h
+index 7188ba5fdff8..5743fede0f24 100644
+--- a/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h
++++ b/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h
+@@ -31,6 +31,7 @@
+ #include <span>
+ #include <stdint.h>
+ #include <string_view>
++#include <sys/types.h>
+ #include <wtf/DataLog.h>
+ #include <wtf/Function.h>
+ #include <wtf/HexNumber.h>
+@@ -227,13 +228,35 @@ private:
+     Vector<Thread*> m_threads;
+ };
+ 
++// A snapshot of `pid`, which must be this process or, out of process, the
++// target, or null, having failed the test.
++std::unique_ptr<JSC::Corpse::Snapshot> takeSnapshot(pid_t);
++
+ // create() an object, then analyze() it in and out of process.
+ void analyzeInAndOutOfProcess(JSC::Corpse::Address (*create)(), NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address object)>& analyze);
+ 
++// create() an object in a separate process only, then analyze() it there. For
++// an object create() reports itself, from a state it never returns from.
++void analyzeInSeparateProcess(JSC::Corpse::Address (*create)(), NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address object)>& analyze);
++
++#if OS(LINUX)
++// create() an object in a separate process, analyze() its snapshot, release the
++// snapshot, then call afterRelease() while the target still runs.
++void analyzeOutOfProcessThenRelease(JSC::Corpse::Address (*create)(), NOESCAPE const Function<void(JSC::Corpse::Snapshot&, JSC::Corpse::Address object)>& analyze, NOESCAPE const Function<void(pid_t target, pid_t copy)>& afterRelease);
++#endif
++
+ // The main function for a copy of this process launched as `--target <offset>`: runs the
+ // create function at `offset` into this executable and holds its object.
+ int runCorpseTarget(const char* offsetText);
+ 
++// What the target process does once it has its object: reports it to the
++// analysis, which snapshots it once it has the report. On Linux, the target
++// reports a copy of itself, which it makes first.
++void reportTargetObject(JSC::Corpse::Address object);
++
++// reportTargetObject, then waits to be killed.
++[[noreturn]] void reportTargetObjectAndPark(JSC::Corpse::Address object);
++
+ #endif // ENABLE(MYA)
+ 
+ } // namespace JSCToolsTest
+diff --git a/Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp b/Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp
+index fef7ddd93612..27060d0c3afe 100644
+--- a/Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp
++++ b/Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp
+@@ -35,6 +35,9 @@
+ #include <stdlib.h>
+ #include <string.h>
+ #include <string_view>
++#if OS(LINUX)
++#include <sys/prctl.h>
++#endif
+ #include <wtf/StdLibExtras.h>
+ #include <wtf/text/StringToIntegerConversion.h>
+ #include <wtf/text/StringView.h>
+@@ -128,6 +131,12 @@ int main(int argc, char** argv)
+         JSCToolsTest::suiteFilter = arguments[index];
+     }
+ 
++#if OS(LINUX)
++    // A target's copy outlives the target, and is then reparented here rather
++    // than to init, so that it stays readable and is reaped here.
++    RELEASE_ASSERT(!prctl(PR_SET_CHILD_SUBREAPER, 1));
++#endif
++
+     dataLogLn("Starting libJavaScriptCoreTools tests");
+ 
+     if (fuzzOnly)
+-- 
+2.54.0 (Apple Git-157)
+

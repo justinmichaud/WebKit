@@ -1,0 +1,1204 @@
+From 9fe35fbfda3253106c77275aa40d4c0b595d6bfb Mon Sep 17 00:00:00 2001
+From: Justin Michaud <jmichaud@igalia.com>
+Date: Tue, 6 Oct 2026 10:52:48 -0600
+Subject: [PATCH 03/17] [MYA] Add mya_heap and liblldb + rtti as dependencies.
+ https://bugs.webkit.org/show_bug.cgi?id=325546
+
+Reviewed by NOBODY (OOPS!).
+
+we add an optional dependency to mya, mya_heap:
+- liblldb (installed via homebrew or linux package manager) is used to read debug info
+- rtti is added as a compile option to the target process (jsc, WebCore, etc)
+
+This will be useful in the future when we teach mya how to walk the full native heap.
+
+We add a simple test that confirms that we can use both of these from within mya.
+
+
+Every build change the heap walk needs that is gated on MYA_HEAP, plus the
+liblldb changes. They belong here because this is where MYA_HEAP is defined.
+Builds without MYA_HEAP are unaffected, except for the DEBUG_FISSION move
+(6 below), which changes the order of flags but not the flags themselves.
+Production and Release builds never enable MYA_HEAP.
+
+1. Drop RTTI and default symbol visibility again.
+   This PR turned on -frtti and turned off -fvisibility=hidden,
+   GCC_SYMBOLS_PRIVATE_EXTERN and TAPI, so that mya could name an object's
+   dynamic type through its std::type_info. The heap walk names dynamic types
+   from DWARF instead: the destructor in an object's vtable, matched against
+   the destructors' linkage names, gives its class. Nothing needs a
+   type_info, so GCC_ENABLE_CPP_RTTI goes back to NO in every project. JSC,
+   WTF and bmalloc hide their symbols again, JSC's TAPI comes back, and
+   CMake's -frtti and default-visibility presets go.
+   Why: MYA_HEAP Debug builds then compile and link like any other Debug
+   build, differing only in debug info. RTTI and export-everything made
+   images bigger and links slower, and they hid export-list and ODR mistakes.
+   TypeinfoTest stops reading the type_info out of the target (a -fno-rtti
+   build emits none) and checks only what liblldb gives: the class's size, its
+   base and a member read at the debug info's offset.
+   Not changed: the export-all and TAPI settings this PR added to WebCore,
+   PAL, WebGPU, WebKit, ANGLE and libwebrtc, and the
+   check-for-weak-vtables-and-externals exception. The prototype still had
+   them when it was tested. They were added for RTTI and are probably
+   removable now, but that has not been verified.
+
+2. Link Xcode's LLDB.framework, not Homebrew's liblldb (Xcode).
+   Link with -F$(DEVELOPER_DIR)/../SharedFrameworks and -framework LLDB, with
+   rpaths to Xcode's copy and the Command Line Tools' copy. The SB API headers
+   still come from Homebrew's llvm, because Xcode doesn't ship them, and the
+   SB API is binary compatible across versions.
+   Why: Homebrew's liblldb crashes reading WebCore's debug info. Xcode's
+   LLDB reads it, and it understands the debug info Xcode's clang writes.
+
+3. Require liblldb 19 or newer (CMake).
+   FindLLDB.cmake reports LLDB_VERSION, taken from the library's file name or
+   install directory, and JavaScriptCore asks for 19. An older liblldb is a
+   configure error that says what to install.
+   Why: liblldb 18 can't resolve addresses in an ELF segment that a PT_TLS
+   segment starts at, which is where libstdc++'s vtables live. Objects with
+   libstdc++ vtables then have no dynamic type. The default liblldb on
+   Debian 12 and Ubuntu 24.04 is older than 19, so without the check, builds
+   succeed and the heap tests fail with no hint why.
+
+4. Write dSYMs (macOS).
+   DEBUG_INFORMATION_FORMAT = dwarf-with-dsym for JavaScriptCore, WebCore,
+   WebGPU and WebKit under MYA_HEAP. In CMake, a POST_BUILD dsymutil step
+   writes the dSYM next to the image, or next to the framework bundle.
+   Why: through the debug map (.o files), liblldb can't find the compile unit
+   that defines a global variable, so globals have no type. Also, with
+   compilation caching, an object's debug info points at its precompiled
+   header's debug info in the cache, which only dsymutil reads. That drops
+   the types only the prefix header describes.
+   Cost: dsymutil runs after every link.
+
+5. Keep complete linkage and template names (CMake).
+   Under MYA_HEAP, take `-mllvm -dwarf-linkage-names=Abstract` and
+   -gsimple-template-names back out of the global flags, and don't build
+   PCHs with -fpch-debuginfo.
+   Why: with Abstract linkage names, an implicit destructor has no linkage
+   name, so classes with one get no dynamic type. With simple template names,
+   liblldb merges same-sized instances of one class template into a single
+   class, so values get another instance's members. With -fpch-debuginfo,
+   other compile units only declare the PCH's types, and liblldb resolves a
+   declared template instance without its arguments.
+   Cost: larger debug info and slower links. These flags exist to shrink
+   debug info.
+
+6. Turn off split DWARF (CMake).
+   ENABLE_MYA_HEAP forces DEBUG_FISSION off. To do that, the code that
+   applies DEBUG_FISSION moves from OptionsCommon.cmake to WebKitCommon.cmake,
+   after Options${PORT}, because ENABLE_MYA_HEAP is only known there. The
+   option is still declared in OptionsCommon.cmake.
+   Why: liblldb indexes .debug_names, not .gdb_index. With split DWARF it
+   opens and indexes every .dwo file each time it loads an image.
+   Effect on other builds: the same -gsplit-dwarf and --gdb-index flags,
+   added later in the flag list.
+
+7. Link with --build-id (non-Apple).
+   Why: an image's build-id is the Linux equivalent of LC_UUID. mya checks it
+   so that a file rebuilt since the target loaded it is refused instead of
+   misread, and it leaves out of the image list any image without one. lld
+   writes no build-id unless asked, and only some distributions' clang
+   drivers ask. Without this, WebKit's own images are missing from the list
+   on Linux, and `mya heap` can't find JavaScriptCore.
+
+8. Export libpas's API (PAS_BMALLOC_HIDDEN=0).
+   In Xcode, added to WK_MYA_HEAP_PREPROCESSOR_DEFINITIONS_YES. In CMake,
+   added as a compile definition, and the Cocoa bmalloc build stops forcing
+   PAS_BMALLOC_HIDDEN=1.
+   Why: the heap walk runs libpas's own enumerator (pas_enumerator) over the
+   snapshot to account for every allocation. On Linux it also builds the
+   enumerator's root with pas_root_create and pas_heap_lock_lock/unlock. The
+   HeapWalk tests enumerate their own heap the same way. All of these are
+   calls from libJavaScriptCoreTools into libpas, which lives inside
+   JavaScriptCore and bmalloc. Without the exports, libJavaScriptCoreTools
+   fails to link once the heap walk lands.
+
+9. Run testLibJSCTools with OS_ACTIVITY_MODE=disable on Cocoa.
+   Why: Xcode's LLDB.framework (2) logs an os_signpost and an os_log message
+   for every SB API call, which doubles the time of the heap walk tests.
+
+The PR title and description should drop "rtti", for example
+"[MYA] Add mya_heap: debug info builds and liblldb".
+---
+ Configurations/CommonBase.xcconfig            |   8 +-
+ Source/JavaScriptCore/CMakeLists.txt          |  17 ++
+ .../Configurations/Base.xcconfig              |  13 ++
+ .../Configurations/DebugRelease.xcconfig      |   5 +-
+ .../Configurations/Mya.xcconfig               |   4 +-
+ .../Configurations/TestLibJSCTools.xcconfig   |   4 +-
+ .../libJavaScriptCoreTools.xcconfig           |   2 +
+ .../JavaScriptCore.xcodeproj/project.pbxproj  |   4 +
+ Source/JavaScriptCore/corpse/CMakeLists.txt   |   4 +
+ Source/JavaScriptCore/corpse/CorpsePlatform.h |   6 +
+ .../JavaScriptCore/corpse/CorpseSnapshot.cpp  |   5 +
+ .../corpse/tests/LibJSCToolsTestUtilities.h   |   1 +
+ .../corpse/tests/TypeinfoTest.cpp             | 205 ++++++++++++++++++
+ .../corpse/tests/testLibJSCTools.cpp          |   1 +
+ Source/JavaScriptCore/shell/CMakeLists.txt    |   8 +
+ .../Configurations/ANGLE-dynamic.xcconfig     |   2 +-
+ .../Configurations/libwebrtc.xcconfig         |   9 +-
+ .../libwebrtc.xcodeproj/project.pbxproj       |   2 +-
+ Source/WTF/wtf/PlatformEnable.h               |   9 +
+ Source/WebCore/Configurations/Base.xcconfig   |   2 +-
+ .../Configurations/DebugRelease.xcconfig      |   6 +-
+ .../WebCore/Configurations/WebCore.xcconfig   |   5 +-
+ .../WebCoreTestSupport.xcconfig               |   2 +-
+ .../WebCore/PAL/Configurations/Base.xcconfig  |   2 +-
+ Source/WebGPU/Configurations/Base.xcconfig    |   2 +-
+ .../Configurations/DebugRelease.xcconfig      |   6 +-
+ Source/WebGPU/Configurations/WebGPU.xcconfig  |   7 +-
+ Source/WebKit/Configurations/Base.xcconfig    |   9 +-
+ .../Configurations/DebugRelease.xcconfig      |   6 +-
+ .../Configurations/WebKitPlatform.xcconfig    |   2 +-
+ Source/bmalloc/PlatformCocoa.cmake            |   4 +-
+ Source/cmake/FindLLDB.cmake                   |  98 +++++++++
+ Source/cmake/OptionsCommon.cmake              |   9 +-
+ Source/cmake/WebKitCommon.cmake               |  32 +++
+ Source/cmake/WebKitFeatures.cmake             |  10 +
+ Source/cmake/WebKitMacros.cmake               |  21 +-
+ .../check-for-weak-vtables-and-externals      |   6 +-
+ Tools/Scripts/run-javascriptcore-tests        |   3 +-
+ 38 files changed, 505 insertions(+), 36 deletions(-)
+ create mode 100644 Source/JavaScriptCore/corpse/tests/TypeinfoTest.cpp
+ create mode 100644 Source/cmake/FindLLDB.cmake
+
+diff --git a/Configurations/CommonBase.xcconfig b/Configurations/CommonBase.xcconfig
+index 4b7b2d0e5a32..468b3b65e420 100644
+--- a/Configurations/CommonBase.xcconfig
++++ b/Configurations/CommonBase.xcconfig
+@@ -55,7 +55,7 @@ WK_ENGINEERING_BUILD_Debug = 1;
+ WK_ENGINEERING_BUILD_Release = 1;
+ WK_ENGINEERING_BUILD_Production = 0;
+ 
+-WK_GCC_PREPROCESSOR_DEFINITIONS = $(WK_GCC_PREPROCESSOR_DEFINITIONS_$(USE_INTERNAL_SDK)) ENGINEERING_BUILD=$(WK_ENGINEERING_BUILD) $(WK_PRESERVE_MOST_DEFINES);
++WK_GCC_PREPROCESSOR_DEFINITIONS = $(WK_GCC_PREPROCESSOR_DEFINITIONS_$(USE_INTERNAL_SDK)) ENGINEERING_BUILD=$(WK_ENGINEERING_BUILD) $(WK_PRESERVE_MOST_DEFINES) $(WK_MYA_HEAP_PREPROCESSOR_DEFINITIONS_$(WK_MYA_HEAP));
+ WK_GCC_PREPROCESSOR_DEFINITIONS_YES = $(WK_OS_UNFAIR_LOCK_INLINE_CFLAGS) __ASSERT_MACROS_DEFINE_VERSIONS_WITHOUT_UNDERSCORES=0;
+ GCC_PREPROCESSOR_DEFINITIONS = $(inherited) $(WK_GCC_PREPROCESSOR_DEFINITIONS);
+ 
+@@ -93,6 +93,12 @@ WK_COMMON_OTHER_LDFLAGS = $(WK_SANITIZER_OTHER_LDFLAGS) $(WK_COMMON_OTHER_LDFLAG
+ WK_COMMON_OTHER_LDFLAGS_INSTRUMENTATION_YES = -Wl,-rename_section,__DATA,__llvm_prf_cnts,__MMAP_DATA,__llvm_prf_cnts -fprofile-generate;
+ OTHER_LDFLAGS = $(inherited) $(WK_COMMON_OTHER_LDFLAGS);
+ 
++// MYA_HEAP: mya features allowing the analysis of WebKit C++ heaps.
++WK_MYA_HEAP = NO;
++WK_MYA_HEAP[config=Debug][sdk=macosx*] = YES;
++// PAS_BMALLOC_HIDDEN=0 exports libpas's API, which the heap walk's tests enumerate their own heap through.
++WK_MYA_HEAP_PREPROCESSOR_DEFINITIONS_YES = ENABLE_MYA_HEAP=1 PAS_BMALLOC_HIDDEN=0;
++
+ WK_COMMON_OTHER_TAPI_FLAGS = -x objective-c++ -std=c++2b -fno-rtti $(WK_SANITIZER_OTHER_TAPI_FLAGS) $(WK_AVAILABILITY_OVERLAY_FLAGS);
+ OTHER_TAPI_FLAGS = $(inherited) $(WK_COMMON_OTHER_TAPI_FLAGS);
+ 
+diff --git a/Source/JavaScriptCore/CMakeLists.txt b/Source/JavaScriptCore/CMakeLists.txt
+index 647d37fdd985..64884fe5ec5b 100644
+--- a/Source/JavaScriptCore/CMakeLists.txt
++++ b/Source/JavaScriptCore/CMakeLists.txt
+@@ -1635,6 +1635,23 @@ if (USE_INSPECTOR_SOCKET_SERVER)
+     )
+ endif ()
+ 
++# A machine without liblldb still builds, but the mya_heap tests fail. liblldb 18
++# cannot resolve addresses in an ELF segment that a PT_TLS segment starts at,
++# such as libstdc++'s vtables; 19 can.
++if (ENABLE_MYA_HEAP)
++    find_package(LLDB 19)
++    if (LLDB_VERSION AND LLDB_VERSION VERSION_LESS 19)
++        message(FATAL_ERROR "mya_heap needs liblldb 19 or newer, but found liblldb ${LLDB_VERSION} "
++            "(${LLDB_LIBRARY}). Install liblldb-22-dev from apt.llvm.org, then configure again "
++            "with -ULLDB_INCLUDE_DIR -ULLDB_LIBRARY.")
++    endif ()
++    if (NOT LLDB_FOUND)
++        message(WARNING "mya_heap is on but liblldb was not found. "
++            "Install liblldb-dev (Debian, Ubuntu), lldb-devel (Fedora) or llvm (Homebrew), "
++            "set LLDB_ROOT, or turn off ENABLE_MYA_HEAP.")
++    endif ()
++endif ()
++
+ if (ENABLE_MYA)
+     list(APPEND JavaScriptCore_PRIVATE_INCLUDE_DIRECTORIES
+         "${JAVASCRIPTCORE_DIR}/corpse"
+diff --git a/Source/JavaScriptCore/Configurations/Base.xcconfig b/Source/JavaScriptCore/Configurations/Base.xcconfig
+index 9160734d6d87..4b091d1ad053 100644
+--- a/Source/JavaScriptCore/Configurations/Base.xcconfig
++++ b/Source/JavaScriptCore/Configurations/Base.xcconfig
+@@ -156,6 +156,19 @@ WK_PROCESSED_XCENT_FILE=$(TEMP_FILE_DIR)/$(FULL_PRODUCT_NAME).entitlements
+ WK_USE_RESTRICTED_ENTITLEMENTS = $(USE_INTERNAL_SDK);
+ WK_USE_FATAL_EXCEPTIONS = $(OVERRIDE_WK_USE_FATAL_EXCEPTIONS:default=YES);
+ 
++// Xcode's LLDB.framework ships without the SB API headers, so they come from a HomeBrew llvm.
++// The SB API is binary compatible across versions.
++WK_BREW_PREFIX = /opt/homebrew/opt;
++WK_BREW_PREFIX[arch=x86_64] = /usr/local/opt;
++
++WK_LLDB_SYSTEM_HEADER_SEARCH_PATHS = $(WK_LLDB_SYSTEM_HEADER_SEARCH_PATHS_$(WK_MYA_HEAP));
++WK_LLDB_SYSTEM_HEADER_SEARCH_PATHS_YES = $(WK_BREW_PREFIX)/llvm/include;
++
++WK_LLDB_FRAMEWORK_DIR = $(DEVELOPER_DIR)/../SharedFrameworks;
++WK_LLDB_COMMAND_LINE_TOOLS_FRAMEWORK_DIR = /Library/Developer/CommandLineTools/Library/PrivateFrameworks;
++WK_LLDB_LDFLAGS = $(WK_LLDB_LDFLAGS_$(WK_MYA_HEAP));
++WK_LLDB_LDFLAGS_YES = -F$(WK_LLDB_FRAMEWORK_DIR) -Wl,-rpath,$(WK_LLDB_FRAMEWORK_DIR) -Wl,-rpath,$(WK_LLDB_COMMAND_LINE_TOOLS_FRAMEWORK_DIR);
++
+ // Shared variables used for dynamic or static linking of JavaScriptCore and jsc.
+ 
+ JSC_SEC_LD_FLAGS[sdk=iphoneos*] = -weak_framework BrowserEngineCore;
+diff --git a/Source/JavaScriptCore/Configurations/DebugRelease.xcconfig b/Source/JavaScriptCore/Configurations/DebugRelease.xcconfig
+index d8b0c3c6adc0..e34bebb01dc1 100644
+--- a/Source/JavaScriptCore/Configurations/DebugRelease.xcconfig
++++ b/Source/JavaScriptCore/Configurations/DebugRelease.xcconfig
+@@ -27,7 +27,10 @@
+ ONLY_ACTIVE_ARCH = YES;
+ 
+ GCC_WARN_ABOUT_DEPRECATED_FUNCTIONS = YES;
+-DEBUG_INFORMATION_FORMAT = dwarf;
++DEBUG_INFORMATION_FORMAT = $(WK_DEBUG_INFORMATION_FORMAT_MYA_HEAP_$(WK_MYA_HEAP));
++WK_DEBUG_INFORMATION_FORMAT_MYA_HEAP_NO = dwarf;
++// liblldb finds the compile unit that defines a global variable only in a dSYM, not through the debug map.
++WK_DEBUG_INFORMATION_FORMAT_MYA_HEAP_YES = dwarf-with-dsym;
+ 
+ CODE_SIGN_IDENTITY[sdk=macosx*] = $(CODE_SIGN_IDENTITY_$(USE_INTERNAL_SDK));
+ CODE_SIGN_IDENTITY_ = $(CODE_SIGN_IDENTITY_NO);
+diff --git a/Source/JavaScriptCore/Configurations/Mya.xcconfig b/Source/JavaScriptCore/Configurations/Mya.xcconfig
+index 32bdfefbe5a7..832d507bb792 100644
+--- a/Source/JavaScriptCore/Configurations/Mya.xcconfig
++++ b/Source/JavaScriptCore/Configurations/Mya.xcconfig
+@@ -37,7 +37,9 @@ SKIP_INSTALL = $(WK_LIB_JSC_TOOLS_SKIP_INSTALL_$(WK_LIB_JSC_TOOLS_UNSUPPORTED));
+ WK_LIB_JSC_TOOLS_SKIP_INSTALL_YES = YES;
+ WK_LIB_JSC_TOOLS_SKIP_INSTALL_NO = NO;
+ 
+-OTHER_LDFLAGS = $(inherited) $(WK_LIB_JSC_TOOLS_LDFLAGS_$(WK_LIB_JSC_TOOLS_SUPPORTED));
++OTHER_LDFLAGS = $(inherited) $(WK_LIB_JSC_TOOLS_LDFLAGS_$(WK_LIB_JSC_TOOLS_SUPPORTED)) $(WK_LLDB_LDFLAGS);
+ WK_LIB_JSC_TOOLS_LDFLAGS_YES = -lJavaScriptCoreTools;
+ 
++SYSTEM_HEADER_SEARCH_PATHS = $(inherited) $(WK_LLDB_SYSTEM_HEADER_SEARCH_PATHS);
++
+ OTHER_CODE_SIGN_FLAGS[sdk=iphone*] = -i com.apple.jsc.mya --entitlements ${WK_PROCESSED_XCENT_FILE};
+diff --git a/Source/JavaScriptCore/Configurations/TestLibJSCTools.xcconfig b/Source/JavaScriptCore/Configurations/TestLibJSCTools.xcconfig
+index 6f33bf0408e5..9e63826c297d 100644
+--- a/Source/JavaScriptCore/Configurations/TestLibJSCTools.xcconfig
++++ b/Source/JavaScriptCore/Configurations/TestLibJSCTools.xcconfig
+@@ -31,5 +31,7 @@ WK_LIB_JSC_TOOLS_SIMULATOR[sdk=*simulator*] = YES;
+ WK_LIB_JSC_TOOLS_SUPPORTED = $(WK_NOT_$(WK_LIB_JSC_TOOLS_UNSUPPORTED));
+ WK_LIB_JSC_TOOLS_UNSUPPORTED = $(WK_OR_$(WK_LIB_JSC_TOOLS_SIMULATOR)_$(WK_CHECK_CATALYST));
+ 
+-OTHER_LDFLAGS = $(inherited) $(WK_LIB_JSC_TOOLS_LDFLAGS_$(WK_LIB_JSC_TOOLS_SUPPORTED));
++OTHER_LDFLAGS = $(inherited) $(WK_LIB_JSC_TOOLS_LDFLAGS_$(WK_LIB_JSC_TOOLS_SUPPORTED)) $(WK_LLDB_LDFLAGS);
+ WK_LIB_JSC_TOOLS_LDFLAGS_YES = -lJavaScriptCoreTools;
++
++SYSTEM_HEADER_SEARCH_PATHS = $(inherited) $(WK_LLDB_SYSTEM_HEADER_SEARCH_PATHS);
+diff --git a/Source/JavaScriptCore/Configurations/libJavaScriptCoreTools.xcconfig b/Source/JavaScriptCore/Configurations/libJavaScriptCoreTools.xcconfig
+index 406c72b658e3..45b7f6d6f077 100644
+--- a/Source/JavaScriptCore/Configurations/libJavaScriptCoreTools.xcconfig
++++ b/Source/JavaScriptCore/Configurations/libJavaScriptCoreTools.xcconfig
+@@ -57,6 +57,8 @@ STRIP_INSTALLED_PRODUCT = NO;
+ // plus JavaScriptCore's generated and private headers.
+ HEADER_SEARCH_PATHS = $(SRCROOT) $(SRCROOT)/corpse "$(JAVASCRIPTCORE_FRAMEWORKS_DIR)/JavaScriptCore.framework/PrivateHeaders" $(inherited);
+ 
++SYSTEM_HEADER_SEARCH_PATHS = $(inherited) $(WK_LLDB_SYSTEM_HEADER_SEARCH_PATHS);
++
+ // A heap walk reads every value of a heap through WTF's containers, which at
+ // -O0 makes a walk of a small heap take twice as long. JavaScriptCore itself
+ // stays as the configuration says.
+diff --git a/Source/JavaScriptCore/JavaScriptCore.xcodeproj/project.pbxproj b/Source/JavaScriptCore/JavaScriptCore.xcodeproj/project.pbxproj
+index a9f65468bab0..799b50f87e26 100644
+--- a/Source/JavaScriptCore/JavaScriptCore.xcodeproj/project.pbxproj
++++ b/Source/JavaScriptCore/JavaScriptCore.xcodeproj/project.pbxproj
+@@ -1862,6 +1862,7 @@
+ 		7E83C40E17D785F3003DC41B /* CorpseSymbolTest.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 7E83C40817D785F3003DC41B /* CorpseSymbolTest.cpp */; };
+ 		7E83C40A17D785F3003DC41B /* testLibJSCTools.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 7E83C40017D785F3003DC41B /* testLibJSCTools.cpp */; };
+ 		1AB0DEAD00000006000D0001 /* CorpseVMTest.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000007000D0001 /* CorpseVMTest.cpp */; };
++		1AB0DEAD00000004000D0001 /* TypeinfoTest.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000005000D0001 /* TypeinfoTest.cpp */; };
+ 		7E83C43717D785F3003DC41B /* CorpseExportsTrie.h in Headers */ = {isa = PBXBuildFile; fileRef = 7E83C43517D785F3003DC41B /* CorpseExportsTrie.h */; settings = {ATTRIBUTES = (Private, ); }; };
+ 		56C6C2B7EBDCC63B6ECEA9AD /* CorpseThread.h in Headers */ = {isa = PBXBuildFile; fileRef = 211E3D6CA97F31CEB385A75A /* CorpseThread.h */; settings = {ATTRIBUTES = (Private, ); }; };
+ 		EF648B9EEAF54C44048B416A /* CorpseThread.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 960BD2B783EAEBE3233F91BF /* CorpseThread.cpp */; };
+@@ -4531,6 +4532,7 @@
+ 		7E83C40017D785F3003DC41B /* testLibJSCTools.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = testLibJSCTools.cpp; sourceTree = "<group>"; };
+ 		7E83C40917D785F3003DC41B /* testLibJSCTools */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = testLibJSCTools; sourceTree = BUILT_PRODUCTS_DIR; };
+ 		1AB0DEAD00000007000D0001 /* CorpseVMTest.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseVMTest.cpp; sourceTree = "<group>"; };
++		1AB0DEAD00000005000D0001 /* TypeinfoTest.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = TypeinfoTest.cpp; sourceTree = "<group>"; };
+ 		44F93E0D2AE71F9F00FFA37C /* JavaScriptCoreFramework.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = JavaScriptCoreFramework.cpp; sourceTree = "<group>"; };
+ 		451539B812DC994500EF7AC4 /* Yarr.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = Yarr.h; path = yarr/Yarr.h; sourceTree = "<group>"; };
+ 		45E12D8806A49B0F00E9DF84 /* jsc.cpp */ = {isa = PBXFileReference; fileEncoding = 30; indentWidth = 4; lastKnownFileType = sourcecode.cpp.cpp; path = jsc.cpp; sourceTree = "<group>"; tabWidth = 4; };
+@@ -6966,6 +6968,7 @@
+ 				7E83C40417D785F3003DC41B /* LibJSCToolsTestUtilities.cpp */,
+ 				7E83C40317D785F3003DC41B /* LibJSCToolsTestUtilities.h */,
+ 				7E83C40017D785F3003DC41B /* testLibJSCTools.cpp */,
++				1AB0DEAD00000005000D0001 /* TypeinfoTest.cpp */,
+ 			);
+ 			path = tests;
+ 			sourceTree = "<group>";
+@@ -14786,6 +14789,7 @@
+ 				1AB0DEAD00000006000D0001 /* CorpseVMTest.cpp in Sources */,
+ 				7E83C40C17D785F3003DC41B /* LibJSCToolsTestUtilities.cpp in Sources */,
+ 				7E83C40A17D785F3003DC41B /* testLibJSCTools.cpp in Sources */,
++				1AB0DEAD00000004000D0001 /* TypeinfoTest.cpp in Sources */,
+ 			);
+ 			runOnlyForDeploymentPostprocessing = 0;
+ 		};
+diff --git a/Source/JavaScriptCore/corpse/CMakeLists.txt b/Source/JavaScriptCore/corpse/CMakeLists.txt
+index f3f240aa558f..e5a4a8c7800f 100644
+--- a/Source/JavaScriptCore/corpse/CMakeLists.txt
++++ b/Source/JavaScriptCore/corpse/CMakeLists.txt
+@@ -23,6 +23,10 @@ set(JavaScriptCoreTools_FRAMEWORKS
+     bmalloc
+ )
+ 
++if (TARGET LLDB::LLDB)
++    list(APPEND JavaScriptCoreTools_LIBRARIES LLDB::LLDB)
++endif ()
++
+ WEBKIT_LIBRARY_DECLARE(JavaScriptCoreTools)
+ 
+ WEBKIT_INCLUDE_CONFIG_FILES_IF_EXISTS()
+diff --git a/Source/JavaScriptCore/corpse/CorpsePlatform.h b/Source/JavaScriptCore/corpse/CorpsePlatform.h
+index 0afea4ab8f96..f7617581e137 100644
+--- a/Source/JavaScriptCore/corpse/CorpsePlatform.h
++++ b/Source/JavaScriptCore/corpse/CorpsePlatform.h
+@@ -35,6 +35,12 @@
+ #include <mach/mach.h>
+ #endif
+ 
++#if ENABLE(MYA_HEAP) && __has_include(<lldb/API/LLDB.h>)
++#define HAVE_LLDB 1
++#else
++#define HAVE_LLDB 0
++#endif
++
+ namespace JSC {
+ namespace Corpse {
+ 
+diff --git a/Source/JavaScriptCore/corpse/CorpseSnapshot.cpp b/Source/JavaScriptCore/corpse/CorpseSnapshot.cpp
+index 5236561ac360..5d5c4e9c2fa0 100644
+--- a/Source/JavaScriptCore/corpse/CorpseSnapshot.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseSnapshot.cpp
+@@ -36,6 +36,11 @@
+ #endif
+ #include <wtf/TZoneMallocInlines.h>
+ 
++#if HAVE(LLDB) && OS(DARWIN) && !defined(BUILDING_WITH_CMAKE)
++// Xcode has no optional dependencies, so LLDB.framework is linked only when liblldb's headers are found.
++__asm__(".linker_option \"-framework\", \"LLDB\"");
++#endif
++
+ WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN
+ 
+ namespace JSC {
+diff --git a/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h b/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h
+index 5a44c651489b..2f48381eb513 100644
+--- a/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h
++++ b/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h
+@@ -80,6 +80,7 @@ void testMemory();
+ void testSnapshot();
+ void testThreads();
+ void fuzzExportsTrie(uint64_t seed, unsigned iterations);
++void testTypeinfo();
+ void testVM();
+ 
+ // Announces a suite, times it, and reports on the way out. Destroyed on every path out
+diff --git a/Source/JavaScriptCore/corpse/tests/TypeinfoTest.cpp b/Source/JavaScriptCore/corpse/tests/TypeinfoTest.cpp
+new file mode 100644
+index 000000000000..75ab7a274a07
+--- /dev/null
++++ b/Source/JavaScriptCore/corpse/tests/TypeinfoTest.cpp
+@@ -0,0 +1,205 @@
++/*
++ * Copyright (C) 2026 Apple Inc. All rights reserved.
++ * Copyright (C) 2026 Igalia S.L.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++#include "config.h"
++
++#include "LibJSCToolsTestUtilities.h"
++#include <JavaScriptCore/CorpsePlatform.h>
++
++#if HAVE(LLDB)
++
++#include <JavaScriptCore/CorpseAddress.h>
++#include <JavaScriptCore/CorpseSnapshot.h>
++#include <JavaScriptCore/Watchpoint.h>
++#include <lldb/API/LLDB.h>
++#include <optional>
++#include <string_view>
++#include <wtf/Scope.h>
++#include <wtf/StdLibExtras.h>
++#include <wtf/Vector.h>
++#include <wtf/text/CString.h>
++#include <wtf/text/StringCommon.h>
++
++#endif // HAVE(LLDB)
++
++namespace JSCToolsTest {
++
++#if HAVE(LLDB)
++
++namespace {
++
++using JSC::Corpse::Address;
++using JSC::Corpse::Memory;
++using JSC::Corpse::Snapshot;
++
++constexpr const char* targetString = "typeinfo-target";
++
++UTF8CString readCString(Memory& memory, Address address)
++{
++    constexpr size_t maxLength = 256;
++    Vector<char> characters;
++    for (size_t offset = 0; offset < maxLength; ++offset) {
++        auto character = memory.ptr<char>(address + offset);
++        if (!character)
++            return { };
++        if (!*character)
++            return UTF8CString(byteCast<char8_t>(characters.span()));
++        characters.append(*character);
++    }
++    return { };
++}
++
++// The one complete definition of `name` in `target`'s debug info. Declarations
++// have no layout, so they do not count.
++lldb::SBType completeType(lldb::SBTarget target, const UTF8CString& name)
++{
++    lldb::SBTypeList types = target.FindTypes(name.legacyCStringPointer());
++    lldb::SBType found;
++    unsigned completeCount = 0;
++    for (uint32_t index = 0; index < types.GetSize(); ++index) {
++        lldb::SBType candidate = types.GetTypeAtIndex(index);
++        if (!candidate.IsTypeComplete())
++            continue;
++        ++completeCount;
++        found = candidate;
++    }
++    TEST_ASSERT_EQ(completeCount, 1u, "the target's debug info has exactly one definition of the target object's class");
++    return completeCount == 1 ? found : lldb::SBType { };
++}
++
++lldb::SBTypeMember memberNamed(lldb::SBType type, std::string_view name)
++{
++    for (uint32_t index = 0; index < type.GetNumberOfFields(); ++index) {
++        auto member = type.GetFieldAtIndex(index);
++        const char* memberName = member.GetName();
++        if (memberName && name == memberName)
++            return member;
++    }
++    TEST_ASSERT(false, "the debug info has every member the test reads");
++    return { };
++}
++
++lldb::SBType baseAtStart(lldb::SBType type)
++{
++    for (uint32_t index = 0; index < type.GetNumberOfDirectBaseClasses(); ++index) {
++        auto base = type.GetDirectBaseClassAtIndex(index);
++        if (!base.GetOffsetInBytes())
++            return base.GetType();
++    }
++    TEST_ASSERT(false, "the debug info puts a base class at the start of the target object");
++    return { };
++}
++
++void analyze(Snapshot& snapshot, Address object)
++{
++    CString executablePath = snapshot.process()->executablePath();
++    TEST_ASSERT(!executablePath.isNull(), "the target's executable path is readable");
++    if (executablePath.isNull())
++        return;
++
++    lldb::SBDebugger::Initialize();
++    auto terminateLLDB = makeScopeExit([] {
++        lldb::SBDebugger::Terminate();
++    });
++    lldb::SBDebugger debugger = lldb::SBDebugger::Create();
++    auto destroyDebugger = makeScopeExit([&] {
++        lldb::SBDebugger::Destroy(debugger);
++    });
++    TEST_ASSERT(debugger.IsValid(), "liblldb creates a debugger");
++    if (!debugger.IsValid())
++        return;
++
++    lldb::SBError error;
++    lldb::SBTarget target = debugger.CreateTarget(executablePath.legacyCStringPointer(), nullptr, nullptr, false, error);
++    TEST_ASSERT(target.IsValid(), "liblldb opens the target's executable");
++    if (!target.IsValid())
++        return;
++    auto deleteTarget = makeScopeExit([&] {
++        debugger.DeleteTarget(target);
++    });
++
++    RELEASE_ASSERT_WITH_MESSAGE(!target.GetProcess().IsValid(),
++        "Only mya may attach to a process.");
++
++    lldb::SBType type = completeType(target, "JSC::StringFireDetail"_s);
++    if (!type.IsValid())
++        return;
++    TEST_ASSERT_EQ(static_cast<size_t>(type.GetByteSize()), sizeof(JSC::StringFireDetail),
++        "the debug info gives the target object's class its size");
++
++    lldb::SBType base = baseAtStart(type);
++    if (!base.IsValid())
++        return;
++    TEST_ASSERT(std::string_view { base.GetName() } == "JSC::FireDetail",
++        "the debug info names the base class the object was reported as");
++
++    lldb::SBTypeMember string = memberNamed(type, "m_string");
++    if (!string.IsValid())
++        return;
++    TEST_ASSERT_EQ(static_cast<size_t>(string.GetType().GetByteSize()), sizeof(const char*),
++        "the debug info gives m_string its size");
++    auto pointer = snapshot.memory().ptr<uint64_t>(object + string.GetOffsetInBytes());
++    TEST_ASSERT(pointer, "the target object's m_string is readable at the offset the debug info gives");
++    if (!pointer)
++        return;
++    CString value = readCString(snapshot.memory(), Address { *pointer }.stripped());
++    TEST_ASSERT(!value.isNull() && std::string_view { value.legacyCStringPointer() } == targetString,
++        "the corpse holds the target's string at the offset the debug info gives");
++}
++
++} // anonymous namespace
++
++void testTypeinfo()
++{
++    SuiteTracer tracer("Typeinfo");
++    if (!tracer.shouldRun())
++        return;
++
++    // The object's layout comes from the debug info alone: its class, its base
++    // and the offset of its string.
++    analyzeInAndOutOfProcess([] {
++        static JSC::StringFireDetail object(targetString);
++        return Address { &object };
++    }, analyze);
++}
++
++#else // No SB API, so there is nothing to ask.
++
++void testTypeinfo()
++{
++    SuiteTracer tracer("Typeinfo");
++    if (!tracer.shouldRun())
++        return;
++
++#if ENABLE(MYA_HEAP)
++    TEST_ASSERT(false, "mya_heap is enabled but liblldb's headers were not found");
++#else
++    skipSuite("Typeinfo", "mya_heap is not enabled");
++#endif
++}
++
++#endif // HAVE(LLDB)
++
++} // namespace JSCToolsTest
+diff --git a/Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp b/Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp
+index b9e0552bd6c3..f6728c555b23 100644
+--- a/Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp
++++ b/Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp
+@@ -134,6 +134,7 @@ int main(int argc, char** argv)
+     else {
+         JSCToolsTest::fuzzExportsTrie(fuzzSeed, static_cast<unsigned>(fuzzIterations));
+         runCorpseSuite();
++        JSCToolsTest::testTypeinfo();
+         JSCToolsTest::testVM();
+     }
+ 
+diff --git a/Source/JavaScriptCore/shell/CMakeLists.txt b/Source/JavaScriptCore/shell/CMakeLists.txt
+index c22a316fdc5d..202efa74fa2d 100644
+--- a/Source/JavaScriptCore/shell/CMakeLists.txt
++++ b/Source/JavaScriptCore/shell/CMakeLists.txt
+@@ -39,6 +39,9 @@ if (ENABLE_MYA)
+     if (APPLE)
+         list(APPEND mya_LIBRARIES edit)
+     endif ()
++    if (TARGET LLDB::LLDB)
++        list(APPEND mya_LIBRARIES LLDB::LLDB)
++    endif ()
+ endif ()
+ 
+ WEBKIT_EXECUTABLE_DECLARE(jsc)
+@@ -118,6 +121,7 @@ if (DEVELOPER_MODE)
+             ../corpse/tests/CorpseThreadTest.cpp
+             ../corpse/tests/CorpseVMTest.cpp
+             ../corpse/tests/LibJSCToolsTestUtilities.cpp
++            ../corpse/tests/TypeinfoTest.cpp
+             ../corpse/tests/testLibJSCTools.cpp
+         )
+         set(testLibJSCTools_DEFINITIONS ${jsc_PRIVATE_DEFINITIONS})
+@@ -127,6 +131,10 @@ if (DEVELOPER_MODE)
+         )
+         set(testLibJSCTools_FRAMEWORKS ${jsc_FRAMEWORKS})
+         set(testLibJSCTools_LIBRARIES JavaScriptCoreTools)
++
++        if (TARGET LLDB::LLDB)
++            list(APPEND testLibJSCTools_LIBRARIES LLDB::LLDB)
++        endif ()
+     endif ()
+ 
+     set(testwasmdebugger_SOURCES
+diff --git a/Source/ThirdParty/ANGLE/Configurations/ANGLE-dynamic.xcconfig b/Source/ThirdParty/ANGLE/Configurations/ANGLE-dynamic.xcconfig
+index 5f2679a7b528..62cabd369dd1 100644
+--- a/Source/ThirdParty/ANGLE/Configurations/ANGLE-dynamic.xcconfig
++++ b/Source/ThirdParty/ANGLE/Configurations/ANGLE-dynamic.xcconfig
+@@ -44,7 +44,7 @@ ANGLE_ALLOWABLE_CLIENTS = $(ANGLE_ALLOWABLE_CLIENTS_$(WK_NOT_$(ENABLE_LIBFUZZER)
+ ANGLE_ALLOWABLE_CLIENTS_YES = -allowable_client WebCore -allowable_client WebCoreTestSupport;
+ 
+ // Allow fuzzers to link to any symbol in libANGLE-shared.dylib.
+-GCC_SYMBOLS_PRIVATE_EXTERN = $(WK_NOT_$(ENABLE_LIBFUZZER));
++GCC_SYMBOLS_PRIVATE_EXTERN = $(WK_NOT_$(WK_OR_$(ENABLE_LIBFUZZER)_$(WK_MYA_HEAP)));
+ 
+ INSTALL_PATH = $(WEBCORE_LIBRARY_DIR);
+ 
+diff --git a/Source/ThirdParty/libwebrtc/Configurations/libwebrtc.xcconfig b/Source/ThirdParty/libwebrtc/Configurations/libwebrtc.xcconfig
+index 417e25c009a7..d3d4614c6e0c 100644
+--- a/Source/ThirdParty/libwebrtc/Configurations/libwebrtc.xcconfig
++++ b/Source/ThirdParty/libwebrtc/Configurations/libwebrtc.xcconfig
+@@ -26,9 +26,10 @@
+ 
+ PRODUCT_NAME = libwebrtc;
+ 
+-// Disable symbol exporting when ENABLE_LIBFUZZER=YES.
+-GCC_SYMBOLS_PRIVATE_EXTERN = $(WK_NOT_$(ENABLE_LIBFUZZER));
+-EXPORTED_SYMBOLS_FILE = $(EXPORTED_SYMBOLS_FILE_ENABLED_$(WK_NOT_$(ENABLE_LIBFUZZER)));
++// Fuzzers and MYA_HEAP builds need to link against more symbols.
++WEBRTC_EXPORT_ALL_SYMBOLS = $(WK_OR_$(ENABLE_LIBFUZZER)_$(WK_MYA_HEAP));
++GCC_SYMBOLS_PRIVATE_EXTERN = $(WK_NOT_$(WEBRTC_EXPORT_ALL_SYMBOLS));
++EXPORTED_SYMBOLS_FILE = $(EXPORTED_SYMBOLS_FILE_ENABLED_$(WK_NOT_$(WEBRTC_EXPORT_ALL_SYMBOLS)));
+ EXPORTED_SYMBOLS_FILE_ENABLED_YES = $(BUILT_PRODUCTS_DIR)/DerivedSources/libwebrtc/libwebrtc.generated.exp;
+ 
+ // Force-load symbols from static libraries when symbol exports are disabled.
+@@ -86,7 +87,7 @@ EXCLUDED_SOURCE_FILE_NAMES[sdk=xrsimulator*][arch=arm64*] = $(EXCLUDED_SOURCE_FI
+ EXCLUDED_SOURCE_FILE_NAMES[sdk=macosx*] = $(EXCLUDED_SOURCE_FILE_NAMES_macosx);
+ EXCLUDED_SOURCE_FILE_NAMES[sdk=macosx*][arch=arm64*] = $(EXCLUDED_SOURCE_FILE_NAMES_macosx) $(EXCLUDED_SOURCE_FILE_NAMES_arm);
+ 
+-OTHER_LDFLAGS = $(inherited) $(SOURCE_VERSION_LDFLAGS) $(WEBRTC_LDFLAGS_ENABLE_LIBFUZZER_$(ENABLE_LIBFUZZER)) -framework CoreGraphics $(WEBRTC_ALLOWABLE_CLIENTS);
++OTHER_LDFLAGS = $(inherited) $(SOURCE_VERSION_LDFLAGS) $(WEBRTC_LDFLAGS_ENABLE_LIBFUZZER_$(WEBRTC_EXPORT_ALL_SYMBOLS)) -framework CoreGraphics $(WEBRTC_ALLOWABLE_CLIENTS);
+ 
+ // Allow fuzzers to link to libwebrtc.dylib.
+ WEBRTC_ALLOWABLE_CLIENTS = $(WEBRTC_ALLOWABLE_CLIENTS_$(WK_NOT_$(ENABLE_LIBFUZZER)));
+diff --git a/Source/ThirdParty/libwebrtc/libwebrtc.xcodeproj/project.pbxproj b/Source/ThirdParty/libwebrtc/libwebrtc.xcodeproj/project.pbxproj
+index da81f1f25bee..3bc4d2bc39ce 100644
+--- a/Source/ThirdParty/libwebrtc/libwebrtc.xcodeproj/project.pbxproj
++++ b/Source/ThirdParty/libwebrtc/libwebrtc.xcodeproj/project.pbxproj
+@@ -25778,7 +25778,7 @@
+ 			);
+ 			runOnlyForDeploymentPostprocessing = 0;
+ 			shellPath = /bin/sh;
+-			shellScript = "set -e\n\nif [ \"${ENABLE_LIBFUZZER}\" = \"YES\" ]; then\n    exit 0;\nfi\n\nEXP_GENERATED=\"${SCRIPT_OUTPUT_FILE_0}\"\n\n[[ -z \"${EXP_GENERATED}\" ]] && exit 1\n\ncat \"${SCRIPT_INPUT_FILE_0}\" > \"${EXP_GENERATED}\"\n\nif [[ \"${WK_EXPORT_SYMBOLS_FOR_TESTING}\" == \"YES\" ]]; then\n    cat \"${SCRIPT_INPUT_FILE_1}\" >> \"${EXP_GENERATED}\"\nfi\n\nif [[ \"${WK_EXPORT_DEBUG_SYMBOLS}\" == \"YES\" ]]; then\n    cat \"${SCRIPT_INPUT_FILE_2}\" >> \"${EXP_GENERATED}\"\nelse\n    cat \"${SCRIPT_INPUT_FILE_3}\" >> \"${EXP_GENERATED}\"\nfi\n";
++			shellScript = "set -e\n\nif [ \"${WEBRTC_EXPORT_ALL_SYMBOLS}\" = \"YES\" ]; then\n    exit 0;\nfi\n\nEXP_GENERATED=\"${SCRIPT_OUTPUT_FILE_0}\"\n\n[[ -z \"${EXP_GENERATED}\" ]] && exit 1\n\ncat \"${SCRIPT_INPUT_FILE_0}\" > \"${EXP_GENERATED}\"\n\nif [[ \"${WK_EXPORT_SYMBOLS_FOR_TESTING}\" == \"YES\" ]]; then\n    cat \"${SCRIPT_INPUT_FILE_1}\" >> \"${EXP_GENERATED}\"\nfi\n\nif [[ \"${WK_EXPORT_DEBUG_SYMBOLS}\" == \"YES\" ]]; then\n    cat \"${SCRIPT_INPUT_FILE_2}\" >> \"${EXP_GENERATED}\"\nelse\n    cat \"${SCRIPT_INPUT_FILE_3}\" >> \"${EXP_GENERATED}\"\nfi\n";
+ 		};
+ 		5CD286461E6E154E0094FDC8 /* Check for Weak VTables and Externals */ = {
+ 			isa = PBXShellScriptBuildPhase;
+diff --git a/Source/WTF/wtf/PlatformEnable.h b/Source/WTF/wtf/PlatformEnable.h
+index 74a76d791152..6836369ee5d0 100644
+--- a/Source/WTF/wtf/PlatformEnable.h
++++ b/Source/WTF/wtf/PlatformEnable.h
+@@ -1010,6 +1010,15 @@
+ #define ENABLE_MYA 0
+ #endif
+ 
++#if !defined(ENABLE_MYA_HEAP)
++#define ENABLE_MYA_HEAP 0
++#endif
++
++#if ENABLE(MYA_HEAP) && !ENABLE(MYA)
++#undef ENABLE_MYA_HEAP
++#define ENABLE_MYA_HEAP 0
++#endif
++
+ /* This feature works by embedding the OpcodeID in the 32 bit just before the generated LLint code
+    that executes each opcode. It cannot be supported by the CLoop since there's no way to embed the
+    OpcodeID word in the CLoop's switch statement cases. It is also currently not implemented for MSVC.
+diff --git a/Source/WebCore/Configurations/Base.xcconfig b/Source/WebCore/Configurations/Base.xcconfig
+index 55f813140c41..ee1faa2f24ad 100644
+--- a/Source/WebCore/Configurations/Base.xcconfig
++++ b/Source/WebCore/Configurations/Base.xcconfig
+@@ -69,7 +69,7 @@ GCC_GENERATE_DEBUGGING_SYMBOLS = YES;
+ GCC_NO_COMMON_BLOCKS = YES;
+ GCC_OBJC_CALL_CXX_CDTORS = YES;
+ GCC_PRECOMPILE_PREFIX_HEADER = YES;
+-GCC_SYMBOLS_PRIVATE_EXTERN = YES;
++GCC_SYMBOLS_PRIVATE_EXTERN = $(WK_NOT_$(WK_MYA_HEAP));
+ GCC_TREAT_WARNINGS_AS_ERRORS = YES;
+ GCC_VERSION = com.apple.compilers.llvm.clang.1_0;
+ // FIXME: <http://webkit.org/b/109846> WebCore should build with -Wshorten-64-to-32
+diff --git a/Source/WebCore/Configurations/DebugRelease.xcconfig b/Source/WebCore/Configurations/DebugRelease.xcconfig
+index 70b3835e2dc4..2a39e9f31f36 100644
+--- a/Source/WebCore/Configurations/DebugRelease.xcconfig
++++ b/Source/WebCore/Configurations/DebugRelease.xcconfig
+@@ -27,7 +27,11 @@
+ ONLY_ACTIVE_ARCH = YES;
+ 
+ GCC_WARN_ABOUT_DEPRECATED_FUNCTIONS = YES;
+-DEBUG_INFORMATION_FORMAT = dwarf;
++DEBUG_INFORMATION_FORMAT = $(WK_DEBUG_INFORMATION_FORMAT_MYA_HEAP_$(WK_MYA_HEAP));
++WK_DEBUG_INFORMATION_FORMAT_MYA_HEAP_NO = dwarf;
++// With compilation caching, an object file's debug info refers to its precompiled header's in the
++// cache, which only dsymutil reads; liblldb reads the dSYM it writes.
++WK_DEBUG_INFORMATION_FORMAT_MYA_HEAP_YES = dwarf-with-dsym;
+ 
+ SDKROOT = $(SDKROOT_$(USE_INTERNAL_SDK));
+ SDKROOT_ = macosx;
+diff --git a/Source/WebCore/Configurations/WebCore.xcconfig b/Source/WebCore/Configurations/WebCore.xcconfig
+index b9cdfce732d4..e53dc5931a77 100644
+--- a/Source/WebCore/Configurations/WebCore.xcconfig
++++ b/Source/WebCore/Configurations/WebCore.xcconfig
+@@ -222,7 +222,10 @@ OTHER_CPLUSPLUSFLAGS = $(inherited) -fmodules -fno-cxx-modules;
+ 
+ // Enable InstallAPI support, when built with WEBCORE_ENABLE_INSTALLAPI=YES.
+ SUPPORTS_TEXT_BASED_API = $(SUPPORTS_TEXT_BASED_API_$(WK_ENABLE_SLOW_BUILD_VERIFICATION)_$(TARGET_NAME));
+-SUPPORTS_TEXT_BASED_API_YES_WebCore = $(WEBCORE_ENABLE_INSTALLAPI);
++SUPPORTS_TEXT_BASED_API_YES_WebCore = $(WK_SUPPORTS_TEXT_BASED_API_MYA_HEAP_$(WK_MYA_HEAP));
++// MYA_HEAP builds export every symbol, ignore TAPI.
++WK_SUPPORTS_TEXT_BASED_API_MYA_HEAP_NO = $(WEBCORE_ENABLE_INSTALLAPI);
++WK_SUPPORTS_TEXT_BASED_API_MYA_HEAP_YES = NO;
+ TAPI_USE_SRCROOT = YES;
+ TEXT_BASED_API_FILE = WebCore.tbd
+ 
+diff --git a/Source/WebCore/Configurations/WebCoreTestSupport.xcconfig b/Source/WebCore/Configurations/WebCoreTestSupport.xcconfig
+index d8a08f5b20ca..69f8b91c3811 100644
+--- a/Source/WebCore/Configurations/WebCoreTestSupport.xcconfig
++++ b/Source/WebCore/Configurations/WebCoreTestSupport.xcconfig
+@@ -56,7 +56,7 @@ ANGLE_LDFLAGS = -weak-lANGLE-shared;
+ PRODUCT_NAME = WebCoreTestSupport;
+ EXECUTABLE_PREFIX = lib;
+ EXPORTED_SYMBOLS_FILE = ;
+-GCC_SYMBOLS_PRIVATE_EXTERN = YES;
++GCC_SYMBOLS_PRIVATE_EXTERN = $(WK_NOT_$(WK_MYA_HEAP));
+ 
+ OTHER_LDFLAGS = $(WK_COMMON_OTHER_LDFLAGS) $(ANGLE_LDFLAGS) -framework Metal $(SOURCE_VERSION_LDFLAGS);
+ OTHER_LDFLAGS[sdk=macos*] = $(WK_COMMON_OTHER_LDFLAGS) -framework AppKit -framework Metal $(ANGLE_LDFLAGS) $(LIBWEBRTC_LDFLAGS) $(SOURCE_VERSION_LDFLAGS);
+diff --git a/Source/WebCore/PAL/Configurations/Base.xcconfig b/Source/WebCore/PAL/Configurations/Base.xcconfig
+index 69b4ece26767..1bee0e701a89 100644
+--- a/Source/WebCore/PAL/Configurations/Base.xcconfig
++++ b/Source/WebCore/PAL/Configurations/Base.xcconfig
+@@ -68,7 +68,7 @@ GCC_GENERATE_DEBUGGING_SYMBOLS = YES;
+ GCC_NO_COMMON_BLOCKS = YES;
+ GCC_OBJC_CALL_CXX_CDTORS = YES;
+ GCC_PRECOMPILE_PREFIX_HEADER = YES;
+-GCC_SYMBOLS_PRIVATE_EXTERN = YES;
++GCC_SYMBOLS_PRIVATE_EXTERN = $(WK_NOT_$(WK_MYA_HEAP));
+ GCC_TREAT_WARNINGS_AS_ERRORS = YES;
+ GCC_VERSION = com.apple.compilers.llvm.clang.1_0;
+ // FIXME: <http://webkit.org/b/109846> WebCore should build with -Wshorten-64-to-32
+diff --git a/Source/WebGPU/Configurations/Base.xcconfig b/Source/WebGPU/Configurations/Base.xcconfig
+index 5416b0a6c4b9..ee09c5418521 100644
+--- a/Source/WebGPU/Configurations/Base.xcconfig
++++ b/Source/WebGPU/Configurations/Base.xcconfig
+@@ -68,7 +68,7 @@ GCC_OBJC_CALL_CXX_CDTORS = YES;
+ GCC_PRECOMPILE_PREFIX_HEADER = YES;
+ ENABLE_STRICT_OBJC_MSGSEND = YES;
+ GCC_STRICT_ALIASING = YES;
+-GCC_SYMBOLS_PRIVATE_EXTERN = YES;
++GCC_SYMBOLS_PRIVATE_EXTERN = $(WK_NOT_$(WK_MYA_HEAP));
+ GCC_TREAT_WARNINGS_AS_ERRORS = YES;
+ GCC_VERSION = com.apple.compilers.llvm.clang.1_0;
+ // FIXME: <http://webkit.org/b/107093> WTF should build with -Wshorten-64-to-32
+diff --git a/Source/WebGPU/Configurations/DebugRelease.xcconfig b/Source/WebGPU/Configurations/DebugRelease.xcconfig
+index 908dc7ba5bd5..b488ac1bee57 100644
+--- a/Source/WebGPU/Configurations/DebugRelease.xcconfig
++++ b/Source/WebGPU/Configurations/DebugRelease.xcconfig
+@@ -27,7 +27,11 @@
+ ONLY_ACTIVE_ARCH = YES;
+ 
+ GCC_WARN_ABOUT_DEPRECATED_FUNCTIONS = YES;
+-DEBUG_INFORMATION_FORMAT = dwarf;
++DEBUG_INFORMATION_FORMAT = $(WK_DEBUG_INFORMATION_FORMAT_MYA_HEAP_$(WK_MYA_HEAP));
++WK_DEBUG_INFORMATION_FORMAT_MYA_HEAP_NO = dwarf;
++// With compilation caching, an object file's debug info refers to its precompiled header's in the
++// cache, which only dsymutil reads; liblldb reads the dSYM it writes.
++WK_DEBUG_INFORMATION_FORMAT_MYA_HEAP_YES = dwarf-with-dsym;
+ 
+ SDKROOT = $(SDKROOT_$(USE_INTERNAL_SDK));
+ SDKROOT_ = macosx;
+diff --git a/Source/WebGPU/Configurations/WebGPU.xcconfig b/Source/WebGPU/Configurations/WebGPU.xcconfig
+index 1c6bc84016c4..b31c33ce7c09 100644
+--- a/Source/WebGPU/Configurations/WebGPU.xcconfig
++++ b/Source/WebGPU/Configurations/WebGPU.xcconfig
+@@ -72,10 +72,13 @@ MODULE_VERIFIER_SUPPORTED_LANGUAGE_STANDARDS = gnu23 gnu++23;
+ MODULE_VERIFIER_KIND = builtin;
+ OTHER_MODULE_VERIFIER_FLAGS = -- $(WK_AVAILABILITY_OVERLAY_FLAGS) -iframework $(BUILT_PRODUCTS_DIR)/SDKAdditions/System/Library/Frameworks -I$(BUILT_PRODUCTS_DIR)$(WK_LIBRARY_HEADERS_FOLDER_PATH) -I$(WK_ADDITIONAL_SDKS)$(WK_LIBRARY_HEADERS_FOLDER_PATH) -isystem $(SDKROOT)$(WK_LIBRARY_HEADERS_FOLDER_PATH);
+ 
+-SUPPORTS_TEXT_BASED_API = $(WK_ENABLE_SLOW_BUILD_VERIFICATION);
++// MYA_HEAP builds export every symbol, ignore TAPI.
++SUPPORTS_TEXT_BASED_API = $(WK_SUPPORTS_TEXT_BASED_API_MYA_HEAP_$(WK_MYA_HEAP));
++WK_SUPPORTS_TEXT_BASED_API_MYA_HEAP_NO = $(WK_ENABLE_SLOW_BUILD_VERIFICATION);
+ // Override to enable SPI checking at desk. Remove once audit-spi works in
+ // production builds (https://bugs.webkit.org/show_bug.cgi?id=299573).
+-SUPPORTS_TEXT_BASED_API[sdk=iphoneos.internal] = YES;
++WK_SUPPORTS_TEXT_BASED_API_MYA_HEAP_NO[sdk=iphoneos.internal] = YES;
++WK_SUPPORTS_TEXT_BASED_API_MYA_HEAP_YES = NO;
+ TAPI_USE_SRCROOT = YES;
+ TAPI_VERIFY_MODE = $(TAPI_VERIFY_MODE_$(WK_ENABLE_SLOW_BUILD_VERIFICATION));
+ TAPI_VERIFY_MODE_YES = Pedantic;
+diff --git a/Source/WebKit/Configurations/Base.xcconfig b/Source/WebKit/Configurations/Base.xcconfig
+index 39aaa927f7cf..f05ed33276c5 100644
+--- a/Source/WebKit/Configurations/Base.xcconfig
++++ b/Source/WebKit/Configurations/Base.xcconfig
+@@ -69,7 +69,7 @@ GCC_GENERATE_DEBUGGING_SYMBOLS = YES;
+ GCC_NO_COMMON_BLOCKS = YES;
+ GCC_OBJC_CALL_CXX_CDTORS = YES;
+ GCC_PRECOMPILE_PREFIX_HEADER = YES;
+-GCC_SYMBOLS_PRIVATE_EXTERN = YES;
++GCC_SYMBOLS_PRIVATE_EXTERN = $(WK_NOT_$(WK_MYA_HEAP));
+ GCC_TREAT_WARNINGS_AS_ERRORS = YES;
+ GCC_VERSION = com.apple.compilers.llvm.clang.1_0;
+ // FIXME: <http://webkit.org/b/109847> WebKit2 should build with -Wshorten-64-to-32
+@@ -128,10 +128,13 @@ WK_ENABLE_SWIFTUI[sdk=watch*27.*] = NO;
+ WK_ENABLE_SWIFTUI[sdk=appletv*26.*] = NO;
+ WK_ENABLE_SWIFTUI[sdk=appletv*27.*] = NO;
+ 
+-SUPPORTS_TEXT_BASED_API = $(WK_ENABLE_SLOW_BUILD_VERIFICATION);
++// MYA_HEAP builds export every symbol, ignore TAPI.
++SUPPORTS_TEXT_BASED_API = $(WK_SUPPORTS_TEXT_BASED_API_MYA_HEAP_$(WK_MYA_HEAP));
++WK_SUPPORTS_TEXT_BASED_API_MYA_HEAP_NO = $(WK_ENABLE_SLOW_BUILD_VERIFICATION);
+ // Override to enable SPI checking at desk. Remove once audit-spi works in
+ // production builds (https://bugs.webkit.org/show_bug.cgi?id=299573).
+-SUPPORTS_TEXT_BASED_API[sdk=iphoneos.internal] = YES;
++WK_SUPPORTS_TEXT_BASED_API_MYA_HEAP_NO[sdk=iphoneos.internal] = YES;
++WK_SUPPORTS_TEXT_BASED_API_MYA_HEAP_YES = NO;
+ 
+ OTHER_TAPI_FLAGS = $(inherited) -DRELEASE_WITHOUT_OPTIMIZATIONS;
+ TAPI_USE_SRCROOT = YES;
+diff --git a/Source/WebKit/Configurations/DebugRelease.xcconfig b/Source/WebKit/Configurations/DebugRelease.xcconfig
+index cc73fb9049db..52657d063f1b 100644
+--- a/Source/WebKit/Configurations/DebugRelease.xcconfig
++++ b/Source/WebKit/Configurations/DebugRelease.xcconfig
+@@ -27,7 +27,11 @@
+ ONLY_ACTIVE_ARCH = YES;
+ 
+ GCC_WARN_ABOUT_DEPRECATED_FUNCTIONS = YES;
+-DEBUG_INFORMATION_FORMAT = dwarf;
++DEBUG_INFORMATION_FORMAT = $(WK_DEBUG_INFORMATION_FORMAT_MYA_HEAP_$(WK_MYA_HEAP));
++WK_DEBUG_INFORMATION_FORMAT_MYA_HEAP_NO = dwarf;
++// With compilation caching, an object file's debug info refers to its precompiled header's in the
++// cache, which only dsymutil reads; liblldb reads the dSYM it writes.
++WK_DEBUG_INFORMATION_FORMAT_MYA_HEAP_YES = dwarf-with-dsym;
+ 
+ SDKROOT = $(SDKROOT_$(USE_INTERNAL_SDK));
+ SDKROOT_ = macosx;
+diff --git a/Source/WebKit/Configurations/WebKitPlatform.xcconfig b/Source/WebKit/Configurations/WebKitPlatform.xcconfig
+index e6259b6080fb..831706c726a0 100644
+--- a/Source/WebKit/Configurations/WebKitPlatform.xcconfig
++++ b/Source/WebKit/Configurations/WebKitPlatform.xcconfig
+@@ -29,6 +29,6 @@ SKIP_INSTALL = $(SKIP_INSTALL_$(FORCE_TOOL_INSTALL));
+ SKIP_INSTALL_ = YES;
+ SKIP_INSTALL_NO = YES;
+ SKIP_INSTALL_YES = NO;
+-GCC_SYMBOLS_PRIVATE_EXTERN = YES;
++GCC_SYMBOLS_PRIVATE_EXTERN = $(WK_NOT_$(WK_MYA_HEAP));
+ 
+ OTHER_LDFLAGS = $(inherited) $(SOURCE_VERSION_LDFLAGS);
+diff --git a/Source/bmalloc/PlatformCocoa.cmake b/Source/bmalloc/PlatformCocoa.cmake
+index 6b5d04308f7e..5c1ce25953e8 100644
+--- a/Source/bmalloc/PlatformCocoa.cmake
++++ b/Source/bmalloc/PlatformCocoa.cmake
+@@ -2,7 +2,9 @@ list(APPEND bmalloc_PUBLIC_HEADERS
+     Configurations/module.modulemap
+ )
+ 
+-list(APPEND bmalloc_PRIVATE_DEFINITIONS PAS_BMALLOC_HIDDEN=1)
++if (NOT ENABLE_MYA_HEAP)
++    list(APPEND bmalloc_PRIVATE_DEFINITIONS PAS_BMALLOC_HIDDEN=1)
++endif ()
+ 
+ list(APPEND bmalloc_SOURCES
+     bmalloc/ProcessCheck.mm
+diff --git a/Source/cmake/FindLLDB.cmake b/Source/cmake/FindLLDB.cmake
+new file mode 100644
+index 000000000000..f25fae447697
+--- /dev/null
++++ b/Source/cmake/FindLLDB.cmake
+@@ -0,0 +1,98 @@
++# - Try to find LLDB's C++ SB API.
++# Once done, this will define
++#
++#  LLDB_FOUND - LLDB's SB API was found
++#  LLDB_VERSION - the version of that LLDB
++#  LLDB_INCLUDE_DIRS - the LLDB include directories
++#  LLDB_LIBRARIES - link these to use LLDB.
++#  LLDB::LLDB - an imported target
++#
++# Copyright (C) 2026 Igalia S.L.
++#
++# Redistribution and use in source and binary forms, with or without
++# modification, are permitted provided that the following conditions
++# are met:
++# 1.  Redistributions of source code must retain the above copyright
++#     notice, this list of conditions and the following disclaimer.
++# 2.  Redistributions in binary form must reproduce the above copyright
++#     notice, this list of conditions and the following disclaimer in the
++#     documentation and/or other materials provided with the distribution.
++#
++# THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDER AND ITS CONTRIBUTORS ``AS
++# IS'' AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++# THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++# PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT HOLDER OR ITS
++# CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
++# EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
++# PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS;
++# OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY,
++# WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR
++# OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF
++# ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
++
++if (APPLE)
++    # Xcode's LLDB.framework ships no SB headers, so only Homebrew's is usable.
++    set(LLDB_PREFIXES "/opt/homebrew/opt/llvm" "/usr/local/opt/llvm")
++else ()
++    file(GLOB LLDB_PREFIXES "/usr/lib/llvm-*")
++    # Newest first.
++    list(SORT LLDB_PREFIXES COMPARE NATURAL ORDER DESCENDING)
++endif ()
++
++find_path(LLDB_INCLUDE_DIR
++    NAMES lldb/API/LLDB.h
++    PATHS ${LLDB_PREFIXES}
++    PATH_SUFFIXES include
++)
++
++if (LLDB_INCLUDE_DIR)
++    # The library must come from the headers' own install, or a machine with
++    # several LLVMs could link one against another's headers.
++    get_filename_component(LLDB_PREFIX "${LLDB_INCLUDE_DIR}" DIRECTORY)
++    find_library(LLDB_LIBRARY
++        NAMES lldb
++        HINTS "${LLDB_PREFIX}"
++        PATH_SUFFIXES lib lib64
++        NO_DEFAULT_PATH
++    )
++endif ()
++
++# The SB headers carry no version, but the installed library's name does
++# (liblldb-18.so.1 on Debian, liblldb.22.1.8.dylib from Homebrew), as does the
++# directory of an install (/usr/lib/llvm-18, Cellar/llvm/22.1.8).
++if (LLDB_LIBRARY)
++    file(REAL_PATH "${LLDB_LIBRARY}" _LLDB_REAL_LIBRARY)
++    file(REAL_PATH "${LLDB_INCLUDE_DIR}" _LLDB_REAL_INCLUDE_DIR)
++    get_filename_component(_LLDB_LIBRARY_NAME "${_LLDB_REAL_LIBRARY}" NAME)
++    if (_LLDB_LIBRARY_NAME MATCHES "lldb[-.]([0-9]+(\\.[0-9]+)*)")
++        set(LLDB_VERSION "${CMAKE_MATCH_1}")
++    elseif (_LLDB_REAL_INCLUDE_DIR MATCHES "llvm[-/]([0-9]+(\\.[0-9]+)*)")
++        set(LLDB_VERSION "${CMAKE_MATCH_1}")
++    endif ()
++endif ()
++
++include(FindPackageHandleStandardArgs)
++find_package_handle_standard_args(LLDB
++    REQUIRED_VARS LLDB_INCLUDE_DIR LLDB_LIBRARY
++    VERSION_VAR LLDB_VERSION
++)
++
++mark_as_advanced(
++    LLDB_INCLUDE_DIR
++    LLDB_LIBRARY
++)
++
++if (LLDB_FOUND)
++    set(LLDB_LIBRARIES ${LLDB_LIBRARY})
++    set(LLDB_INCLUDE_DIRS ${LLDB_INCLUDE_DIR})
++
++    if (NOT TARGET LLDB::LLDB)
++        # CMake gives an imported target's include directories to its users as
++        # -isystem, which keeps warnings in LLDB's headers out of WebKit's -Werror.
++        add_library(LLDB::LLDB INTERFACE IMPORTED GLOBAL)
++        set_target_properties(LLDB::LLDB PROPERTIES
++            INTERFACE_LINK_LIBRARIES "${LLDB_LIBRARY}"
++            INTERFACE_INCLUDE_DIRECTORIES "${LLDB_INCLUDE_DIR}"
++        )
++    endif ()
++endif ()
+diff --git a/Source/cmake/OptionsCommon.cmake b/Source/cmake/OptionsCommon.cmake
+index 121e64b01bce..fbe6ff354637 100644
+--- a/Source/cmake/OptionsCommon.cmake
++++ b/Source/cmake/OptionsCommon.cmake
+@@ -179,16 +179,9 @@ if (ENABLE_DEVELOPER_MODE AND (CMAKE_BUILD_TYPE STREQUAL "Debug" OR CMAKE_BUILD_
+     endif ()
+ endif ()
+ 
++# Applied in WebKitCommon.cmake, once the port's options say whether ENABLE_MYA_HEAP turns it off.
+ option(DEBUG_FISSION "Use Debug Fission support" ${ENABLE_DEBUG_FISSION_DEFAULT})
+ 
+-if (DEBUG_FISSION)
+-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -gsplit-dwarf")
+-    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -gsplit-dwarf")
+-    if (LD_SUPPORTS_GDB_INDEX)
+-        add_link_options("LINKER:--gdb-index")
+-    endif ()
+-endif ()
+-
+ option(CLANG_TIME_TRACE "Generate Clang time trace profiling output" OFF)
+ if (CLANG_TIME_TRACE AND COMPILER_IS_CLANG)
+     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -ftime-trace")
+diff --git a/Source/cmake/WebKitCommon.cmake b/Source/cmake/WebKitCommon.cmake
+index d0385b2c1e32..8f9866a0df1c 100644
+--- a/Source/cmake/WebKitCommon.cmake
++++ b/Source/cmake/WebKitCommon.cmake
+@@ -355,6 +355,38 @@ if (NOT HAS_RUN_WEBKIT_COMMON)
+     include(OptionsCommon)
+     include(Options${PORT})
+ 
++    # This has to come after Options${PORT} to see ENABLE_MYA_HEAP
++    if (ENABLE_MYA_HEAP)
++        # So that each image describes the types it uses.
++        WEBKIT_APPEND_GLOBAL_COMPILER_FLAGS(-fstandalone-debug)
++        # The vtable check needs every destructor's linkage name, and with
++        # Abstract linkage names an implicit destructor has none.
++        # With simple template names, liblldb gives the instances of one class
++        # template of one size one class, whose members are only one's.
++        foreach (_flags CMAKE_C_FLAGS CMAKE_OBJC_FLAGS CMAKE_CXX_FLAGS CMAKE_OBJCXX_FLAGS)
++            string(REPLACE "-mllvm -dwarf-linkage-names=Abstract" "" ${_flags} "${${_flags}}")
++            string(REPLACE "-gsimple-template-names" "" ${_flags} "${${_flags}}")
++        endforeach ()
++        # The heap walk's tests enumerate their own libpas heap, through libpas's API.
++        add_compile_definitions(PAS_BMALLOC_HIDDEN=0)
++        if (NOT APPLE)
++            # The build-id is what refuses an image rebuilt since it was loaded. lld
++            # writes none unless asked, and only some distributions' clang asks.
++            add_link_options("LINKER:--build-id")
++        endif ()
++        # liblldb reads .debug_names but not .gdb_index, so with split DWARF it
++        # indexes every .dwo file by hand whenever it loads an image.
++        set(DEBUG_FISSION OFF)
++    endif ()
++
++    if (DEBUG_FISSION)
++        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -gsplit-dwarf")
++        set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -gsplit-dwarf")
++        if (LD_SUPPORTS_GDB_INDEX)
++            add_link_options("LINKER:--gdb-index")
++        endif ()
++    endif ()
++
+     # This has to come after Options${PORT} to see any ENABLE_THREAD_SAFETY_WARNING.
+     if (ENABLE_THREAD_SAFETY_WARNING)
+         WEBKIT_PREPEND_GLOBAL_CXX_FLAGS(-Wthread-safety)
+diff --git a/Source/cmake/WebKitFeatures.cmake b/Source/cmake/WebKitFeatures.cmake
+index 0670e084f9d8..ae65c3254b7e 100644
+--- a/Source/cmake/WebKitFeatures.cmake
++++ b/Source/cmake/WebKitFeatures.cmake
+@@ -184,6 +184,14 @@ macro(WEBKIT_OPTION_BEGIN)
+         endif ()
+     endif ()
+ 
++    if (NOT DEFINED ENABLE_MYA_HEAP_DEFAULT)
++        if (ENABLE_MYA_DEFAULT AND CMAKE_BUILD_TYPE STREQUAL "Debug")
++            set(ENABLE_MYA_HEAP_DEFAULT ON)
++        else ()
++            set(ENABLE_MYA_HEAP_DEFAULT OFF)
++        endif ()
++    endif ()
++
+     WEBKIT_OPTION_DEFINE(ENABLE_ACCESSIBILITY_ISOLATED_TREE "Toggle accessibility isolated tree support" PRIVATE OFF)
+     WEBKIT_OPTION_DEFINE(ENABLE_API_TESTS "Enable public API unit tests" PRIVATE OFF)
+     WEBKIT_OPTION_DEFINE(ENABLE_APPLE_PAY "Toggle Apple Pay support" PRIVATE OFF)
+@@ -265,6 +273,7 @@ macro(WEBKIT_OPTION_BEGIN)
+     WEBKIT_OPTION_DEFINE(ENABLE_MODEL_ELEMENT "Toggle Model Element support" PRIVATE OFF)
+     WEBKIT_OPTION_DEFINE(ENABLE_MOUSE_CURSOR_SCALE "Toggle Scaled mouse cursor support" PRIVATE OFF)
+     WEBKIT_OPTION_DEFINE(ENABLE_MYA "Toggle the mya MemorY Analyzer tool" PRIVATE ${ENABLE_MYA_DEFAULT})
++    WEBKIT_OPTION_DEFINE(ENABLE_MYA_HEAP "Include additional debug info in the build to support mya heap analysis features." PRIVATE ${ENABLE_MYA_HEAP_DEFAULT})
+     WEBKIT_OPTION_DEFINE(ENABLE_NAVIGATOR_STANDALONE "Toogle standalone navigator support" PRIVATE OFF)
+     WEBKIT_OPTION_DEFINE(ENABLE_NOTIFICATIONS "Toggle Notifications support" PRIVATE ON)
+     WEBKIT_OPTION_DEFINE(ENABLE_OFFSCREEN_CANVAS "Toggle OffscreenCanvas support" PRIVATE OFF)
+@@ -351,6 +360,7 @@ macro(WEBKIT_OPTION_BEGIN)
+     WEBKIT_OPTION_DEPEND(ENABLE_ENCRYPTED_MEDIA ENABLE_VIDEO)
+     WEBKIT_OPTION_DEPEND(ENABLE_LEGACY_ENCRYPTED_MEDIA ENABLE_VIDEO)
+     WEBKIT_OPTION_DEPEND(ENABLE_DFG_JIT ENABLE_JIT)
++    WEBKIT_OPTION_DEPEND(ENABLE_MYA_HEAP ENABLE_MYA)
+     WEBKIT_OPTION_DEPEND(ENABLE_FTL_JIT ENABLE_DFG_JIT)
+     WEBKIT_OPTION_DEPEND(ENABLE_WEBASSEMBLY_BBQJIT ENABLE_FTL_JIT)
+     WEBKIT_OPTION_DEPEND(ENABLE_WEBASSEMBLY_OMGJIT ENABLE_FTL_JIT)
+diff --git a/Source/cmake/WebKitMacros.cmake b/Source/cmake/WebKitMacros.cmake
+index d4a356ef527a..33c32ec7476c 100644
+--- a/Source/cmake/WebKitMacros.cmake
++++ b/Source/cmake/WebKitMacros.cmake
+@@ -290,7 +290,13 @@ function(_WEBKIT_ADD_PCH_OBJECT _target)
+         return ()
+     endif ()
+     cmake_parse_arguments(PARSE_ARGV 1 _PO "PREFIX_NO_CODEGEN" "" "PREFIX_LANGUAGES")
+-    set(_stub_flags "-fpch-debuginfo;-Xclang;-building-pch-with-obj")
++    set(_stub_flags "-Xclang;-building-pch-with-obj")
++    # With the prefix header's types described only in its object, every other
++    # compile unit declares them, and liblldb gives the declared instances of a
++    # class template no template arguments.
++    if (NOT ENABLE_MYA_HEAP)
++        list(PREPEND _stub_flags "-fpch-debuginfo")
++    endif ()
+     if (NOT _PO_PREFIX_NO_CODEGEN AND USE_PCH_CODEGEN)
+         list(PREPEND _stub_flags "-fpch-codegen")
+     endif ()
+@@ -503,6 +509,19 @@ macro(_WEBKIT_TARGET_SETUP _target _logical_name)
+     if (${_logical_name}_DEPENDENCIES)
+         add_dependencies(${_target} ${${_logical_name}_DEPENDENCIES})
+     endif ()
++
++    # liblldb finds the compile unit that defines a global variable only in a
++    # dSYM, not through the debug map, and finds a dSYM next to its image, or a
++    # framework's next to its bundle, which is Foo.framework/Versions/A/Foo.
++    if (APPLE AND ENABLE_MYA_HEAP)
++        get_target_property(_webkit_target_type ${_target} TYPE)
++        if (_webkit_target_type STREQUAL "SHARED_LIBRARY" OR _webkit_target_type STREQUAL "EXECUTABLE")
++            # A port marks a target a framework after this, so the generator decides.
++            add_custom_command(TARGET ${_target} POST_BUILD
++                COMMAND dsymutil $<TARGET_FILE:${_target}> -o $<IF:$<BOOL:$<TARGET_PROPERTY:${_target},FRAMEWORK>>,$<TARGET_FILE_DIR:${_target}>/../../../$<TARGET_FILE_NAME:${_target}>.framework.dSYM,$<TARGET_FILE:${_target}>.dSYM>
++                VERBATIM)
++        endif ()
++    endif ()
+ endmacro()
+ 
+ macro(_WEBKIT_TARGET _target)
+diff --git a/Tools/Scripts/check-for-weak-vtables-and-externals b/Tools/Scripts/check-for-weak-vtables-and-externals
+index 12fd0f32521f..9b5ebb8b3235 100755
+--- a/Tools/Scripts/check-for-weak-vtables-and-externals
++++ b/Tools/Scripts/check-for-weak-vtables-and-externals
+@@ -43,6 +43,7 @@ my $configuration = $ENV{'CONFIGURATION'};
+ my $target = $ENV{'TARGET_NAME'};
+ my $coverageBuild = $ENV{'WEBKIT_COVERAGE_BUILD'};
+ my $debugRoot = $ENV{'WEBKIT_DEBUG_ROOT'};
++my $myaHeap = ($ENV{'WK_MYA_HEAP'} // '') eq 'YES';
+ 
+ my $executablePath = "$ENV{'TARGET_BUILD_DIR'}/$ENV{'EXECUTABLE_PATH'}";
+ 
+@@ -101,7 +102,10 @@ if (!defined $executablePathAge || !defined $buildTimestampAge || $executablePat
+         $sawError = 1;
+     }
+ 
+-    if (@weakExternalSymbols) {
++    # mya heap builds need these extra symbols
++    if (@weakExternalSymbols && $myaHeap) {
++        print "NOTE: $shortName has " . scalar(@weakExternalSymbols) . " weak external symbols, expected with WK_MYA_HEAP\n";
++    } elsif (@weakExternalSymbols) {
+         print "ERROR: $shortName has a weak external symbol in it ($executablePath)\n";
+         print "ERROR: A weak external symbol is generated when a symbol is defined in multiple compilation units and is also marked as being exported from the library.\n";
+         print "ERROR: A common cause of weak external symbols is when an inline function is listed in the linker export file.\n";
+diff --git a/Tools/Scripts/run-javascriptcore-tests b/Tools/Scripts/run-javascriptcore-tests
+index 34ec9b5511a2..f88b694b55de 100755
+--- a/Tools/Scripts/run-javascriptcore-tests
++++ b/Tools/Scripts/run-javascriptcore-tests
+@@ -839,7 +839,8 @@ if ($runTestAPI) {
+     runTest("testapi", "allApiTestsPassedWithSystemMalloc", "Malloc=1");
+ }
+ if ($runTestWasmDebugger) { runTest("testwasmdebugger", "allWasmDebuggerTestsPassed") }
+-if ($runTestLibJSCTools) { runTest("testLibJSCTools", "allLibJSCToolsTestsPassed") }
++# Xcode's LLDB.framework records an os_signpost and an os_log message per SB API call, which doubles the heap walk.
++if ($runTestLibJSCTools) { runTest("testLibJSCTools", "allLibJSCToolsTestsPassed", isAppleCocoaWebKit() ? "OS_ACTIVITY_MODE=disable" : "") }
+ 
+ # Find JavaScriptCore directory
+ chdirWebKit();
+-- 
+2.54.0 (Apple Git-157)
+

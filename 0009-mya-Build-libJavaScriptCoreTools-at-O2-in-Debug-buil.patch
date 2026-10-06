@@ -1,0 +1,67 @@
+From 2ce46136c1a224c9e4ff76de3b9314d4bc3c5ee1 Mon Sep 17 00:00:00 2001
+From: Justin Michaud <jmichaud@igalia.com>
+Date: Tue, 6 Oct 2026 10:19:56 -0600
+Subject: [PATCH 09/23] [mya] Build libJavaScriptCoreTools at -O2 in Debug
+ builds Need the bug URL (OOPS!).
+
+Reviewed by NOBODY (OOPS!).
+
+Build flags only. Only the libJavaScriptCoreTools target, only in Debug.
+
+Xcode sets WK_DEFAULT_GCC_OPTIMIZATION_LEVEL to 2 for libJavaScriptCoreTools
+in the Debug configuration; CMake adds -O2 to the JavaScriptCoreTools target
+when CMAKE_BUILD_TYPE is Debug. JavaScriptCore, WTF and everything else stay
+at the configuration's level, so the target being analyzed is still a normal
+Debug build.
+
+Why it is needed: mya is almost always used against Debug builds (MYA_HEAP
+is Debug-only on macOS), and a heap walk reads every value of the heap
+through WTF's containers and the corpse readers, which at -O0 makes a walk of
+a small heap take about twice as long.
+
+Cost: libJavaScriptCoreTools is harder to step through in a debugger in Debug
+builds.
+
+What we lose if it is not taken: nothing functional; Debug heap walks and the
+HeapWalk tests run about twice as slow.
+
+* Source/JavaScriptCore/Configurations/libJavaScriptCoreTools.xcconfig:
+* Source/JavaScriptCore/corpse/CMakeLists.txt:
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../Configurations/libJavaScriptCoreTools.xcconfig         | 5 +++++
+ Source/JavaScriptCore/corpse/CMakeLists.txt                | 7 +++++++
+ 2 files changed, 12 insertions(+)
+
+diff --git a/Source/JavaScriptCore/Configurations/libJavaScriptCoreTools.xcconfig b/Source/JavaScriptCore/Configurations/libJavaScriptCoreTools.xcconfig
+index a9a28adccc2a..45b7f6d6f077 100644
+--- a/Source/JavaScriptCore/Configurations/libJavaScriptCoreTools.xcconfig
++++ b/Source/JavaScriptCore/Configurations/libJavaScriptCoreTools.xcconfig
+@@ -58,3 +58,8 @@ STRIP_INSTALLED_PRODUCT = NO;
+ HEADER_SEARCH_PATHS = $(SRCROOT) $(SRCROOT)/corpse "$(JAVASCRIPTCORE_FRAMEWORKS_DIR)/JavaScriptCore.framework/PrivateHeaders" $(inherited);
+ 
+ SYSTEM_HEADER_SEARCH_PATHS = $(inherited) $(WK_LLDB_SYSTEM_HEADER_SEARCH_PATHS);
++
++// A heap walk reads every value of a heap through WTF's containers, which at
++// -O0 makes a walk of a small heap take twice as long. JavaScriptCore itself
++// stays as the configuration says.
++WK_DEFAULT_GCC_OPTIMIZATION_LEVEL[config=Debug] = 2;
+diff --git a/Source/JavaScriptCore/corpse/CMakeLists.txt b/Source/JavaScriptCore/corpse/CMakeLists.txt
+index 6edcff28b947..e5a4a8c7800f 100644
+--- a/Source/JavaScriptCore/corpse/CMakeLists.txt
++++ b/Source/JavaScriptCore/corpse/CMakeLists.txt
+@@ -35,3 +35,10 @@ WEBKIT_LIBRARY(JavaScriptCoreTools)
+ 
+ # The corpse sources use JavaScriptCore's generated headers.
+ add_dependencies(JavaScriptCoreTools JavaScriptCore)
++
++# A heap walk reads every value of a heap through WTF's containers, which at
++# -O0 makes a walk of a small heap take twice as long. JavaScriptCore itself
++# stays as the build type says.
++if (CMAKE_BUILD_TYPE STREQUAL "Debug")
++    target_compile_options(JavaScriptCoreTools PRIVATE -O2)
++endif ()
+-- 
+2.54.0 (Apple Git-157)
+

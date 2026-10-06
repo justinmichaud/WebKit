@@ -1,0 +1,961 @@
+From 619bd3876a123802a385d1ffc537935a5ab8c32c Mon Sep 17 00:00:00 2001
+From: Justin Michaud <jmichaud@igalia.com>
+Date: Tue, 6 Oct 2026 10:52:48 -0600
+Subject: [PATCH 09/17] [mya] List the images loaded in a snapshot Need the bug
+ URL (OOPS!).
+
+Reviewed by NOBODY (OOPS!).
+
+Snapshot::images() lists the images (the executable and shared libraries) of
+the snapshot's process, read once and cached, as Corpse::Image: where each is
+loaded, the path the loader recorded, and its identity.
+
+- Darwin: from dyld_all_image_infos, with each image's LC_UUID read from its
+  header in the snapshot. Images in the shared cache are left out: they have
+  no debug info to read. Snapshot::dyldAllImageInfos() now finds dyld's
+  record, and Symbol's lookup uses it instead of its own copy of that code.
+- Linux: from the dynamic loader's link_map list, found through the
+  auxiliary vector's AT_PHDR and the executable's PT_DYNAMIC/DT_DEBUG, with
+  each image's NT_GNU_BUILD_ID note read from its mapped program headers and
+  its dynamic section (l_ld). An image without a readable path, or one no
+  file holds (the vDSO), is counted and left out; one without a build-id is
+  reported and left out, since a rebuilt file could not be told from it.
+
+The identity (UUID or build-id) is what the debug info patch later uses to
+refuse a file that was rebuilt since the target loaded it. On Linux it relies
+on MYA_HEAP builds linking with --build-id (bug 325546). Every read is
+bounded by new CorpseLimits.
+
+The Snapshot suite checks that the list has this executable and
+JavaScriptCore at the addresses the loader reports, that every image has a
+path (on Linux, naming the file the loader mapped), and on Darwin a UUID,
+that shared-cache images are left out on Darwin and libc is listed on Linux,
+and that an invalid snapshot lists nothing, reporting it once.
+
+* Source/JavaScriptCore/CMakeLists.txt:
+* Source/JavaScriptCore/JavaScriptCore.xcodeproj/project.pbxproj:
+* Source/JavaScriptCore/corpse/CMakeLists.txt:
+* Source/JavaScriptCore/corpse/CorpseError.cpp:
+* Source/JavaScriptCore/corpse/CorpseError.h:
+* Source/JavaScriptCore/corpse/CorpseImage.cpp: Added.
+* Source/JavaScriptCore/corpse/CorpseImage.h: Added.
+* Source/JavaScriptCore/corpse/CorpseLimits.h:
+* Source/JavaScriptCore/corpse/CorpseSnapshot.cpp:
+* Source/JavaScriptCore/corpse/CorpseSnapshot.h:
+* Source/JavaScriptCore/corpse/CorpseSymbol.cpp:
+* Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.cpp:
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/JavaScriptCore/CMakeLists.txt          |   1 +
+ .../JavaScriptCore.xcodeproj/project.pbxproj  |   8 +
+ Source/JavaScriptCore/corpse/CMakeLists.txt   |   1 +
+ Source/JavaScriptCore/corpse/CorpseError.cpp  |   4 +
+ Source/JavaScriptCore/corpse/CorpseError.h    |   4 +-
+ Source/JavaScriptCore/corpse/CorpseImage.cpp  | 377 ++++++++++++++++++
+ Source/JavaScriptCore/corpse/CorpseImage.h    |  97 +++++
+ Source/JavaScriptCore/corpse/CorpseLimits.h   |   5 +
+ .../JavaScriptCore/corpse/CorpseSnapshot.cpp  |  41 ++
+ Source/JavaScriptCore/corpse/CorpseSnapshot.h |  14 +-
+ Source/JavaScriptCore/corpse/CorpseSymbol.cpp |  24 +-
+ .../corpse/tests/CorpseSnapshotTest.cpp       |  72 +++-
+ 12 files changed, 624 insertions(+), 24 deletions(-)
+ create mode 100644 Source/JavaScriptCore/corpse/CorpseImage.cpp
+ create mode 100644 Source/JavaScriptCore/corpse/CorpseImage.h
+
+diff --git a/Source/JavaScriptCore/CMakeLists.txt b/Source/JavaScriptCore/CMakeLists.txt
+index 7a677091d3b8..722900e194a5 100644
+--- a/Source/JavaScriptCore/CMakeLists.txt
++++ b/Source/JavaScriptCore/CMakeLists.txt
+@@ -1662,6 +1662,7 @@ if (ENABLE_MYA)
+         corpse/CorpseClient.h
+         corpse/CorpseError.h
+         corpse/CorpseExportsTrie.h
++        corpse/CorpseImage.h
+         corpse/CorpseLimits.h
+         corpse/CorpseMemory.h
+         corpse/CorpseMemoryPtr.h
+diff --git a/Source/JavaScriptCore/JavaScriptCore.xcodeproj/project.pbxproj b/Source/JavaScriptCore/JavaScriptCore.xcodeproj/project.pbxproj
+index d6ac754b7c62..a77914b6cc0f 100644
+--- a/Source/JavaScriptCore/JavaScriptCore.xcodeproj/project.pbxproj
++++ b/Source/JavaScriptCore/JavaScriptCore.xcodeproj/project.pbxproj
+@@ -1866,7 +1866,9 @@
+ 		D68DA6DA907546EFA429D8D2 /* CorpseDiagnosticsTest.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 203DFA350D3248B0A8E7376B /* CorpseDiagnosticsTest.cpp */; };
+ 		7E83C43717D785F3003DC41B /* CorpseExportsTrie.h in Headers */ = {isa = PBXBuildFile; fileRef = 7E83C43517D785F3003DC41B /* CorpseExportsTrie.h */; settings = {ATTRIBUTES = (Private, ); }; };
+ 		56C6C2B7EBDCC63B6ECEA9AD /* CorpseThread.h in Headers */ = {isa = PBXBuildFile; fileRef = 211E3D6CA97F31CEB385A75A /* CorpseThread.h */; settings = {ATTRIBUTES = (Private, ); }; };
++		DD38CA03D03F45F09699BF9F /* CorpseImage.h in Headers */ = {isa = PBXBuildFile; fileRef = 44DFA0959F8443918E97F342 /* CorpseImage.h */; settings = {ATTRIBUTES = (Private, ); }; };
+ 		EF648B9EEAF54C44048B416A /* CorpseThread.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 960BD2B783EAEBE3233F91BF /* CorpseThread.cpp */; };
++		274BDBF8F9DE497D87E618C3 /* CorpseImage.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1739997C26A542609CF9FCED /* CorpseImage.cpp */; };
+ 		4C1E8A7D2B5F4E0F9A3D6C2B /* CorpseLimits.h in Headers */ = {isa = PBXBuildFile; fileRef = 7E2F9B3C4D5A6E7F8091A2B3 /* CorpseLimits.h */; settings = {ATTRIBUTES = (Private, ); }; };
+ 		CA47D093D003440A28D15924 /* CorpseSnapshot.h in Headers */ = {isa = PBXBuildFile; fileRef = 94711688984F16F71D615DE5 /* CorpseSnapshot.h */; settings = {ATTRIBUTES = (Private, ); }; };
+ 		A3B4C5D6E7F8091A2B3C4D5E /* CorpseMemory.h in Headers */ = {isa = PBXBuildFile; fileRef = 92A3B4C5D6E7F8091A2B3C4D /* CorpseMemory.h */; settings = {ATTRIBUTES = (Private, ); }; };
+@@ -4115,7 +4117,9 @@
+ 		7E83C43617D785F3003DC41B /* CorpseExportsTrie.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseExportsTrie.cpp; sourceTree = "<group>"; };
+ 		7E83C43517D785F3003DC41B /* CorpseExportsTrie.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseExportsTrie.h; sourceTree = "<group>"; };
+ 		211E3D6CA97F31CEB385A75A /* CorpseThread.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseThread.h; sourceTree = "<group>"; };
++		44DFA0959F8443918E97F342 /* CorpseImage.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseImage.h; sourceTree = "<group>"; };
+ 		960BD2B783EAEBE3233F91BF /* CorpseThread.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseThread.cpp; sourceTree = "<group>"; };
++		1739997C26A542609CF9FCED /* CorpseImage.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseImage.cpp; sourceTree = "<group>"; };
+ 		7E2F9B3C4D5A6E7F8091A2B3 /* CorpseLimits.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = CorpseLimits.h; sourceTree = "<group>"; };
+ 		1482B7E10A43076000517CFC /* JSObjectRef.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; path = JSObjectRef.h; sourceTree = "<group>"; };
+ 		1482B7E20A43076000517CFC /* JSObjectRef.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = JSObjectRef.cpp; sourceTree = "<group>"; };
+@@ -6991,6 +6995,8 @@
+ 				8DDA7A78AD90B64B97AE329C /* CorpseError.h */,
+ 				7E83C43617D785F3003DC41B /* CorpseExportsTrie.cpp */,
+ 				7E83C43517D785F3003DC41B /* CorpseExportsTrie.h */,
++				1739997C26A542609CF9FCED /* CorpseImage.cpp */,
++				44DFA0959F8443918E97F342 /* CorpseImage.h */,
+ 				7E2F9B3C4D5A6E7F8091A2B3 /* CorpseLimits.h */,
+ 				5E6F708192A3B4C5D6E7F809 /* CorpseMachVMSPI.h */,
+ 				B4C5D6E7F8091A2B3C4D5E6F /* CorpseMemory.cpp */,
+@@ -11725,6 +11731,7 @@
+ 				80B96670131FB9EBB9AD49CC /* CorpseClient.h in Headers */,
+ 				85428E7BE0B3557DD2988043 /* CorpseError.h in Headers */,
+ 				7E83C43717D785F3003DC41B /* CorpseExportsTrie.h in Headers */,
++				DD38CA03D03F45F09699BF9F /* CorpseImage.h in Headers */,
+ 				4C1E8A7D2B5F4E0F9A3D6C2B /* CorpseLimits.h in Headers */,
+ 				A3B4C5D6E7F8091A2B3C4D5E /* CorpseMemory.h in Headers */,
+ 				2C3D4E5F60718293A4B5C6D7 /* CorpseMemoryPtr.h in Headers */,
+@@ -14409,6 +14416,7 @@
+ 				C2EB941F3198AE0BD86A2324 /* CorpseClient.cpp in Sources */,
+ 				121D90BB8171A66F1922D548 /* CorpseError.cpp in Sources */,
+ 				7E83C43817D785F3003DC41B /* CorpseExportsTrie.cpp in Sources */,
++				274BDBF8F9DE497D87E618C3 /* CorpseImage.cpp in Sources */,
+ 				C5D6E7F8091A2B3C4D5E6F70 /* CorpseMemory.cpp in Sources */,
+ 				C366EA5039A3B51405995EA6 /* CorpseProcess.cpp in Sources */,
+ 				5E2B94A17C6D40F3B85219CE /* CorpseRegion.cpp in Sources */,
+diff --git a/Source/JavaScriptCore/corpse/CMakeLists.txt b/Source/JavaScriptCore/corpse/CMakeLists.txt
+index e5a4a8c7800f..e2aa63999628 100644
+--- a/Source/JavaScriptCore/corpse/CMakeLists.txt
++++ b/Source/JavaScriptCore/corpse/CMakeLists.txt
+@@ -5,6 +5,7 @@ set(JavaScriptCoreTools_SOURCES
+     CorpseClient.cpp
+     CorpseError.cpp
+     CorpseExportsTrie.cpp
++    CorpseImage.cpp
+     CorpseMemory.cpp
+     CorpseProcess.cpp
+     CorpseRegion.cpp
+diff --git a/Source/JavaScriptCore/corpse/CorpseError.cpp b/Source/JavaScriptCore/corpse/CorpseError.cpp
+index ba4be4b0fa47..d3bd9ce40fc7 100644
+--- a/Source/JavaScriptCore/corpse/CorpseError.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseError.cpp
+@@ -118,6 +118,10 @@ static ASCIILiteral label(DiagnosticCounter counter)
+         return "thread states read"_s;
+     case DiagnosticCounter::UnreadableThreadStates:
+         return "threads with unreadable state"_s;
++    case DiagnosticCounter::ImagesWithoutPath:
++        return "images without a readable path"_s;
++    case DiagnosticCounter::ImagesWithoutFile:
++        return "images no file holds"_s;
+     }
+     RELEASE_ASSERT_NOT_REACHED();
+ }
+diff --git a/Source/JavaScriptCore/corpse/CorpseError.h b/Source/JavaScriptCore/corpse/CorpseError.h
+index 8286939f5363..97e4508aae9e 100644
+--- a/Source/JavaScriptCore/corpse/CorpseError.h
++++ b/Source/JavaScriptCore/corpse/CorpseError.h
+@@ -72,8 +72,10 @@ enum class DiagnosticCounter : uint8_t {
+     ThreadsListed,
+     ThreadStatesRead,
+     UnreadableThreadStates,
++    ImagesWithoutPath,
++    ImagesWithoutFile,
+ };
+-constexpr size_t numberOfDiagnosticCounters = static_cast<size_t>(DiagnosticCounter::UnreadableThreadStates) + 1;
++constexpr size_t numberOfDiagnosticCounters = static_cast<size_t>(DiagnosticCounter::ImagesWithoutFile) + 1;
+ 
+ // Mya may be used on corrupted target heaps; we must be able to
+ // use and test it in these cases without crashing, and
+diff --git a/Source/JavaScriptCore/corpse/CorpseImage.cpp b/Source/JavaScriptCore/corpse/CorpseImage.cpp
+new file mode 100644
+index 000000000000..0b4632e4d64c
+--- /dev/null
++++ b/Source/JavaScriptCore/corpse/CorpseImage.cpp
+@@ -0,0 +1,377 @@
++/*
++ * Copyright (C) 2026 Igalia S.L.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#include "config.h"
++#include "CorpseImage.h"
++
++#if ENABLE(MYA)
++
++#include "CorpseError.h"
++#include "CorpseLimits.h"
++#include "CorpseProcess.h"
++#include "CorpseSnapshot.h"
++#include <algorithm>
++
++#if OS(DARWIN)
++#include <mach-o/dyld_images.h>
++#include <wtf/HashMap.h>
++#else
++#include <charconv>
++#include <elf.h>
++#include <errno.h>
++#include <fcntl.h>
++#include <link.h>
++#include <memory>
++#include <stdlib.h>
++#include <string.h>
++#include <string>
++#include <string_view>
++#include <unistd.h>
++#include <wtf/SafeStrerror.h>
++#include <wtf/StdLibExtras.h>
++#include <wtf/text/MakeString.h>
++#endif
++
++namespace JSC {
++namespace Corpse {
++
++static std::optional<UTF8CString> readPath(Memory& memory, Address address)
++{
++    // Read a page at a time: the string may end just before an unmapped page.
++    Vector<char8_t> characters;
++    size_t pageSize = Memory::pageSize();
++    while (characters.size() < maxImagePathLength) {
++        Address next = address + characters.size();
++        size_t toPageEnd = pageSize - (next.toTargetVMAddress() & (pageSize - 1));
++        auto chunk = memory.span<char8_t>(next, std::min(toPageEnd, maxImagePathLength - characters.size()));
++        if (!chunk)
++            return std::nullopt;
++        size_t length = std::ranges::find(chunk, u8'\0') - chunk.begin();
++        characters.append(chunk.first(length));
++        if (length < chunk.size())
++            return UTF8CString(characters.span());
++    }
++    return std::nullopt;
++}
++
++#if OS(DARWIN)
++
++// dyld lists a UUID for every image outside the shared cache. Shared-cache
++// images have no debug info to find, so they are not listed here.
++Vector<Image> Image::collect(Snapshot& snapshot)
++{
++    auto allImages = snapshot.dyldAllImageInfos();
++    if (!allImages)
++        return { };
++
++    Address uuidsAddress = Address { allImages->uuidArray }.stripped();
++    uint64_t uuidCount = allImages->uuidArrayCount;
++    Address infosAddress = Address { allImages->infoArray }.stripped();
++    uint32_t infoCount = allImages->infoArrayCount;
++    if (!uuidsAddress || !uuidCount || !infosAddress || !infoCount) {
++        CORPSE_REPORT("dyld_all_image_infos v%u lists %llu image UUIDs and %u images",
++            allImages->version, static_cast<unsigned long long>(uuidCount), infoCount);
++        return { };
++    }
++    if (uuidCount > maxImageCount || infoCount > maxImageCount) {
++        CORPSE_REPORT("%llu image UUIDs and %u images is too many to be a real image list",
++            static_cast<unsigned long long>(uuidCount), infoCount);
++        return { };
++    }
++
++    Memory& memory = snapshot.memory();
++    auto uuids = memory.span<dyld_uuid_info>(uuidsAddress, uuidCount);
++    if (!uuids) {
++        CORPSE_REPORT("Could not read the %llu image UUIDs at 0x%llx", static_cast<unsigned long long>(uuidCount), uuidsAddress.toTargetVMAddress());
++        return { };
++    }
++    auto infos = memory.span<dyld_image_info>(infosAddress, infoCount);
++    if (!infos) {
++        CORPSE_REPORT("Could not read the %u image entries at 0x%llx", infoCount, infosAddress.toTargetVMAddress());
++        return { };
++    }
++    Diagnostics::count(DiagnosticCounter::ImagesListed, uuidCount);
++
++    HashMap<Address, Address> pathAddresses;
++    for (const dyld_image_info& info : infos) {
++        Address loadAddress = Address { info.imageLoadAddress }.stripped();
++        if (loadAddress && loadAddress != Address::deletedValue())
++            pathAddresses.add(loadAddress, Address { info.imageFilePath }.stripped());
++    }
++
++    Vector<Image> result;
++    result.reserveInitialCapacity(uuids.size());
++    for (const dyld_uuid_info& entry : uuids) {
++        Address loadAddress = Address { entry.imageLoadAddress }.stripped();
++        auto pathAddress = loadAddress && loadAddress != Address::deletedValue() ? pathAddresses.getOptional(loadAddress) : std::nullopt;
++        auto path = pathAddress ? readPath(memory, *pathAddress) : std::nullopt;
++        if (!path) {
++            Diagnostics::count(DiagnosticCounter::ImagesWithoutPath);
++            continue;
++        }
++        UUID uuid;
++        std::ranges::copy(entry.imageUUID, uuid.begin());
++        result.append(Image { loadAddress, WTF::move(*path), uuid });
++    }
++    return result;
++}
++
++#else
++
++static unsigned long long forReport(Address address)
++{
++    return address.toTargetVMAddress();
++}
++
++// glibc's r_debug, found as ld.so's debugger interface says: the kernel's
++// auxiliary vector gives the executable's program headers, whose PT_DYNAMIC
++// has a DT_DEBUG entry that ld.so points at r_debug.
++static std::optional<Address> loaderDebugState(Memory& memory, int pid)
++{
++    ASCIICString auxvPath = makeString("/proc/"_s, pid, "/auxv"_s).ascii();
++    int file = open(auxvPath.data(), O_RDONLY | O_CLOEXEC);
++    if (file < 0) {
++        CORPSE_REPORT("Could not open the auxiliary vector of pid %d: %s", pid, safeStrerror(errno).legacyCStringPointer());
++        return std::nullopt;
++    }
++    std::array<Elf64_auxv_t, maxAuxiliaryVectorEntries> auxv;
++    ssize_t length = read(file, auxv.data(), sizeof(auxv));
++    close(file);
++    Address programHeadersAddress;
++    uint64_t programHeaderCount = 0;
++    for (const Elf64_auxv_t& entry : std::span { auxv }.first(std::max<ssize_t>(length, 0) / sizeof(Elf64_auxv_t))) {
++        if (entry.a_type == AT_PHDR)
++            programHeadersAddress = Address { entry.a_un.a_val };
++        else if (entry.a_type == AT_PHNUM)
++            programHeaderCount = entry.a_un.a_val;
++    }
++    if (!programHeadersAddress || !programHeaderCount || programHeaderCount > maxProgramHeaders) {
++        CORPSE_REPORT("The auxiliary vector of pid %d gives %llu program headers at 0x%llx",
++            pid, static_cast<unsigned long long>(programHeaderCount), forReport(programHeadersAddress));
++        return std::nullopt;
++    }
++    auto programHeaders = memory.span<Elf64_Phdr>(programHeadersAddress, programHeaderCount);
++    if (!programHeaders) {
++        CORPSE_REPORT("Could not read the executable's program headers at 0x%llx", forReport(programHeadersAddress));
++        return std::nullopt;
++    }
++
++    // PT_PHDR is where the headers are before the slide.
++    std::optional<uint64_t> slide;
++    std::optional<uint64_t> dynamic;
++    for (const Elf64_Phdr& header : programHeaders) {
++        if (header.p_type == PT_PHDR)
++            slide = programHeadersAddress.toTargetVMAddress() - header.p_vaddr;
++        else if (header.p_type == PT_DYNAMIC)
++            dynamic = header.p_vaddr;
++    }
++    if (!slide || !dynamic) {
++        CORPSE_REPORT("The executable of pid %d has no PT_PHDR or no PT_DYNAMIC", pid);
++        return std::nullopt;
++    }
++
++    for (size_t index = 0; index < maxDynamicEntries; ++index) {
++        auto entry = memory.ptr<Elf64_Dyn>(Address { *slide + *dynamic } + index * sizeof(Elf64_Dyn));
++        if (!entry || entry->d_tag == DT_NULL)
++            break;
++        if (entry->d_tag == DT_DEBUG && entry->d_un.d_ptr)
++            return Address { entry->d_un.d_ptr };
++    }
++    CORPSE_REPORT("The executable of pid %d has no DT_DEBUG that ld.so filled in", pid);
++    return std::nullopt;
++}
++
++// Where each file is mapped at offset 0, which is where its ELF header is,
++// from /proc/<pid>/maps.
++struct FileStart {
++    uint64_t address;
++    std::string path;
++    // The kernel marks a mapping " (deleted)" when its file was unlinked, as a
++    // linker, install or a package manager does when it writes a new file at the path.
++    bool replaced { false };
++};
++
++static constexpr std::string_view deletedSuffix = " (deleted)";
++
++static Vector<FileStart> fileStarts(int pid)
++{
++    Vector<FileStart> result;
++    auto maps = readProcFile(pid, "maps");
++    if (!maps) {
++        CORPSE_REPORT("Could not read the memory map of pid %d", pid);
++        return result;
++    }
++    // "start-end perms offset dev inode path", with the path, if any, last.
++    std::string_view rest { *maps };
++    while (!rest.empty()) {
++        size_t lineEnd = std::min(rest.find('\n'), rest.size());
++        std::string_view line = rest.substr(0, lineEnd);
++        rest.remove_prefix(std::min(lineEnd + 1, rest.size()));
++        Vector<std::string_view, 6> fields;
++        while (fields.size() < 5 && !line.empty()) {
++            size_t start = line.find_first_not_of(' ');
++            if (start == std::string_view::npos)
++                break;
++            line.remove_prefix(start);
++            size_t end = std::min(line.find(' '), line.size());
++            fields.append(line.substr(0, end));
++            line.remove_prefix(end);
++        }
++        size_t pathStart = line.find_first_not_of(' ');
++        if (fields.size() < 5 || pathStart == std::string_view::npos || line[pathStart] != '/')
++            continue;
++        uint64_t start = 0;
++        uint64_t offset = 0;
++        std::string_view range = fields[0];
++        if (std::from_chars(range.data(), range.data() + range.size(), start, 16).ec != std::errc { }
++            || std::from_chars(fields[2].data(), fields[2].data() + fields[2].size(), offset, 16).ec != std::errc { } || offset)
++            continue;
++        std::string_view path = line.substr(pathStart);
++        bool replaced = path.ends_with(deletedSuffix);
++        if (replaced)
++            path.remove_suffix(deletedSuffix.size());
++        result.append({ start, std::string { path }, replaced });
++    }
++    return result;
++}
++
++// The NT_GNU_BUILD_ID note in the PT_NOTE segments of the image whose ELF
++// header is at `header` and which the loader slid by `slide`.
++static std::optional<Vector<uint8_t>> buildIDOf(Memory& memory, Address header, uint64_t slide)
++{
++    auto elfHeader = memory.ptr<Elf64_Ehdr>(header);
++    if (!elfHeader || memcmp(elfHeader->e_ident, ELFMAG, SELFMAG) || !elfHeader->e_phnum || elfHeader->e_phnum > maxProgramHeaders)
++        return std::nullopt;
++    auto programHeaders = memory.span<Elf64_Phdr>(header + elfHeader->e_phoff, elfHeader->e_phnum);
++    if (!programHeaders)
++        return std::nullopt;
++    for (const Elf64_Phdr& programHeader : programHeaders) {
++        if (programHeader.p_type != PT_NOTE || !programHeader.p_filesz || programHeader.p_filesz > maxNoteSegmentSize)
++            continue;
++        auto notes = memory.span<uint8_t>(Address { slide + programHeader.p_vaddr }, programHeader.p_filesz);
++        if (!notes)
++            continue;
++        std::span<const uint8_t> rest { notes };
++        size_t alignment = programHeader.p_align == 8 ? 8 : 4;
++        while (rest.size() >= sizeof(Elf64_Nhdr)) {
++            Elf64_Nhdr note;
++            memcpySpan(asMutableByteSpan(note), rest.first(sizeof(note)));
++            size_t nameSize = roundUpToMultipleOf(alignment, note.n_namesz);
++            size_t descriptorSize = roundUpToMultipleOf(alignment, note.n_descsz);
++            if (nameSize + descriptorSize > rest.size() - sizeof(note))
++                break;
++            std::span<const uint8_t> name = rest.subspan(sizeof(note), note.n_namesz);
++            std::span<const uint8_t> descriptor = rest.subspan(sizeof(note) + nameSize, note.n_descsz);
++            constexpr std::array<uint8_t, 4> gnu { 'G', 'N', 'U', '\0' };
++            if (note.n_type == NT_GNU_BUILD_ID && std::ranges::equal(name, std::span { gnu }) && !descriptor.empty())
++                return Vector<uint8_t> { descriptor };
++            rest = rest.subspan(sizeof(note) + nameSize + descriptorSize);
++        }
++    }
++    return std::nullopt;
++}
++
++// ld.so lists every image it loaded in r_debug's link_map chain, as dyld does
++// in dyld_all_image_infos. The pid is the copy's, whose memory, mappings and
++// auxiliary vector are the target's.
++Vector<Image> Image::collect(Snapshot& snapshot)
++{
++    int pid = static_cast<int>(snapshot.corpsePort());
++    Memory& memory = snapshot.memory();
++    auto debugStateAddress = loaderDebugState(memory, pid);
++    if (!debugStateAddress)
++        return { };
++    auto debugState = memory.ptr<r_debug>(*debugStateAddress);
++    if (!debugState) {
++        CORPSE_REPORT("Could not read r_debug at 0x%llx", forReport(*debugStateAddress));
++        return { };
++    }
++
++    Vector<FileStart> starts = fileStarts(pid);
++    Vector<Image> result;
++    unsigned listed = 0;
++    for (Address next { debugState->r_map }; next; ++listed) {
++        if (listed >= maxImageCount) {
++            CORPSE_REPORT("pid %d has more than %u images, too many to be a real image list", pid, maxImageCount);
++            return { };
++        }
++        auto entry = memory.ptr<link_map>(next);
++        if (!entry) {
++            CORPSE_REPORT("Could not read the link_map at 0x%llx", forReport(next));
++            break;
++        }
++        next = Address { entry->l_next };
++        auto path = readPath(memory, Address { entry->l_name });
++        // Only the executable's entry has no name. /proc/<pid>/exe marks a
++        // replaced executable as maps does.
++        if (path && !path->length()) {
++            path = executablePathOf(pid);
++            std::string_view exe { path->length() ? path->legacyCStringPointer() : "" };
++            if (exe.ends_with(deletedSuffix))
++                path = UTF8CString(byteCast<char8_t>(std::span { exe.data(), exe.size() - deletedSuffix.size() }));
++        }
++        if (!path || !path->length()) {
++            Diagnostics::count(DiagnosticCounter::ImagesWithoutPath);
++            continue;
++        }
++
++        // The file's lowest mapping at offset 0 at or above its slide is the
++        // loader's; another, such as one liblldb maps in this process, is lower.
++        std::unique_ptr<char, decltype(&free)> canonicalPath { realpath(path->legacyCStringPointer(), nullptr), &free };
++        const FileStart* fileStart = nullptr;
++        for (const FileStart& start : starts) {
++            if (canonicalPath && start.path == canonicalPath.get() && start.address >= entry->l_addr && (!fileStart || start.address < fileStart->address))
++                fileStart = &start;
++        }
++        if (fileStart && fileStart->replaced) {
++            // The file at the path is another, which liblldb would read as this image.
++            CORPSE_REPORT("The file of the image '%s' of pid %d was replaced after it was loaded", path->legacyCStringPointer(), pid);
++            continue;
++        }
++        std::optional<uint64_t> header;
++        if (fileStart)
++            header = fileStart->address;
++        if (!header) {
++            // The vDSO, which no file holds.
++            Diagnostics::count(DiagnosticCounter::ImagesWithoutFile);
++            continue;
++        }
++        auto buildID = buildIDOf(memory, Address { *header }, entry->l_addr);
++        if (!buildID) {
++            CORPSE_REPORT("The image '%s' of pid %d has no build-id, so a rebuilt file could not be told from it", path->legacyCStringPointer(), pid);
++            continue;
++        }
++        result.append(Image { Address { entry->l_addr }, WTF::move(*path), WTF::move(*buildID), Address { entry->l_ld } });
++    }
++    Diagnostics::count(DiagnosticCounter::ImagesListed, listed);
++    return result;
++}
++
++#endif // OS(DARWIN)
++
++} // namespace Corpse
++} // namespace JSC
++
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseImage.h b/Source/JavaScriptCore/corpse/CorpseImage.h
+new file mode 100644
+index 000000000000..2e3c0ea73d10
+--- /dev/null
++++ b/Source/JavaScriptCore/corpse/CorpseImage.h
+@@ -0,0 +1,97 @@
++/*
++ * Copyright (C) 2026 Igalia S.L.
++ *
++ * Redistribution and use in source and binary forms, with or without
++ * modification, are permitted provided that the following conditions
++ * are met:
++ * 1. Redistributions of source code must retain the above copyright
++ *    notice, this list of conditions and the following disclaimer.
++ * 2. Redistributions in binary form must reproduce the above copyright
++ *    notice, this list of conditions and the following disclaimer in the
++ *    documentation and/or other materials provided with the distribution.
++ *
++ * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
++ * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
++ * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
++ * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
++ * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
++ * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
++ * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
++ * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
++ * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
++ * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
++ * THE POSSIBILITY OF SUCH DAMAGE.
++ */
++
++#pragma once
++
++#include <JavaScriptCore/CorpsePlatform.h>
++
++#if ENABLE(MYA)
++
++#include <JavaScriptCore/CorpseAddress.h>
++#include <array>
++#include <stdint.h>
++#include <wtf/Vector.h>
++#include <wtf/text/CString.h>
++
++namespace JSC {
++namespace Corpse {
++
++class Snapshot;
++
++// One image (the executable or a shared library) mapped into a snapshot.
++class Image {
++public:
++    // Where the image's header is mapped. On Linux this is link_map's l_addr,
++    // the slide, which is where the header is in a position-independent image.
++    Address loadAddress() const { return m_loadAddress; }
++
++    // What the loader recorded when it loaded the image.
++    const UTF8CString& path() const { return m_path; }
++
++#if OS(DARWIN)
++    using UUID = std::array<uint8_t, 16>;
++    const UUID& uuid() const { return m_uuid; }
++#else
++    // The NT_GNU_BUILD_ID note of the image as it is mapped.
++    const Vector<uint8_t>& buildID() const { return m_buildID; }
++    // Its dynamic section in memory, link_map's l_ld.
++    Address dynamicSection() const { return m_dynamicSection; }
++#endif
++
++private:
++    friend class Snapshot;
++    static Vector<Image> collect(Snapshot&);
++
++#if OS(DARWIN)
++    Image(Address loadAddress, UTF8CString&& path, const UUID& uuid)
++        : m_loadAddress(loadAddress)
++        , m_path(WTF::move(path))
++        , m_uuid(uuid)
++    {
++    }
++#else
++    Image(Address loadAddress, UTF8CString&& path, Vector<uint8_t>&& buildID, Address dynamicSection)
++        : m_loadAddress(loadAddress)
++        , m_path(WTF::move(path))
++        , m_buildID(WTF::move(buildID))
++        , m_dynamicSection(dynamicSection)
++    {
++    }
++#endif
++
++    Address m_loadAddress;
++    UTF8CString m_path;
++#if OS(DARWIN)
++    UUID m_uuid;
++#else
++    Vector<uint8_t> m_buildID;
++    Address m_dynamicSection;
++#endif
++};
++
++} // namespace Corpse
++} // namespace JSC
++
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseLimits.h b/Source/JavaScriptCore/corpse/CorpseLimits.h
+index 3f3225f495a2..21d17e26d5a3 100644
+--- a/Source/JavaScriptCore/corpse/CorpseLimits.h
++++ b/Source/JavaScriptCore/corpse/CorpseLimits.h
+@@ -51,6 +51,11 @@ namespace Corpse {
+ constexpr size_t maxLoadCommandsSize = 128 * KB; // About 17× the measured maximum.
+ constexpr size_t maxExportsTrieSize = 16 * MB; // About 8× the measured maximum.
+ constexpr uint32_t maxImageCount = 16 * 1024; // About 6× the measured maximum.
++constexpr size_t maxImagePathLength = 4 * KB; // 4× PATH_MAX.
++constexpr size_t maxAuxiliaryVectorEntries = 128; // Linux gives about 20.
++constexpr uint64_t maxProgramHeaders = 256; // An ELF object has about 12.
++constexpr size_t maxDynamicEntries = 4096; // A shared library has about 40.
++constexpr uint64_t maxNoteSegmentSize = 64 * KB; // A build-id note is 36 bytes.
+ constexpr size_t maxRegionCount = 1024 * 1024; // A large process maps tens of thousands.
+ 
+ // A lookup that finds nothing will read every image's load commands and exports
+diff --git a/Source/JavaScriptCore/corpse/CorpseSnapshot.cpp b/Source/JavaScriptCore/corpse/CorpseSnapshot.cpp
+index 86f16d741c30..bb44f793a506 100644
+--- a/Source/JavaScriptCore/corpse/CorpseSnapshot.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseSnapshot.cpp
+@@ -32,8 +32,10 @@
+ #include "CorpseError.h"
+ 
+ #if OS(DARWIN)
++#include <mach-o/dyld_images.h>
+ #include <mach/mach.h>
+ #include <mach/mach_error.h>
++#include <mach/task_info.h>
+ #else
+ #include <array>
+ #include <errno.h>
+@@ -65,6 +67,20 @@ const Vector<Thread>& Snapshot::threads()
+     return *m_threads;
+ }
+ 
++const Vector<Image>& Snapshot::images()
++{
++    if (!m_images) {
++        if (!isValid()) {
++            CORPSE_REPORT("Cannot list the images of an invalid snapshot");
++            m_images = Vector<Image> { };
++        } else {
++            CORPSE_DIAGNOSTICS(diagnostics, "listing the images of pid %d", static_cast<int>(process()->pid()));
++            m_images = Image::collect(*this);
++        }
++    }
++    return *m_images;
++}
++
+ const Vector<Region>& Snapshot::regions()
+ {
+     if (!m_regions) {
+@@ -77,6 +93,31 @@ const Vector<Region>& Snapshot::regions()
+     return *m_regions;
+ }
+ 
++#if OS(DARWIN)
++
++Memory::Ptr<dyld_all_image_infos> Snapshot::dyldAllImageInfos()
++{
++    task_dyld_info_data_t dyldInfo;
++    mach_msg_type_number_t count = TASK_DYLD_INFO_COUNT;
++    kern_return_t kr = task_info(corpsePort(), TASK_DYLD_INFO, reinterpret_cast<task_info_t>(&dyldInfo), &count);
++    if (kr != KERN_SUCCESS) {
++        CORPSE_REPORT("Could not read dyld information: %s (0x%x)", mach_error_string(kr), kr);
++        return { };
++    }
++
++    Address address { dyldInfo.all_image_info_addr };
++    if (!address) {
++        CORPSE_REPORT("dyld reports no image list");
++        return { };
++    }
++    auto allImages = memory().ptr<dyld_all_image_infos>(address);
++    if (!allImages)
++        CORPSE_REPORT("Could not read dyld_all_image_infos at 0x%llx", address.toTargetVMAddress());
++    return allImages;
++}
++
++#endif // OS(DARWIN)
++
+ Address Snapshot::symbol(const char* name)
+ {
+     if (!name || !*name) {
+diff --git a/Source/JavaScriptCore/corpse/CorpseSnapshot.h b/Source/JavaScriptCore/corpse/CorpseSnapshot.h
+index 7324b91d5169..5d2b6a2ade06 100644
+--- a/Source/JavaScriptCore/corpse/CorpseSnapshot.h
++++ b/Source/JavaScriptCore/corpse/CorpseSnapshot.h
+@@ -30,6 +30,7 @@
+ #if ENABLE(MYA)
+ 
+ #include <JavaScriptCore/CorpseAddress.h>
++#include <JavaScriptCore/CorpseImage.h>
+ #include <JavaScriptCore/CorpseMemory.h>
+ #include <JavaScriptCore/CorpseProcess.h>
+ #include <JavaScriptCore/CorpseRegion.h>
+@@ -48,6 +49,10 @@
+ #include <wtf/text/StringView.h>
+ #include <wtf/text/WTFString.h>
+ 
++#if OS(DARWIN)
++struct dyld_all_image_infos;
++#endif
++
+ namespace JSC {
+ namespace Corpse {
+ 
+@@ -94,11 +99,17 @@ public:
+         return m_memory;
+     }
+ 
+-    // The threads captured in this corpse, read and cached on the first call.
++    // The threads and images captured in this corpse, read and cached on the first call.
+     const Vector<Thread>& threads();
++    const Vector<Image>& images();
+     // The regions of the snapshot's memory, listed and cached on the first call.
+     const Vector<Region>& regions();
+ 
++#if OS(DARWIN)
++    // dyld's record of the loaded images. Invalid, having reported why, if it cannot be read.
++    Memory::Ptr<dyld_all_image_infos> dyldAllImageInfos();
++#endif
++
+     // The address of `name` in this corpse, null if it is not there.
+     Address symbol(const char* name);
+ 
+@@ -113,6 +124,7 @@ private:
+     unsigned m_id;
+ 
+     std::optional<Vector<Thread>> m_threads;
++    std::optional<Vector<Image>> m_images;
+     std::optional<Vector<Region>> m_regions;
+     HashMap<String, std::unique_ptr<Symbol>> m_symbols;
+     Memory m_memory;
+diff --git a/Source/JavaScriptCore/corpse/CorpseSymbol.cpp b/Source/JavaScriptCore/corpse/CorpseSymbol.cpp
+index 28ebee845d2d..b6004077ef9d 100644
+--- a/Source/JavaScriptCore/corpse/CorpseSymbol.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseSymbol.cpp
+@@ -37,9 +37,6 @@
+ #if OS(DARWIN)
+ #include <mach-o/dyld_images.h>
+ #include <mach-o/loader.h>
+-#include <mach/mach.h>
+-#include <mach/mach_error.h>
+-#include <mach/task_info.h>
+ #endif
+ #include <optional>
+ #include <span>
+@@ -257,30 +254,15 @@ Address Symbol::lookUpName(Snapshot& snapshot)
+     Memory& memory = snapshot.memory();
+ 
+     // dyld publishes the list of loaded images; search each one in turn.
+-    task_dyld_info_data_t dyldInfo;
+-    mach_msg_type_number_t count = TASK_DYLD_INFO_COUNT;
+-    kern_return_t kr = task_info(snapshot.corpsePort(), TASK_DYLD_INFO, reinterpret_cast<task_info_t>(&dyldInfo), &count);
+-    if (kr != KERN_SUCCESS) {
+-        CORPSE_REPORT("Could not read dyld information: %s (0x%x)", mach_error_string(kr), kr);
++    auto allImages = snapshot.dyldAllImageInfos();
++    if (!allImages)
+         return { };
+-    }
+-
+-    Address allImageInfosAddress { dyldInfo.all_image_info_addr };
+-    if (!allImageInfosAddress) {
+-        CORPSE_REPORT("dyld reports no image list");
+-        return { };
+-    }
+-    auto allImages = memory.ptr<dyld_all_image_infos>(allImageInfosAddress);
+-    if (!allImages) {
+-        CORPSE_REPORT("Could not read dyld_all_image_infos at 0x%llx", allImageInfosAddress.toTargetVMAddress());
+-        return { };
+-    }
+ 
+     Address arrayAddress = Address { allImages->infoArray }.stripped();
+     uint32_t imageCount = allImages->infoArrayCount;
+     if (!arrayAddress || !imageCount) {
+         CORPSE_REPORT("dyld_all_image_infos v%u at 0x%llx lists no images",
+-            allImages->version, allImageInfosAddress.toTargetVMAddress());
++            allImages->version, allImages.address().toTargetVMAddress());
+         return { };
+     }
+     // Each image below costs a Mach round-trip and two buffer reads, so an
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.cpp b/Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.cpp
+index 8003c61b8156..ba3e044dfce1 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.cpp
++++ b/Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.cpp
+@@ -29,8 +29,12 @@
+ 
+ #include "LibJSCToolsTestUtilities.h"
+ 
++#include <JavaScriptCore/CorpseImage.h>
+ #include <JavaScriptCore/CorpseProcess.h>
+ #include <JavaScriptCore/CorpseSnapshot.h>
++#include <JavaScriptCore/JSContextRef.h>
++#include <algorithm>
++#include <dlfcn.h>
+ #include <errno.h>
+ #include <mutex>
+ #include <pthread.h>
+@@ -39,6 +43,7 @@
+ #if OS(DARWIN)
+ #include <mach/mach.h>
+ #else
++#include <sys/stat.h>
+ #include <sys/wait.h>
+ #endif
+ #include <unistd.h>
+@@ -46,10 +51,72 @@
+ namespace JSCToolsTest {
+ 
+ using JSC::Corpse::Address;
++using JSC::Corpse::Image;
+ using JSC::Corpse::Process;
+ using JSC::Corpse::Snapshot;
+ using JSC::Corpse::TaskHandle;
+ 
++static const Image* imageContaining(const Vector<Image>& images, const void* function)
++{
++    Dl_info info;
++    if (!dladdr(function, &info) || !info.dli_fbase) {
++        TEST_ASSERT(false, "dladdr finds the image of every function the test looks for");
++        return nullptr;
++    }
++    Address base { info.dli_fbase };
++    for (const Image& image : images) {
++        if (image.loadAddress() != base)
++            continue;
++#if OS(LINUX)
++        struct stat fromImage;
++        struct stat fromLoader;
++        TEST_ASSERT(!stat(image.path().legacyCStringPointer(), &fromImage) && !stat(info.dli_fname, &fromLoader)
++            && fromImage.st_dev == fromLoader.st_dev && fromImage.st_ino == fromLoader.st_ino,
++            "an image's path names the file the loader mapped there");
++#endif
++        return &image;
++    }
++    return nullptr;
++}
++
++static void testImages(RefPtr<Process> process)
++{
++    Snapshot snapshot(process);
++    const Vector<Image>& images = snapshot.images();
++    TEST_ASSERT(!images.isEmpty(), "a snapshot lists the images of its process");
++    TEST_ASSERT(&snapshot.images() == &images, "the image list is read once");
++
++    const Image* executable = imageContaining(images, reinterpret_cast<const void*>(&testSnapshot));
++    TEST_ASSERT(executable, "the image list has this executable, at the address the loader put it");
++    const Image* javaScriptCore = imageContaining(images, reinterpret_cast<const void*>(&JSGlobalContextCreate));
++    TEST_ASSERT(javaScriptCore, "the image list has JavaScriptCore, at the address the loader put it");
++
++    unsigned withoutPath = 0;
++    for (const Image& image : images) {
++        if (!image.path().length())
++            ++withoutPath;
++    }
++    TEST_ASSERT_EQ(withoutPath, 0u, "every image has a path");
++
++#if OS(DARWIN)
++    unsigned withoutUUID = 0;
++    for (const Image& image : images) {
++        if (std::ranges::all_of(image.uuid(), [](uint8_t byte) { return !byte; }))
++            ++withoutUUID;
++    }
++    TEST_ASSERT_EQ(withoutUUID, 0u, "every image has a UUID");
++    if (executable && javaScriptCore)
++        TEST_ASSERT(executable->uuid() != javaScriptCore->uuid(), "two images have two UUIDs");
++
++    // Shared-cache images have no debug info, so they are left out.
++    TEST_ASSERT(!imageContaining(images, reinterpret_cast<const void*>(&malloc)),
++        "a shared-cache image is not listed");
++#else
++    TEST_ASSERT(imageContaining(images, reinterpret_cast<const void*>(&malloc)),
++        "the image list has libc");
++#endif
++}
++
+ // A global the target changes after the snapshot is taken.
+ static volatile uint64_t changingGlobal;
+ 
+@@ -197,11 +264,13 @@ void testSnapshot()
+         TEST_ASSERT(later.id() > firstId + 1, "identifiers are not reused after a snapshot is destroyed");
+     }
+     {
+-        ExpectedErrors expectedErrors(3);
++        ExpectedErrors expectedErrors(4);
+         RefPtr<Process> unattached = Process::create(getpid());
+         Snapshot snapshot(unattached);
+         TEST_ASSERT(!snapshot.isValid(), "a snapshot of an unattached process is invalid");
+         TEST_ASSERT(snapshot.threads().isEmpty(), "an invalid snapshot reports no threads");
++        TEST_ASSERT(snapshot.images().isEmpty(), "an invalid snapshot reports no images");
++        TEST_ASSERT(snapshot.images().isEmpty(), "and reports it once");
+         TEST_ASSERT(!snapshot.symbol("g_config"), "an invalid snapshot resolves no symbol");
+     }
+     {
+@@ -218,6 +287,7 @@ void testSnapshot()
+         TEST_ASSERT(!snapshot.symbol(nullptr), "an unnamed symbol resolves to nothing");
+         TEST_ASSERT(!snapshot.symbol(""), "an empty symbol name resolves to nothing");
+     }
++    testImages(process);
+     testCopies();
+ 
+ #if OS(DARWIN)
+-- 
+2.54.0 (Apple Git-157)
+

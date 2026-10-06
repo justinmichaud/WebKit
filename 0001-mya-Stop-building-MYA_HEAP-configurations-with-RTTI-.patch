@@ -1,0 +1,772 @@
+From c78bc654eb6bbfe9c88f247271408ed3c9ee7284 Mon Sep 17 00:00:00 2001
+From: Justin Michaud <jmichaud@igalia.com>
+Date: Tue, 6 Oct 2026 10:19:56 -0600
+Subject: [PATCH 01/23] [mya] Stop building MYA_HEAP configurations with RTTI
+ and default symbol visibility Need the bug URL (OOPS!).
+
+Reviewed by NOBODY (OOPS!).
+
+Build flags only (plus the one test that needed them).
+
+MYA_HEAP builds currently turn on -frtti and turn off -fvisibility=hidden /
+GCC_SYMBOLS_PRIVATE_EXTERN (and TAPI) for every WebKit project, so that mya
+could name an object's dynamic type through its std::type_info and the
+type_infos of base classes resolved across images. The heap walk now reads
+types from DWARF through liblldb instead: an object's dynamic type comes from
+the destructor in its vtable, whose linkage name the debug info has (see the
+debug info patch later in this series). Nothing needs a type_info any more.
+
+Why take it:
+- The MYA_HEAP configuration (Debug, macOS) goes back to compiling and linking
+  the way every other Debug build does: no RTTI, hidden visibility, TAPI on.
+  Debug MYA_HEAP builds and ordinary Debug builds then differ only in debug
+  info, which is what mya actually reads.
+- Exporting every symbol made images bigger, link slower, and hid ODR and
+  export-list mistakes that a production build would catch.
+
+What we lose if it is not taken: nothing functional in the rest of this
+series; it only keeps paying the RTTI/visibility cost in MYA_HEAP builds.
+
+TypeinfoTest.cpp, the test that checked RTTI and liblldb agree, goes with it;
+the DebugInfo suite added later replaces it.
+
+Note: this reverts the RTTI and visibility flags the prototype stopped using.
+WebCore, PAL, WebGPU, WebKit, ANGLE and libwebrtc still have
+MYA_HEAP-conditional GCC_SYMBOLS_PRIVATE_EXTERN / TAPI / export settings from
+the earlier patch; whether those can go too should be checked separately.
+
+* Source/JavaScriptCore/Configurations/Base.xcconfig:
+* Source/JavaScriptCore/Configurations/BaseTarget.xcconfig:
+* Source/JavaScriptCore/Configurations/JavaScriptCore.xcconfig:
+* Source/JavaScriptCore/JavaScriptCore.xcodeproj/project.pbxproj:
+* Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h:
+* Source/JavaScriptCore/corpse/tests/TypeinfoTest.cpp: Removed.
+* Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp:
+* Source/JavaScriptCore/shell/CMakeLists.txt:
+* Source/ThirdParty/ANGLE/Configurations/Base.xcconfig:
+* Source/ThirdParty/gmock/Configurations/Base.xcconfig:
+* Source/ThirdParty/libwebrtc/Configurations/Base.xcconfig:
+* Source/WTF/Configurations/Base.xcconfig:
+* Source/WTF/Configurations/WTF.xcconfig:
+* Source/WebCore/Configurations/Base.xcconfig:
+* Source/WebCore/PAL/Configurations/Base.xcconfig:
+* Source/WebCore/PAL/ThirdParty/dav1d/Configurations/Base.xcconfig:
+* Source/WebGPU/Configurations/Base.xcconfig:
+* Source/WebInspectorUI/Configurations/Base.xcconfig:
+* Source/WebKit/Configurations/Base.xcconfig:
+* Source/bmalloc/Configurations/Base.xcconfig:
+* Source/bmalloc/Configurations/bmalloc.xcconfig:
+* Source/cmake/OptionsCocoa.cmake:
+* Source/cmake/WebKitCommon.cmake:
+* Tools/DumpRenderTree/mac/Configurations/Base.xcconfig:
+* Tools/ImageDiff/cg/Configurations/Base.xcconfig:
+* Tools/MobileMiniBrowser/Configurations/Base.xcconfig:
+* Tools/TestWebKitAPI/Configurations/Base.xcconfig:
+* Tools/WebKitTestRunner/Configurations/Base.xcconfig:
+* Tools/lldb/lldbWebKitTester/Configurations/Base.xcconfig:
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ .../Configurations/Base.xcconfig              |   2 +-
+ .../Configurations/BaseTarget.xcconfig        |   2 +-
+ .../Configurations/JavaScriptCore.xcconfig    |   7 +-
+ .../JavaScriptCore.xcodeproj/project.pbxproj  |   4 -
+ .../corpse/tests/LibJSCToolsTestUtilities.h   |   1 -
+ .../corpse/tests/TypeinfoTest.cpp             | 259 ------------------
+ .../corpse/tests/testLibJSCTools.cpp          |   1 -
+ Source/JavaScriptCore/shell/CMakeLists.txt    |   1 -
+ .../ANGLE/Configurations/Base.xcconfig        |   2 +-
+ .../gmock/Configurations/Base.xcconfig        |   2 +-
+ .../libwebrtc/Configurations/Base.xcconfig    |   2 +-
+ Source/WTF/Configurations/Base.xcconfig       |   2 +-
+ Source/WTF/Configurations/WTF.xcconfig        |   2 +-
+ Source/WebCore/Configurations/Base.xcconfig   |   2 +-
+ .../WebCore/PAL/Configurations/Base.xcconfig  |   2 +-
+ .../dav1d/Configurations/Base.xcconfig        |   2 +-
+ Source/WebGPU/Configurations/Base.xcconfig    |   2 +-
+ .../Configurations/Base.xcconfig              |   2 +-
+ Source/WebKit/Configurations/Base.xcconfig    |   2 +-
+ Source/bmalloc/Configurations/Base.xcconfig   |   2 +-
+ .../bmalloc/Configurations/bmalloc.xcconfig   |   2 +-
+ Source/cmake/OptionsCocoa.cmake               |  11 +-
+ Source/cmake/WebKitCommon.cmake               |   5 +-
+ .../mac/Configurations/Base.xcconfig          |   2 +-
+ .../ImageDiff/cg/Configurations/Base.xcconfig |   2 +-
+ .../Configurations/Base.xcconfig              |   2 +-
+ .../Configurations/Base.xcconfig              |   2 +-
+ .../Configurations/Base.xcconfig              |   2 +-
+ .../Configurations/Base.xcconfig              |   2 +-
+ 29 files changed, 28 insertions(+), 303 deletions(-)
+ delete mode 100644 Source/JavaScriptCore/corpse/tests/TypeinfoTest.cpp
+
+diff --git a/Source/JavaScriptCore/Configurations/Base.xcconfig b/Source/JavaScriptCore/Configurations/Base.xcconfig
+index 13ee5a73b03f..cefce1d7c216 100644
+--- a/Source/JavaScriptCore/Configurations/Base.xcconfig
++++ b/Source/JavaScriptCore/Configurations/Base.xcconfig
+@@ -55,7 +55,7 @@ GCC_C_LANGUAGE_STANDARD = gnu99;
+ GCC_DEBUGGING_SYMBOLS = default;
+ GCC_DYNAMIC_NO_PIC = NO;
+ GCC_ENABLE_CPP_EXCEPTIONS = NO;
+-GCC_ENABLE_CPP_RTTI = $(WK_MYA_HEAP);
++GCC_ENABLE_CPP_RTTI = NO;
+ GCC_ENABLE_OBJC_EXCEPTIONS = YES;
+ GCC_ENABLE_SYMBOL_SEPARATION = NO;
+ GCC_FAST_OBJC_DISPATCH = YES;
+diff --git a/Source/JavaScriptCore/Configurations/BaseTarget.xcconfig b/Source/JavaScriptCore/Configurations/BaseTarget.xcconfig
+index e628f191ae4e..297fb8bf9773 100644
+--- a/Source/JavaScriptCore/Configurations/BaseTarget.xcconfig
++++ b/Source/JavaScriptCore/Configurations/BaseTarget.xcconfig
+@@ -34,7 +34,7 @@ WK_SWIFT_PGO_GEN_FLAGS_YES = -Xfrontend -ir-profile-generate;
+ 
+ GCC_PREFIX_HEADER = JavaScriptCorePrefix.h;
+ GCC_PREPROCESSOR_DEFINITIONS = $(inherited) $(ENABLE_LLVM_PROFILE_GENERATION_DEFINES);
+-GCC_SYMBOLS_PRIVATE_EXTERN = $(WK_NOT_$(WK_MYA_HEAP));
++GCC_SYMBOLS_PRIVATE_EXTERN = YES;
+ OTHER_CFLAGS = $(inherited) -fno-slp-vectorize --system-header-prefix=unicode/ -D__STDC_WANT_LIB_EXT1__=1 $(WK_CLANG_PGO_GEN_FLAGS);
+ HEADER_SEARCH_PATHS = "${BUILT_PRODUCTS_DIR}/DerivedSources/JavaScriptCore" $(HEADER_SEARCH_PATHS);
+ PRODUCT_NAME = JavaScriptCore;
+diff --git a/Source/JavaScriptCore/Configurations/JavaScriptCore.xcconfig b/Source/JavaScriptCore/Configurations/JavaScriptCore.xcconfig
+index 1bd15f2eff86..67f69ccab641 100644
+--- a/Source/JavaScriptCore/Configurations/JavaScriptCore.xcconfig
++++ b/Source/JavaScriptCore/Configurations/JavaScriptCore.xcconfig
+@@ -98,13 +98,10 @@ SWIFT_STRICT_CONCURRENCY = complete;
+ HEADERMAP_INCLUDES_FRAMEWORK_ENTRIES_FOR_TARGETS_NOT_BEING_BUILT = NO;
+ HEADERMAP_USES_VFS = YES;
+ 
+-// MYA_HEAP builds export every symbol, ignore TAPI.
+-SUPPORTS_TEXT_BASED_API = $(WK_SUPPORTS_TEXT_BASED_API_MYA_HEAP_$(WK_MYA_HEAP));
+-WK_SUPPORTS_TEXT_BASED_API_MYA_HEAP_NO = $(WK_ENABLE_SLOW_BUILD_VERIFICATION);
++SUPPORTS_TEXT_BASED_API = $(WK_ENABLE_SLOW_BUILD_VERIFICATION);
+ // Override to enable SPI checking at desk. Remove once audit-spi works in
+ // production builds (https://bugs.webkit.org/show_bug.cgi?id=299573).
+-WK_SUPPORTS_TEXT_BASED_API_MYA_HEAP_NO[sdk=iphoneos.internal] = YES;
+-WK_SUPPORTS_TEXT_BASED_API_MYA_HEAP_YES = NO;
++SUPPORTS_TEXT_BASED_API[sdk=iphoneos.internal] = YES;
+ TAPI_USE_SRCROOT = YES;
+ TAPI_ENABLE_PROJECT_HEADERS = YES;
+ TAPI_VERIFY_MODE = $(WK_TAPI_VERIFY_MODE_$(WK_ENABLE_SLOW_BUILD_VERIFICATION));
+diff --git a/Source/JavaScriptCore/JavaScriptCore.xcodeproj/project.pbxproj b/Source/JavaScriptCore/JavaScriptCore.xcodeproj/project.pbxproj
+index d6ac754b7c62..f3badae7372a 100644
+--- a/Source/JavaScriptCore/JavaScriptCore.xcodeproj/project.pbxproj
++++ b/Source/JavaScriptCore/JavaScriptCore.xcodeproj/project.pbxproj
+@@ -1862,7 +1862,6 @@
+ 		7E83C40E17D785F3003DC41B /* CorpseSymbolTest.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 7E83C40817D785F3003DC41B /* CorpseSymbolTest.cpp */; };
+ 		7E83C40A17D785F3003DC41B /* testLibJSCTools.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 7E83C40017D785F3003DC41B /* testLibJSCTools.cpp */; };
+ 		1AB0DEAD00000006000D0001 /* CorpseVMTest.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000007000D0001 /* CorpseVMTest.cpp */; };
+-		1AB0DEAD00000004000D0001 /* TypeinfoTest.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000005000D0001 /* TypeinfoTest.cpp */; };
+ 		D68DA6DA907546EFA429D8D2 /* CorpseDiagnosticsTest.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 203DFA350D3248B0A8E7376B /* CorpseDiagnosticsTest.cpp */; };
+ 		7E83C43717D785F3003DC41B /* CorpseExportsTrie.h in Headers */ = {isa = PBXBuildFile; fileRef = 7E83C43517D785F3003DC41B /* CorpseExportsTrie.h */; settings = {ATTRIBUTES = (Private, ); }; };
+ 		56C6C2B7EBDCC63B6ECEA9AD /* CorpseThread.h in Headers */ = {isa = PBXBuildFile; fileRef = 211E3D6CA97F31CEB385A75A /* CorpseThread.h */; settings = {ATTRIBUTES = (Private, ); }; };
+@@ -4536,7 +4535,6 @@
+ 		7E83C40917D785F3003DC41B /* testLibJSCTools */ = {isa = PBXFileReference; explicitFileType = "compiled.mach-o.executable"; includeInIndex = 0; path = testLibJSCTools; sourceTree = BUILT_PRODUCTS_DIR; };
+ 		1AB0DEAD00000007000D0001 /* CorpseVMTest.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseVMTest.cpp; sourceTree = "<group>"; };
+ 		203DFA350D3248B0A8E7376B /* CorpseDiagnosticsTest.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseDiagnosticsTest.cpp; sourceTree = "<group>"; };
+-		1AB0DEAD00000005000D0001 /* TypeinfoTest.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = TypeinfoTest.cpp; sourceTree = "<group>"; };
+ 		44F93E0D2AE71F9F00FFA37C /* JavaScriptCoreFramework.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = JavaScriptCoreFramework.cpp; sourceTree = "<group>"; };
+ 		451539B812DC994500EF7AC4 /* Yarr.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = Yarr.h; path = yarr/Yarr.h; sourceTree = "<group>"; };
+ 		45E12D8806A49B0F00E9DF84 /* jsc.cpp */ = {isa = PBXFileReference; fileEncoding = 30; indentWidth = 4; lastKnownFileType = sourcecode.cpp.cpp; path = jsc.cpp; sourceTree = "<group>"; tabWidth = 4; };
+@@ -6973,7 +6971,6 @@
+ 				7E83C40417D785F3003DC41B /* LibJSCToolsTestUtilities.cpp */,
+ 				7E83C40317D785F3003DC41B /* LibJSCToolsTestUtilities.h */,
+ 				7E83C40017D785F3003DC41B /* testLibJSCTools.cpp */,
+-				1AB0DEAD00000005000D0001 /* TypeinfoTest.cpp */,
+ 			);
+ 			path = tests;
+ 			sourceTree = "<group>";
+@@ -14797,7 +14794,6 @@
+ 				1AB0DEAD00000006000D0001 /* CorpseVMTest.cpp in Sources */,
+ 				7E83C40C17D785F3003DC41B /* LibJSCToolsTestUtilities.cpp in Sources */,
+ 				7E83C40A17D785F3003DC41B /* testLibJSCTools.cpp in Sources */,
+-				1AB0DEAD00000004000D0001 /* TypeinfoTest.cpp in Sources */,
+ 			);
+ 			runOnlyForDeploymentPostprocessing = 0;
+ 		};
+diff --git a/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h b/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h
+index 7188ba5fdff8..ad92fd4b4b2b 100644
+--- a/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h
++++ b/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h
+@@ -81,7 +81,6 @@ void testMemory();
+ void testSnapshot();
+ void testThreads();
+ void fuzzExportsTrie(uint64_t seed, unsigned iterations);
+-void testTypeinfo();
+ void testVM();
+ 
+ // Announces a suite, times it, and reports on the way out. Destroyed on every path out
+diff --git a/Source/JavaScriptCore/corpse/tests/TypeinfoTest.cpp b/Source/JavaScriptCore/corpse/tests/TypeinfoTest.cpp
+deleted file mode 100644
+index 97eaea68f41b..000000000000
+--- a/Source/JavaScriptCore/corpse/tests/TypeinfoTest.cpp
++++ /dev/null
+@@ -1,259 +0,0 @@
+-/*
+- * Copyright (C) 2026 Apple Inc. All rights reserved.
+- * Copyright (C) 2026 Igalia S.L.
+- *
+- * Redistribution and use in source and binary forms, with or without
+- * modification, are permitted provided that the following conditions
+- * are met:
+- * 1. Redistributions of source code must retain the above copyright
+- *    notice, this list of conditions and the following disclaimer.
+- * 2. Redistributions in binary form must reproduce the above copyright
+- *    notice, this list of conditions and the following disclaimer in the
+- *    documentation and/or other materials provided with the distribution.
+- *
+- * THIS SOFTWARE IS PROVIDED BY APPLE INC. AND ITS CONTRIBUTORS ``AS IS''
+- * AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO,
+- * THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR
+- * PURPOSE ARE DISCLAIMED. IN NO EVENT SHALL APPLE INC. OR ITS CONTRIBUTORS
+- * BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR
+- * CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF
+- * SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS
+- * INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
+- * CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
+- * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF
+- * THE POSSIBILITY OF SUCH DAMAGE.
+- */
+-#include "config.h"
+-
+-#include "LibJSCToolsTestUtilities.h"
+-#include <JavaScriptCore/CorpsePlatform.h>
+-
+-#if HAVE(LLDB)
+-
+-#include <JavaScriptCore/CorpseAddress.h>
+-#include <JavaScriptCore/CorpseSnapshot.h>
+-#include <JavaScriptCore/Watchpoint.h>
+-#include <cxxabi.h>
+-#include <lldb/API/LLDB.h>
+-#include <optional>
+-#include <stdlib.h>
+-#include <string_view>
+-#include <typeinfo>
+-#include <wtf/Scope.h>
+-#include <wtf/StdLibExtras.h>
+-#include <wtf/Vector.h>
+-#include <wtf/text/CString.h>
+-#include <wtf/text/StringCommon.h>
+-
+-#endif // HAVE(LLDB)
+-
+-namespace JSCToolsTest {
+-
+-#if HAVE(LLDB)
+-
+-namespace {
+-
+-using JSC::Corpse::Address;
+-using JSC::Corpse::Memory;
+-using JSC::Corpse::Snapshot;
+-
+-constexpr const char* targetString = "typeinfo-target";
+-
+-UTF8CString readCString(Memory& memory, Address address)
+-{
+-    constexpr size_t maxLength = 256;
+-    Vector<char> characters;
+-    for (size_t offset = 0; offset < maxLength; ++offset) {
+-        auto character = memory.ptr<char>(address + offset);
+-        if (!character)
+-            return { };
+-        if (!*character)
+-            return UTF8CString(byteCast<char8_t>(characters.span()));
+-        characters.append(*character);
+-    }
+-    return { };
+-}
+-
+-// The mangled name in the type_info of the object at `object`, read out of the
+-// corpse by following the object's vtable pointer.
+-UTF8CString dynamicTypeName(Snapshot& snapshot, Address object)
+-{
+-    Memory& memory = snapshot.memory();
+-    auto vtable = memory.ptr<uint64_t>(object);
+-    TEST_ASSERT(vtable, "the target object's vtable pointer is readable");
+-    if (!vtable)
+-        return { };
+-
+-    // The type_info pointer sits in the word before the vtable's first entry.
+-    auto typeInfo = memory.ptr<uint64_t>(Address { *vtable }.stripped() - sizeof(uint64_t));
+-    TEST_ASSERT(typeInfo, "the target object's type_info pointer is readable");
+-    if (!typeInfo)
+-        return { };
+-
+-    // A type_info is its own vtable pointer followed by its name pointer.
+-    auto namePointer = memory.ptr<uint64_t>(Address { *typeInfo }.stripped() + sizeof(uint64_t));
+-    TEST_ASSERT(namePointer, "the target object's type_info name pointer is readable");
+-    if (!namePointer)
+-        return { };
+-
+-    // libc++ sets the top bit of the name pointer when the name is not unique across images.
+-    constexpr uint64_t nonUniqueBit = 1ull << 63;
+-    CString name = readCString(memory, Address { *namePointer & ~nonUniqueBit }.stripped());
+-    TEST_ASSERT(!name.isNull(), "the target object's type_info name is readable");
+-    return name;
+-}
+-
+-UTF8CString demangledTypeName(const UTF8CString& mangledName)
+-{
+-    int status = 0;
+-    char* demangled = abi::__cxa_demangle(mangledName.legacyCStringPointer(), nullptr, nullptr, &status);
+-    auto freeDemangled = makeScopeExit([&] {
+-        free(demangled);
+-    });
+-    TEST_ASSERT(!status && demangled, "the target's type_info name demangles");
+-    if (status || !demangled)
+-        return { };
+-    return UTF8CString(byteCast<char8_t>(unsafeSpan(demangled)));
+-}
+-
+-// The one complete definition of `name` in `target`'s debug info. Declarations
+-// have no layout, so they do not count.
+-lldb::SBType completeType(lldb::SBTarget target, const UTF8CString& name)
+-{
+-    lldb::SBTypeList types = target.FindTypes(name.legacyCStringPointer());
+-    lldb::SBType found;
+-    unsigned completeCount = 0;
+-    for (uint32_t index = 0; index < types.GetSize(); ++index) {
+-        lldb::SBType candidate = types.GetTypeAtIndex(index);
+-        if (!candidate.IsTypeComplete())
+-            continue;
+-        ++completeCount;
+-        found = candidate;
+-    }
+-    TEST_ASSERT_EQ(completeCount, 1u, "the target's debug info has exactly one definition of the target object's class");
+-    return completeCount == 1 ? found : lldb::SBType { };
+-}
+-
+-lldb::SBTypeMember memberNamed(lldb::SBType type, std::string_view name)
+-{
+-    for (uint32_t index = 0; index < type.GetNumberOfFields(); ++index) {
+-        auto member = type.GetFieldAtIndex(index);
+-        const char* memberName = member.GetName();
+-        if (memberName && name == memberName)
+-            return member;
+-    }
+-    TEST_ASSERT(false, "the debug info has every member the test reads");
+-    return { };
+-}
+-
+-lldb::SBType baseAtStart(lldb::SBType type)
+-{
+-    for (uint32_t index = 0; index < type.GetNumberOfDirectBaseClasses(); ++index) {
+-        auto base = type.GetDirectBaseClassAtIndex(index);
+-        if (!base.GetOffsetInBytes())
+-            return base.GetType();
+-    }
+-    TEST_ASSERT(false, "the debug info puts a base class at the start of the target object");
+-    return { };
+-}
+-
+-void analyze(Snapshot& snapshot, Address object)
+-{
+-    CString mangledName = dynamicTypeName(snapshot, object);
+-    if (mangledName.isNull())
+-        return;
+-    TEST_ASSERT(std::string_view { mangledName.legacyCStringPointer() } == typeid(JSC::StringFireDetail).name(),
+-        "the target's RTTI names the class the object really is, not the one it is held as");
+-    CString className = demangledTypeName(mangledName);
+-    if (className.isNull())
+-        return;
+-
+-    CString executablePath = snapshot.process()->executablePath();
+-    TEST_ASSERT(!executablePath.isNull(), "the target's executable path is readable");
+-    if (executablePath.isNull())
+-        return;
+-
+-    lldb::SBDebugger::Initialize();
+-    auto terminateLLDB = makeScopeExit([] {
+-        lldb::SBDebugger::Terminate();
+-    });
+-    lldb::SBDebugger debugger = lldb::SBDebugger::Create();
+-    auto destroyDebugger = makeScopeExit([&] {
+-        lldb::SBDebugger::Destroy(debugger);
+-    });
+-    TEST_ASSERT(debugger.IsValid(), "liblldb creates a debugger");
+-    if (!debugger.IsValid())
+-        return;
+-
+-    lldb::SBError error;
+-    lldb::SBTarget target = debugger.CreateTarget(executablePath.legacyCStringPointer(), nullptr, nullptr, false, error);
+-    TEST_ASSERT(target.IsValid(), "liblldb opens the target's executable");
+-    if (!target.IsValid())
+-        return;
+-    auto deleteTarget = makeScopeExit([&] {
+-        debugger.DeleteTarget(target);
+-    });
+-
+-    RELEASE_ASSERT_WITH_MESSAGE(!target.GetProcess().IsValid(),
+-        "Only mya may attach to a process.");
+-
+-    lldb::SBType type = completeType(target, className);
+-    if (!type.IsValid())
+-        return;
+-    TEST_ASSERT_EQ(static_cast<size_t>(type.GetByteSize()), sizeof(JSC::StringFireDetail),
+-        "the debug info gives the target object's class its size");
+-
+-    lldb::SBType base = baseAtStart(type);
+-    if (!base.IsValid())
+-        return;
+-    TEST_ASSERT(std::string_view { base.GetName() } == "JSC::FireDetail",
+-        "the debug info names the base class the object was reported as");
+-
+-    lldb::SBTypeMember string = memberNamed(type, "m_string");
+-    if (!string.IsValid())
+-        return;
+-    TEST_ASSERT_EQ(static_cast<size_t>(string.GetType().GetByteSize()), sizeof(const char*),
+-        "the debug info gives m_string its size");
+-    auto pointer = snapshot.memory().ptr<uint64_t>(object + string.GetOffsetInBytes());
+-    TEST_ASSERT(pointer, "the target object's m_string is readable at the offset the debug info gives");
+-    if (!pointer)
+-        return;
+-    CString value = readCString(snapshot.memory(), Address { *pointer }.stripped());
+-    TEST_ASSERT(!value.isNull() && std::string_view { value.legacyCStringPointer() } == targetString,
+-        "the corpse holds the target's string at the offset the debug info gives");
+-}
+-
+-} // anonymous namespace
+-
+-void testTypeinfo()
+-{
+-    SuiteTracer tracer("Typeinfo");
+-    if (!tracer.shouldRun())
+-        return;
+-
+-    // The object is held as a JSC::FireDetail, so only the target's RTTI says
+-    // which class it really is.
+-    analyzeInAndOutOfProcess([] {
+-        static JSC::StringFireDetail object(targetString);
+-        return Address { &object };
+-    }, analyze);
+-}
+-
+-#else // No SB API, so there is nothing to ask.
+-
+-void testTypeinfo()
+-{
+-    SuiteTracer tracer("Typeinfo");
+-    if (!tracer.shouldRun())
+-        return;
+-
+-#if ENABLE(MYA_HEAP)
+-    TEST_ASSERT(false, "mya_heap is enabled but liblldb's headers were not found");
+-#else
+-    skipSuite("Typeinfo", "mya_heap is not enabled");
+-#endif
+-}
+-
+-#endif // HAVE(LLDB)
+-
+-} // namespace JSCToolsTest
+diff --git a/Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp b/Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp
+index fef7ddd93612..16211fd30c9c 100644
+--- a/Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp
++++ b/Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp
+@@ -135,7 +135,6 @@ int main(int argc, char** argv)
+     else {
+         JSCToolsTest::fuzzExportsTrie(fuzzSeed, static_cast<unsigned>(fuzzIterations));
+         runCorpseSuite();
+-        JSCToolsTest::testTypeinfo();
+         JSCToolsTest::testVM();
+     }
+ 
+diff --git a/Source/JavaScriptCore/shell/CMakeLists.txt b/Source/JavaScriptCore/shell/CMakeLists.txt
+index 3e02492207ba..81a246fece58 100644
+--- a/Source/JavaScriptCore/shell/CMakeLists.txt
++++ b/Source/JavaScriptCore/shell/CMakeLists.txt
+@@ -122,7 +122,6 @@ if (DEVELOPER_MODE)
+             ../corpse/tests/CorpseThreadTest.cpp
+             ../corpse/tests/CorpseVMTest.cpp
+             ../corpse/tests/LibJSCToolsTestUtilities.cpp
+-            ../corpse/tests/TypeinfoTest.cpp
+             ../corpse/tests/testLibJSCTools.cpp
+         )
+         set(testLibJSCTools_DEFINITIONS ${jsc_PRIVATE_DEFINITIONS})
+diff --git a/Source/ThirdParty/ANGLE/Configurations/Base.xcconfig b/Source/ThirdParty/ANGLE/Configurations/Base.xcconfig
+index 398da1b8c022..992cf44a6c85 100644
+--- a/Source/ThirdParty/ANGLE/Configurations/Base.xcconfig
++++ b/Source/ThirdParty/ANGLE/Configurations/Base.xcconfig
+@@ -36,7 +36,7 @@ ENABLE_BITCODE = NO;
+ GCC_C_LANGUAGE_STANDARD = gnu99;
+ GCC_DEBUGGING_SYMBOLS = default;
+ GCC_ENABLE_CPP_EXCEPTIONS = NO;
+-GCC_ENABLE_CPP_RTTI = $(WK_MYA_HEAP);
++GCC_ENABLE_CPP_RTTI = NO;
+ GCC_ENABLE_OBJC_EXCEPTIONS = YES;
+ GCC_ENABLE_SYMBOL_SEPARATION = NO;
+ GCC_FAST_OBJC_DISPATCH = YES;
+diff --git a/Source/ThirdParty/gmock/Configurations/Base.xcconfig b/Source/ThirdParty/gmock/Configurations/Base.xcconfig
+index c7fc2e919765..3a424431019b 100644
+--- a/Source/ThirdParty/gmock/Configurations/Base.xcconfig
++++ b/Source/ThirdParty/gmock/Configurations/Base.xcconfig
+@@ -55,7 +55,7 @@ GCC_C_LANGUAGE_STANDARD = gnu99;
+ GCC_DEBUGGING_SYMBOLS = default;
+ GCC_DYNAMIC_NO_PIC = NO;
+ GCC_ENABLE_CPP_EXCEPTIONS = NO;
+-GCC_ENABLE_CPP_RTTI = $(WK_MYA_HEAP);
++GCC_ENABLE_CPP_RTTI = NO;
+ GCC_ENABLE_OBJC_EXCEPTIONS = YES;
+ GCC_ENABLE_SYMBOL_SEPARATION = NO;
+ GCC_FAST_OBJC_DISPATCH = YES;
+diff --git a/Source/ThirdParty/libwebrtc/Configurations/Base.xcconfig b/Source/ThirdParty/libwebrtc/Configurations/Base.xcconfig
+index 5b88ece461b8..38ce67258227 100644
+--- a/Source/ThirdParty/libwebrtc/Configurations/Base.xcconfig
++++ b/Source/ThirdParty/libwebrtc/Configurations/Base.xcconfig
+@@ -49,7 +49,7 @@ ENABLE_BITCODE = NO;
+ GCC_C_LANGUAGE_STANDARD = gnu11;
+ GCC_DEBUGGING_SYMBOLS = default;
+ GCC_ENABLE_CPP_EXCEPTIONS = NO;
+-GCC_ENABLE_CPP_RTTI = $(WK_MYA_HEAP);
++GCC_ENABLE_CPP_RTTI = NO;
+ GCC_ENABLE_OBJC_EXCEPTIONS = YES;
+ ENABLE_STRICT_OBJC_MSGSEND = YES;
+ GCC_ENABLE_SYMBOL_SEPARATION = NO;
+diff --git a/Source/WTF/Configurations/Base.xcconfig b/Source/WTF/Configurations/Base.xcconfig
+index a2555bbcf8ee..c8a3d7dc2ae6 100644
+--- a/Source/WTF/Configurations/Base.xcconfig
++++ b/Source/WTF/Configurations/Base.xcconfig
+@@ -58,7 +58,7 @@ GCC_C_LANGUAGE_STANDARD = gnu99;
+ GCC_DEBUGGING_SYMBOLS = default;
+ GCC_DYNAMIC_NO_PIC = NO;
+ GCC_ENABLE_CPP_EXCEPTIONS = NO;
+-GCC_ENABLE_CPP_RTTI = $(WK_MYA_HEAP);
++GCC_ENABLE_CPP_RTTI = NO;
+ GCC_ENABLE_OBJC_EXCEPTIONS = YES;
+ GCC_ENABLE_SYMBOL_SEPARATION = NO;
+ GCC_FAST_OBJC_DISPATCH = YES;
+diff --git a/Source/WTF/Configurations/WTF.xcconfig b/Source/WTF/Configurations/WTF.xcconfig
+index 99e61254b991..732767d4a71e 100644
+--- a/Source/WTF/Configurations/WTF.xcconfig
++++ b/Source/WTF/Configurations/WTF.xcconfig
+@@ -86,7 +86,7 @@ OTHER_CFLAGS = $(inherited) $(WK_CLANG_PGO_USE_CFLAGS) $(WK_CLANG_PGO_GEN_FLAGS)
+ OTHER_LDFLAGS = $(inherited) $(LLVM_PROFILE_GENERATION_OTHER_LD_FLAGS) $(WK_CLANG_PGO_USE_LDFLAGS) $(WK_CLANG_PGO_GEN_FLAGS);
+ GCC_PREPROCESSOR_DEFINITIONS = $(inherited) $(ENABLE_LLVM_PROFILE_GENERATION_DEFINES);
+ 
+-GCC_SYMBOLS_PRIVATE_EXTERN = $(WK_NOT_$(WK_MYA_HEAP));
++GCC_SYMBOLS_PRIVATE_EXTERN = YES;
+ STRIP_INSTALLED_PRODUCT = NO;
+ 
+ WK_EXCLUDED_SOURCE_FILE_NAMES_MODULEMAP = $(WK_EXCLUDED_SOURCE_FILE_NAMES_MODULEMAP_$(GENERATE_WTF_MODULEMAP));
+diff --git a/Source/WebCore/Configurations/Base.xcconfig b/Source/WebCore/Configurations/Base.xcconfig
+index 478df307f7d9..ee1faa2f24ad 100644
+--- a/Source/WebCore/Configurations/Base.xcconfig
++++ b/Source/WebCore/Configurations/Base.xcconfig
+@@ -61,7 +61,7 @@ GCC_C_LANGUAGE_STANDARD = gnu99;
+ GCC_DEBUGGING_SYMBOLS = default;
+ GCC_DYNAMIC_NO_PIC = NO;
+ GCC_ENABLE_CPP_EXCEPTIONS = NO;
+-GCC_ENABLE_CPP_RTTI = $(WK_MYA_HEAP);
++GCC_ENABLE_CPP_RTTI = NO;
+ GCC_ENABLE_OBJC_EXCEPTIONS = YES;
+ GCC_ENABLE_SYMBOL_SEPARATION = NO;
+ GCC_FAST_OBJC_DISPATCH = YES;
+diff --git a/Source/WebCore/PAL/Configurations/Base.xcconfig b/Source/WebCore/PAL/Configurations/Base.xcconfig
+index bb6d0f45579c..1bee0e701a89 100644
+--- a/Source/WebCore/PAL/Configurations/Base.xcconfig
++++ b/Source/WebCore/PAL/Configurations/Base.xcconfig
+@@ -60,7 +60,7 @@ GCC_C_LANGUAGE_STANDARD = gnu99;
+ GCC_DEBUGGING_SYMBOLS = default;
+ GCC_DYNAMIC_NO_PIC = NO;
+ GCC_ENABLE_CPP_EXCEPTIONS = NO;
+-GCC_ENABLE_CPP_RTTI = $(WK_MYA_HEAP);
++GCC_ENABLE_CPP_RTTI = NO;
+ GCC_ENABLE_OBJC_EXCEPTIONS = YES;
+ GCC_ENABLE_SYMBOL_SEPARATION = NO;
+ GCC_FAST_OBJC_DISPATCH = YES;
+diff --git a/Source/WebCore/PAL/ThirdParty/dav1d/Configurations/Base.xcconfig b/Source/WebCore/PAL/ThirdParty/dav1d/Configurations/Base.xcconfig
+index 7780d38ae790..3eae44610fa5 100644
+--- a/Source/WebCore/PAL/ThirdParty/dav1d/Configurations/Base.xcconfig
++++ b/Source/WebCore/PAL/ThirdParty/dav1d/Configurations/Base.xcconfig
+@@ -65,7 +65,7 @@ GCC_C_LANGUAGE_STANDARD = gnu99;
+ GCC_DEBUGGING_SYMBOLS = default;
+ GCC_DYNAMIC_NO_PIC = NO;
+ GCC_ENABLE_CPP_EXCEPTIONS = NO;
+-GCC_ENABLE_CPP_RTTI = $(WK_MYA_HEAP);
++GCC_ENABLE_CPP_RTTI = NO;
+ GCC_ENABLE_OBJC_EXCEPTIONS = YES;
+ GCC_ENABLE_SYMBOL_SEPARATION = NO;
+ GCC_FAST_OBJC_DISPATCH = YES;
+diff --git a/Source/WebGPU/Configurations/Base.xcconfig b/Source/WebGPU/Configurations/Base.xcconfig
+index 2fe07f3e0bd2..ee09c5418521 100644
+--- a/Source/WebGPU/Configurations/Base.xcconfig
++++ b/Source/WebGPU/Configurations/Base.xcconfig
+@@ -57,7 +57,7 @@ GCC_C_LANGUAGE_STANDARD = gnu99;
+ GCC_DEBUGGING_SYMBOLS = default;
+ GCC_DYNAMIC_NO_PIC = NO;
+ GCC_ENABLE_CPP_EXCEPTIONS = NO;
+-GCC_ENABLE_CPP_RTTI = $(WK_MYA_HEAP);
++GCC_ENABLE_CPP_RTTI = NO;
+ GCC_ENABLE_OBJC_EXCEPTIONS = YES;
+ GCC_ENABLE_SYMBOL_SEPARATION = NO;
+ GCC_FAST_OBJC_DISPATCH = YES;
+diff --git a/Source/WebInspectorUI/Configurations/Base.xcconfig b/Source/WebInspectorUI/Configurations/Base.xcconfig
+index f216fddf581d..ebd41bcec378 100644
+--- a/Source/WebInspectorUI/Configurations/Base.xcconfig
++++ b/Source/WebInspectorUI/Configurations/Base.xcconfig
+@@ -59,7 +59,7 @@ ENABLE_STRICT_OBJC_MSGSEND = YES;
+ GCC_C_LANGUAGE_STANDARD = gnu99;
+ GCC_DYNAMIC_NO_PIC = YES;
+ GCC_ENABLE_CPP_EXCEPTIONS = NO;
+-GCC_ENABLE_CPP_RTTI = $(WK_MYA_HEAP);
++GCC_ENABLE_CPP_RTTI = NO;
+ GCC_ENABLE_OBJC_EXCEPTIONS = YES;
+ GCC_FAST_OBJC_DISPATCH = YES;
+ GCC_GENERATE_DEBUGGING_SYMBOLS = YES;
+diff --git a/Source/WebKit/Configurations/Base.xcconfig b/Source/WebKit/Configurations/Base.xcconfig
+index 4beca5e7bdfc..f05ed33276c5 100644
+--- a/Source/WebKit/Configurations/Base.xcconfig
++++ b/Source/WebKit/Configurations/Base.xcconfig
+@@ -61,7 +61,7 @@ GCC_C_LANGUAGE_STANDARD = gnu99;
+ GCC_DEBUGGING_SYMBOLS = default;
+ GCC_DYNAMIC_NO_PIC = NO;
+ GCC_ENABLE_CPP_EXCEPTIONS = NO;
+-GCC_ENABLE_CPP_RTTI = $(WK_MYA_HEAP);
++GCC_ENABLE_CPP_RTTI = NO;
+ GCC_ENABLE_OBJC_EXCEPTIONS = YES;
+ GCC_ENABLE_SYMBOL_SEPARATION = NO;
+ GCC_FAST_OBJC_DISPATCH = YES;
+diff --git a/Source/bmalloc/Configurations/Base.xcconfig b/Source/bmalloc/Configurations/Base.xcconfig
+index 0669c578022f..07778514f829 100644
+--- a/Source/bmalloc/Configurations/Base.xcconfig
++++ b/Source/bmalloc/Configurations/Base.xcconfig
+@@ -54,7 +54,7 @@ GCC_C_LANGUAGE_STANDARD = gnu99;
+ GCC_DEBUGGING_SYMBOLS = default;
+ GCC_DYNAMIC_NO_PIC = NO;
+ GCC_ENABLE_CPP_EXCEPTIONS = NO;
+-GCC_ENABLE_CPP_RTTI = $(WK_MYA_HEAP);
++GCC_ENABLE_CPP_RTTI = NO;
+ GCC_ENABLE_OBJC_EXCEPTIONS = YES;
+ GCC_ENABLE_SYMBOL_SEPARATION = NO;
+ GCC_FAST_OBJC_DISPATCH = YES;
+diff --git a/Source/bmalloc/Configurations/bmalloc.xcconfig b/Source/bmalloc/Configurations/bmalloc.xcconfig
+index 91d764301b1f..a5ed52d79f24 100644
+--- a/Source/bmalloc/Configurations/bmalloc.xcconfig
++++ b/Source/bmalloc/Configurations/bmalloc.xcconfig
+@@ -81,7 +81,7 @@ OTHER_CFLAGS = $(inherited) $(WK_CLANG_PGO_USE_CFLAGS) $(WK_CLANG_PGO_GEN_FLAGS)
+ OTHER_LDFLAGS = $(inherited) $(LLVM_PROFILE_GENERATION_OTHER_LD_FLAGS) $(WK_CLANG_PGO_USE_LDFLAGS) $(WK_CLANG_PGO_GEN_FLAGS);
+ GCC_PREPROCESSOR_DEFINITIONS = $(inherited) $(ENABLE_LLVM_PROFILE_GENERATION_DEFINES);
+ 
+-GCC_SYMBOLS_PRIVATE_EXTERN = $(WK_NOT_$(WK_MYA_HEAP));
++GCC_SYMBOLS_PRIVATE_EXTERN = YES;
+ STRIP_INSTALLED_PRODUCT = NO;
+ 
+ GENERATE_BMALLOC_MODULEMAP = YES;
+diff --git a/Source/cmake/OptionsCocoa.cmake b/Source/cmake/OptionsCocoa.cmake
+index 8a5bf2aa474e..c71419f42686 100644
+--- a/Source/cmake/OptionsCocoa.cmake
++++ b/Source/cmake/OptionsCocoa.cmake
+@@ -302,13 +302,10 @@ add_compile_options("$<$<NOT:$<COMPILE_LANGUAGE:Swift>>:-Wno-null-conversion>")
+ add_compile_options("$<$<NOT:$<COMPILE_LANGUAGE:Swift>>:-fobjc-weak>")
+ 
+ # Per-target ObjC visibility; global -fvisibility=hidden hides _OBJC_CLASS_$_ symbols.
+-# Under MYA_HEAP, RTTI needs the type_infos of base classes exported across images.
+-if (NOT ENABLE_MYA_HEAP)
+-    add_compile_options(
+-        "$<$<COMPILE_LANGUAGE:C,CXX>:-fvisibility=hidden>"
+-        "$<$<COMPILE_LANGUAGE:C,CXX>:-fvisibility-inlines-hidden>"
+-    )
+-endif ()
++add_compile_options(
++    "$<$<COMPILE_LANGUAGE:C,CXX>:-fvisibility=hidden>"
++    "$<$<COMPILE_LANGUAGE:C,CXX>:-fvisibility-inlines-hidden>"
++)
+ 
+ if (CMAKE_OSX_SYSROOT MATCHES "\\.Internal\\.sdk$")
+     webkit_add_compile_definitions(OS_UNFAIR_LOCK_INLINE=1)
+diff --git a/Source/cmake/WebKitCommon.cmake b/Source/cmake/WebKitCommon.cmake
+index 3f9367e8f14b..bf696e467dce 100644
+--- a/Source/cmake/WebKitCommon.cmake
++++ b/Source/cmake/WebKitCommon.cmake
+@@ -357,10 +357,7 @@ if (NOT HAS_RUN_WEBKIT_COMMON)
+ 
+     # This has to come after Options${PORT} to see ENABLE_MYA_HEAP
+     if (ENABLE_MYA_HEAP)
+-        set(CMAKE_C_VISIBILITY_PRESET default)
+-        set(CMAKE_CXX_VISIBILITY_PRESET default)
+-        set(CMAKE_VISIBILITY_INLINES_HIDDEN OFF)
+-        WEBKIT_APPEND_GLOBAL_CXX_FLAGS(-frtti)
++        # So that each image describes the types it uses.
+         WEBKIT_APPEND_GLOBAL_COMPILER_FLAGS(-fstandalone-debug)
+     endif ()
+ 
+diff --git a/Tools/DumpRenderTree/mac/Configurations/Base.xcconfig b/Tools/DumpRenderTree/mac/Configurations/Base.xcconfig
+index ef316c180891..e0b8d4124482 100644
+--- a/Tools/DumpRenderTree/mac/Configurations/Base.xcconfig
++++ b/Tools/DumpRenderTree/mac/Configurations/Base.xcconfig
+@@ -38,7 +38,7 @@ DEBUG_INFORMATION_FORMAT = dwarf-with-dsym;
+ ENABLE_BITCODE = NO;
+ PREBINDING = NO
+ GCC_C_LANGUAGE_STANDARD = gnu99
+-GCC_ENABLE_CPP_RTTI = $(WK_MYA_HEAP);
++GCC_ENABLE_CPP_RTTI = NO;
+ GCC_OBJC_CALL_CXX_CDTORS = YES
+ GCC_PRECOMPILE_PREFIX_HEADER = YES
+ GCC_TREAT_WARNINGS_AS_ERRORS = YES
+diff --git a/Tools/ImageDiff/cg/Configurations/Base.xcconfig b/Tools/ImageDiff/cg/Configurations/Base.xcconfig
+index a9d6f9f64f6b..85ea606a14c7 100644
+--- a/Tools/ImageDiff/cg/Configurations/Base.xcconfig
++++ b/Tools/ImageDiff/cg/Configurations/Base.xcconfig
+@@ -37,7 +37,7 @@ DEBUG_INFORMATION_FORMAT = dwarf-with-dsym;
+ ENABLE_BITCODE = NO;
+ PREBINDING = NO
+ GCC_C_LANGUAGE_STANDARD = gnu99
+-GCC_ENABLE_CPP_RTTI = $(WK_MYA_HEAP);
++GCC_ENABLE_CPP_RTTI = NO;
+ GCC_OBJC_CALL_CXX_CDTORS = YES
+ GCC_PRECOMPILE_PREFIX_HEADER = YES
+ GCC_TREAT_WARNINGS_AS_ERRORS = YES
+diff --git a/Tools/MobileMiniBrowser/Configurations/Base.xcconfig b/Tools/MobileMiniBrowser/Configurations/Base.xcconfig
+index cc6976b7e76a..489c8ac307c9 100644
+--- a/Tools/MobileMiniBrowser/Configurations/Base.xcconfig
++++ b/Tools/MobileMiniBrowser/Configurations/Base.xcconfig
+@@ -60,7 +60,7 @@ DEBUG_INFORMATION_FORMAT = dwarf-with-dsym;
+ PREBINDING = NO
+ GCC_C_LANGUAGE_STANDARD = gnu99
+ GCC_ENABLE_CPP_EXCEPTIONS = NO;
+-GCC_ENABLE_CPP_RTTI = $(WK_MYA_HEAP);
++GCC_ENABLE_CPP_RTTI = NO;
+ GCC_NO_COMMON_BLOCKS = YES;
+ GCC_PRECOMPILE_PREFIX_HEADER = YES
+ GCC_TREAT_WARNINGS_AS_ERRORS = YES
+diff --git a/Tools/TestWebKitAPI/Configurations/Base.xcconfig b/Tools/TestWebKitAPI/Configurations/Base.xcconfig
+index 875ed525e06b..0c2d8019ca57 100644
+--- a/Tools/TestWebKitAPI/Configurations/Base.xcconfig
++++ b/Tools/TestWebKitAPI/Configurations/Base.xcconfig
+@@ -66,7 +66,7 @@ ENABLE_BITCODE = NO;
+ PREBINDING = NO
+ GCC_C_LANGUAGE_STANDARD = gnu99
+ GCC_ENABLE_CPP_EXCEPTIONS = NO;
+-GCC_ENABLE_CPP_RTTI = $(WK_MYA_HEAP);
++GCC_ENABLE_CPP_RTTI = NO;
+ ENABLE_STRICT_OBJC_MSGSEND = YES;
+ GCC_PREFIX_HEADER = Helpers/TestWebKitAPIPrefix.h
+ GCC_PRECOMPILE_PREFIX_HEADER = YES
+diff --git a/Tools/WebKitTestRunner/Configurations/Base.xcconfig b/Tools/WebKitTestRunner/Configurations/Base.xcconfig
+index d90a7a6d5786..0ecc99d55999 100644
+--- a/Tools/WebKitTestRunner/Configurations/Base.xcconfig
++++ b/Tools/WebKitTestRunner/Configurations/Base.xcconfig
+@@ -64,7 +64,7 @@ ENABLE_BITCODE = NO;
+ PREBINDING = NO
+ GCC_C_LANGUAGE_STANDARD = gnu99
+ GCC_ENABLE_CPP_EXCEPTIONS = NO;
+-GCC_ENABLE_CPP_RTTI = $(WK_MYA_HEAP);
++GCC_ENABLE_CPP_RTTI = NO;
+ GCC_PRECOMPILE_PREFIX_HEADER = YES
+ GCC_TREAT_WARNINGS_AS_ERRORS = YES
+ GCC_VERSION = com.apple.compilers.llvm.clang.1_0;
+diff --git a/Tools/lldb/lldbWebKitTester/Configurations/Base.xcconfig b/Tools/lldb/lldbWebKitTester/Configurations/Base.xcconfig
+index b85126f7ccfb..60db148b5e46 100644
+--- a/Tools/lldb/lldbWebKitTester/Configurations/Base.xcconfig
++++ b/Tools/lldb/lldbWebKitTester/Configurations/Base.xcconfig
+@@ -53,7 +53,7 @@ GCC_C_LANGUAGE_STANDARD = gnu99;
+ GCC_DEBUGGING_SYMBOLS = default;
+ GCC_DYNAMIC_NO_PIC = NO;
+ GCC_ENABLE_CPP_EXCEPTIONS = NO;
+-GCC_ENABLE_CPP_RTTI = $(WK_MYA_HEAP);
++GCC_ENABLE_CPP_RTTI = NO;
+ GCC_ENABLE_OBJC_EXCEPTIONS = YES;
+ GCC_ENABLE_SYMBOL_SEPARATION = NO;
+ GCC_FAST_OBJC_DISPATCH = YES;
+-- 
+2.54.0 (Apple Git-157)
+

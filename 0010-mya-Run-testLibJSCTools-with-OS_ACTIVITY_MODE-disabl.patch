@@ -1,0 +1,45 @@
+From 82831bb4370ac52c56585a5625004013a97282fe Mon Sep 17 00:00:00 2001
+From: Justin Michaud <jmichaud@igalia.com>
+Date: Tue, 6 Oct 2026 10:19:56 -0600
+Subject: [PATCH 10/23] [mya] Run testLibJSCTools with OS_ACTIVITY_MODE=disable
+ on Cocoa Need the bug URL (OOPS!).
+
+Reviewed by NOBODY (OOPS!).
+
+Test harness environment only.
+
+run-javascriptcore-tests runs testLibJSCTools with OS_ACTIVITY_MODE=disable
+on Apple Cocoa ports.
+
+Why it is needed: Xcode's LLDB.framework records an os_signpost and an
+os_log message for every SB API call. The heap walk makes SB API calls for
+every type and field it reads, so with logging on, the walk takes about
+twice as long, and the HeapWalk and DebugInfo suites with it.
+
+What we lose if it is not taken: nothing functional; testLibJSCTools is
+slower on macOS. Only meaningful after the LLDB.framework patch.
+
+* Tools/Scripts/run-javascriptcore-tests:
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Tools/Scripts/run-javascriptcore-tests | 3 ++-
+ 1 file changed, 2 insertions(+), 1 deletion(-)
+
+diff --git a/Tools/Scripts/run-javascriptcore-tests b/Tools/Scripts/run-javascriptcore-tests
+index 34ec9b5511a2..f88b694b55de 100755
+--- a/Tools/Scripts/run-javascriptcore-tests
++++ b/Tools/Scripts/run-javascriptcore-tests
+@@ -839,7 +839,8 @@ if ($runTestAPI) {
+     runTest("testapi", "allApiTestsPassedWithSystemMalloc", "Malloc=1");
+ }
+ if ($runTestWasmDebugger) { runTest("testwasmdebugger", "allWasmDebuggerTestsPassed") }
+-if ($runTestLibJSCTools) { runTest("testLibJSCTools", "allLibJSCToolsTestsPassed") }
++# Xcode's LLDB.framework records an os_signpost and an os_log message per SB API call, which doubles the heap walk.
++if ($runTestLibJSCTools) { runTest("testLibJSCTools", "allLibJSCToolsTestsPassed", isAppleCocoaWebKit() ? "OS_ACTIVITY_MODE=disable" : "") }
+ 
+ # Find JavaScriptCore directory
+ chdirWebKit();
+-- 
+2.54.0 (Apple Git-157)
+

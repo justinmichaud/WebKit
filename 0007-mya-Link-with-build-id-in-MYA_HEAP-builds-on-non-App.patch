@@ -1,0 +1,54 @@
+From 5b6af2f56f7664919ca8195b55ee68515414e202 Mon Sep 17 00:00:00 2001
+From: Justin Michaud <jmichaud@igalia.com>
+Date: Tue, 6 Oct 2026 10:19:56 -0600
+Subject: [PATCH 07/23] [mya] Link with --build-id in MYA_HEAP builds on
+ non-Apple platforms Need the bug URL (OOPS!).
+
+Reviewed by NOBODY (OOPS!).
+
+Build flags only. CMake builds with ENABLE_MYA_HEAP on, other than Apple's.
+
+Every image gets an NT_GNU_BUILD_ID note.
+
+Why it is needed: mya reads a snapshot's types from the image files on disk,
+which may have been rebuilt since the target loaded them. On Darwin the
+image's LC_UUID tells the file that was loaded from one rebuilt since; on
+Linux the build-id is the only equivalent. The images patch later in this
+series reads each image's build-id from the target's memory and leaves out
+(with a report) an image that has none, and the debug info patch hands the
+build-id to liblldb, which refuses a file on disk whose build-id differs,
+rather than reading the target's memory with the wrong layouts. GNU ld and
+gold write a build-id on most distributions' toolchains, but lld writes none
+unless asked, and only some distributions' clang drivers ask.
+
+What we lose if it is not taken: with lld (the usual linker for clang
+builds) WebKit's own images have no build-id, so they are left out of a
+snapshot's image list: on Linux, symbols in them cannot be looked up, their
+debug info is not opened, and `mya heap` cannot find JavaScriptCore at all.
+
+* Source/cmake/WebKitCommon.cmake:
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/cmake/WebKitCommon.cmake | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/Source/cmake/WebKitCommon.cmake b/Source/cmake/WebKitCommon.cmake
+index d70e80d7e878..2035174bba22 100644
+--- a/Source/cmake/WebKitCommon.cmake
++++ b/Source/cmake/WebKitCommon.cmake
+@@ -367,6 +367,11 @@ if (NOT HAS_RUN_WEBKIT_COMMON)
+             string(REPLACE "-mllvm -dwarf-linkage-names=Abstract" "" ${_flags} "${${_flags}}")
+             string(REPLACE "-gsimple-template-names" "" ${_flags} "${${_flags}}")
+         endforeach ()
++        if (NOT APPLE)
++            # The build-id is what refuses an image rebuilt since it was loaded. lld
++            # writes none unless asked, and only some distributions' clang asks.
++            add_link_options("LINKER:--build-id")
++        endif ()
+         # liblldb reads .debug_names but not .gdb_index, so with split DWARF it
+         # indexes every .dwo file by hand whenever it loads an image.
+         set(DEBUG_FISSION OFF)
+-- 
+2.54.0 (Apple Git-157)
+

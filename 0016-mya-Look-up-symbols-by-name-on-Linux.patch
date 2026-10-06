@@ -1,0 +1,420 @@
+From 80a133a7950dcfe12aca2ea924e02157a4e14482 Mon Sep 17 00:00:00 2001
+From: Justin Michaud <jmichaud@igalia.com>
+Date: Tue, 6 Oct 2026 10:19:57 -0600
+Subject: [PATCH 16/23] [mya] Look up symbols by name on Linux Need the bug URL
+ (OOPS!).
+
+Reviewed by NOBODY (OOPS!).
+
+Snapshot::symbol() reported "not supported" on Linux. It now searches each
+image of the snapshot, in the loader's order, through the image's dynamic
+section, GNU hash table, dynamic symbol table and version table, as
+dlsym(RTLD_DEFAULT) does: only exported symbols, at their default version; a
+thread-local or an indirect function (whose symbol is its resolver) is not
+found. glibc relocates the dynamic section's addresses in place on most
+architectures but leaves them as offsets where the section is read-only
+(RISC-V), and both are handled. Every table is bounded by new CorpseLimits,
+and the whole lookup by the same read budget as on Darwin.
+
+The `mya heap` command added later in this series finds s_recentVM and
+g_commonVMOrNull through it.
+
+The diagnostic counter ExportsTriesSearched becomes SymbolTablesSearched,
+since it now counts GNU hash tables too. The Symbol suite runs on Linux,
+and linuxSkip, which nothing uses any more, is removed.
+
+* Source/JavaScriptCore/corpse/CorpseError.cpp:
+* Source/JavaScriptCore/corpse/CorpseError.h:
+* Source/JavaScriptCore/corpse/CorpseLimits.h:
+* Source/JavaScriptCore/corpse/CorpseSymbol.cpp:
+* Source/JavaScriptCore/corpse/CorpseSymbol.h:
+* Source/JavaScriptCore/corpse/tests/CorpseDiagnosticsTest.cpp:
+* Source/JavaScriptCore/corpse/tests/CorpseSymbolTest.cpp:
+* Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.cpp:
+* Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h:
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/JavaScriptCore/corpse/CorpseError.cpp  |   4 +-
+ Source/JavaScriptCore/corpse/CorpseError.h    |   2 +-
+ Source/JavaScriptCore/corpse/CorpseLimits.h   |   3 +
+ Source/JavaScriptCore/corpse/CorpseSymbol.cpp | 166 ++++++++++++++++--
+ Source/JavaScriptCore/corpse/CorpseSymbol.h   |  13 +-
+ .../corpse/tests/CorpseDiagnosticsTest.cpp    |   4 +-
+ .../corpse/tests/CorpseSymbolTest.cpp         |   2 -
+ .../corpse/tests/LibJSCToolsTestUtilities.cpp |  13 --
+ .../corpse/tests/LibJSCToolsTestUtilities.h   |   2 -
+ 9 files changed, 170 insertions(+), 39 deletions(-)
+
+diff --git a/Source/JavaScriptCore/corpse/CorpseError.cpp b/Source/JavaScriptCore/corpse/CorpseError.cpp
+index d3bd9ce40fc7..1e9f0bb7657c 100644
+--- a/Source/JavaScriptCore/corpse/CorpseError.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseError.cpp
+@@ -90,8 +90,8 @@ static ASCIILiteral label(DiagnosticCounter counter)
+         return "image headers read"_s;
+     case DiagnosticCounter::ImagesInSharedCache:
+         return "images in the shared cache"_s;
+-    case DiagnosticCounter::ExportsTriesSearched:
+-        return "exports tries searched"_s;
++    case DiagnosticCounter::SymbolTablesSearched:
++        return "symbol tables searched"_s;
+     case DiagnosticCounter::UnreadableImageHeaders:
+         return "unreadable image headers"_s;
+     case DiagnosticCounter::ImplausibleLoadCommandSizes:
+diff --git a/Source/JavaScriptCore/corpse/CorpseError.h b/Source/JavaScriptCore/corpse/CorpseError.h
+index 97e4508aae9e..1a3dba0c3714 100644
+--- a/Source/JavaScriptCore/corpse/CorpseError.h
++++ b/Source/JavaScriptCore/corpse/CorpseError.h
+@@ -58,7 +58,7 @@ enum class DiagnosticCounter : uint8_t {
+     ImagesListed,
+     ImageHeadersRead,
+     ImagesInSharedCache,
+-    ExportsTriesSearched,
++    SymbolTablesSearched,
+     UnreadableImageHeaders,
+     ImplausibleLoadCommandSizes,
+     UnreadableLoadCommands,
+diff --git a/Source/JavaScriptCore/corpse/CorpseLimits.h b/Source/JavaScriptCore/corpse/CorpseLimits.h
+index 21d17e26d5a3..32f40459562f 100644
+--- a/Source/JavaScriptCore/corpse/CorpseLimits.h
++++ b/Source/JavaScriptCore/corpse/CorpseLimits.h
+@@ -56,6 +56,9 @@ constexpr size_t maxAuxiliaryVectorEntries = 128; // Linux gives about 20.
+ constexpr uint64_t maxProgramHeaders = 256; // An ELF object has about 12.
+ constexpr size_t maxDynamicEntries = 4096; // A shared library has about 40.
+ constexpr uint64_t maxNoteSegmentSize = 64 * KB; // A build-id note is 36 bytes.
++constexpr uint32_t maxGNUHashBuckets = 16 * 1024 * 1024; // libJavaScriptCore's .gnu.hash has about 2,000.
++constexpr uint32_t maxGNUHashBloomWords = 1024 * 1024; // And 256 Bloom filter words.
++constexpr uint32_t maxGNUHashChainLength = 1024 * 1024; // A chain holds a few symbols.
+ constexpr size_t maxRegionCount = 1024 * 1024; // A large process maps tens of thousands.
+ 
+ // A lookup that finds nothing will read every image's load commands and exports
+diff --git a/Source/JavaScriptCore/corpse/CorpseSymbol.cpp b/Source/JavaScriptCore/corpse/CorpseSymbol.cpp
+index b6004077ef9d..5b567deaadd2 100644
+--- a/Source/JavaScriptCore/corpse/CorpseSymbol.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseSymbol.cpp
+@@ -31,12 +31,17 @@
+ 
+ #include "CorpseError.h"
+ #include "CorpseExportsTrie.h"
++#include "CorpseImage.h"
+ #include "CorpseLimits.h"
++#include "CorpseMemory.h"
++#include "CorpseProcess.h"
+ #include "CorpseSnapshot.h"
+ 
+ #if OS(DARWIN)
+ #include <mach-o/dyld_images.h>
+ #include <mach-o/loader.h>
++#else
++#include <elf.h>
+ #endif
+ #include <optional>
+ #include <span>
+@@ -88,15 +93,6 @@ bool segmentNameIs(const char (&name)[16], std::string_view expected)
+ 
+ } // anonymous namespace
+ 
+-bool Symbol::hasReadBudget(size_t length)
+-{
+-    if (length > m_readBudget) {
+-        Diagnostics::count(DiagnosticCounter::ImagesSkippedForReadBudget);
+-        return false;
+-    }
+-    m_readBudget -= length;
+-    return true;
+-}
+ 
+ // Resolves `name` in the one image loaded at `imageAddress`, via its exports
+ // trie. Returns a null address if this image does not export it.
+@@ -223,7 +219,7 @@ Address Symbol::resolveInImage(Memory& memory, Address imageAddress, std::string
+         Diagnostics::count(DiagnosticCounter::UnreadableExportsTries);
+         return { };
+     }
+-    Diagnostics::count(DiagnosticCounter::ExportsTriesSearched);
++    Diagnostics::count(DiagnosticCounter::SymbolTablesSearched);
+ 
+     auto found = ExportsTrie::lookUp(trie, name);
+     if (!found) {
+@@ -288,7 +284,7 @@ Address Symbol::lookUpName(Snapshot& snapshot)
+ 
+     if (diagnostics.value(DiagnosticCounter::ImagesSkippedForReadBudget))
+         CORPSE_REPORT("No symbol '%s' in pid %d: the lookup gave up after reading %zu MB, so some images were not searched", m_name.c_str(), pid, maxTotalBytesRead / MB);
+-    else if (!diagnostics.value(DiagnosticCounter::ExportsTriesSearched))
++    else if (!diagnostics.value(DiagnosticCounter::SymbolTablesSearched))
+         CORPSE_REPORT("No symbol '%s' in pid %d: no exports trie could be read, so this is a memory access problem", m_name.c_str(), pid);
+     else
+         CORPSE_REPORT("No symbol '%s' in pid %d: only exported symbols are in an exports trie, so a symbol the linker hid is invisible here", m_name.c_str(), pid);
+@@ -297,14 +293,158 @@ Address Symbol::lookUpName(Snapshot& snapshot)
+ 
+ #else
+ 
+-Address Symbol::lookUpName(Snapshot&)
++namespace {
++
++// The GNU hash of a symbol name (dl_new_hash in glibc).
++uint32_t gnuHash(std::string_view name)
+ {
+-    CORPSE_REPORT("Symbol lookup is not supported on this platform");
++    uint32_t hash = 5381;
++    for (char character : name)
++        hash = hash * 33 + static_cast<uint8_t>(character);
++    return hash;
++}
++
++} // anonymous namespace
++
++// An image's dynamic section, as ld.so leaves it, gives its symbol, string,
++// GNU hash and version tables. glibc relocates the addresses in it in place on
++// most architectures, and leaves them as offsets from the image's slide where
++// the section is read-only (DL_RO_DYN_SECTION, as on RISC-V): an address below
++// the slide is an offset.
++Address Symbol::resolveInImage(Memory& memory, Address loadAddress, Address dynamicSection, std::string_view name)
++{
++    if (!dynamicSection)
++        return { };
++    if (!hasReadBudget(maxDynamicEntries * sizeof(Elf64_Dyn)))
++        return { };
++    Address gnuHashTable, symbolTable, stringTable, versionTable;
++    uint64_t stringTableSize = 0;
++    for (size_t index = 0; index < maxDynamicEntries; ++index) {
++        auto entry = memory.ptr<Elf64_Dyn>(dynamicSection + index * sizeof(Elf64_Dyn));
++        if (!entry) {
++            CORPSE_REPORT("Could not read the dynamic section at 0x%llx", static_cast<unsigned long long>(dynamicSection.toTargetVMAddress()));
++            return { };
++        }
++        if (entry->d_tag == DT_NULL)
++            break;
++        Address address { entry->d_un.d_ptr < loadAddress.toTargetVMAddress() ? loadAddress.toTargetVMAddress() + entry->d_un.d_ptr : entry->d_un.d_ptr };
++        switch (entry->d_tag) {
++        case DT_GNU_HASH:
++            gnuHashTable = address;
++            break;
++        case DT_SYMTAB:
++            symbolTable = address;
++            break;
++        case DT_STRTAB:
++            stringTable = address;
++            break;
++        case DT_STRSZ:
++            stringTableSize = entry->d_un.d_val;
++            break;
++        case DT_VERSYM:
++            versionTable = address;
++            break;
++        default:
++            break;
++        }
++    }
++    // Every image ld.so loads for glibc 2.34 or newer has a GNU hash table.
++    if (!gnuHashTable || !symbolTable || !stringTable)
++        return { };
++    Diagnostics::count(DiagnosticCounter::SymbolTablesSearched);
++
++    struct Header {
++        uint32_t bucketCount;
++        uint32_t firstHashedSymbol;
++        uint32_t bloomWords;
++        uint32_t bloomShift;
++    };
++    auto header = memory.ptr<Header>(gnuHashTable);
++    if (!header || !header->bucketCount || header->bucketCount > maxGNUHashBuckets || header->bloomWords > maxGNUHashBloomWords
++        || header->bloomWords & (header->bloomWords - 1) || header->bloomShift >= 64) {
++        CORPSE_REPORT("The GNU hash table at 0x%llx is not one", static_cast<unsigned long long>(gnuHashTable.toTargetVMAddress()));
++        return { };
++    }
++    uint32_t hash = gnuHash(name);
++    Address bloom = gnuHashTable + sizeof(Header);
++    if (header->bloomWords) {
++        auto word = memory.ptr<uint64_t>(bloom + ((hash / 64) & (header->bloomWords - 1)) * sizeof(uint64_t));
++        if (!word)
++            return { };
++        uint64_t mask = (1ull << (hash % 64)) | (1ull << ((hash >> header->bloomShift) % 64));
++        if ((*word & mask) != mask)
++            return { };
++    }
++    Address buckets = bloom + static_cast<uint64_t>(header->bloomWords) * sizeof(uint64_t);
++    Address chains = buckets + static_cast<uint64_t>(header->bucketCount) * sizeof(uint32_t);
++    auto bucket = memory.ptr<uint32_t>(buckets + (hash % header->bucketCount) * sizeof(uint32_t));
++    if (!bucket || *bucket < header->firstHashedSymbol)
++        return { };
++
++    for (uint32_t index = *bucket, length = 0; length < maxGNUHashChainLength; ++index, ++length) {
++        if (!hasReadBudget(sizeof(uint32_t) + sizeof(Elf64_Sym) + name.size() + 1))
++            return { };
++        auto chain = memory.ptr<uint32_t>(chains + static_cast<uint64_t>(index - header->firstHashedSymbol) * sizeof(uint32_t));
++        if (!chain)
++            return { };
++        if ((*chain | 1) == (hash | 1)) {
++            auto symbol = memory.ptr<Elf64_Sym>(symbolTable + static_cast<uint64_t>(index) * sizeof(Elf64_Sym));
++            if (!symbol)
++                return { };
++            bool nameFits = !stringTableSize || (symbol->st_name < stringTableSize && stringTableSize - symbol->st_name > name.size());
++            auto symbolName = nameFits ? memory.span<char>(stringTable + symbol->st_name, name.size() + 1) : Memory::Span<char> { };
++            bool matches = symbolName && std::string_view { symbolName.data(), name.size() } == name && !symbolName[name.size()];
++            unsigned type = ELF64_ST_TYPE(symbol->st_info);
++            // A hidden version is not the default, which is the one dlsym gives.
++            bool isDefaultVersion = true;
++            if (matches && versionTable) {
++                auto version = memory.ptr<uint16_t>(versionTable + static_cast<uint64_t>(index) * sizeof(uint16_t));
++                isDefaultVersion = version && !(*version & 0x8000);
++            }
++            if (matches && isDefaultVersion && symbol->st_shndx != SHN_UNDEF && type != STT_TLS && type != STT_GNU_IFUNC)
++                return symbol->st_shndx == SHN_ABS ? Address { symbol->st_value } : loadAddress + symbol->st_value;
++        }
++        if (*chain & 1)
++            return { };
++    }
++    return { };
++}
++
++// ld.so lists every image in its search order, which is dlsym's.
++Address Symbol::lookUpName(Snapshot& snapshot)
++{
++    if (!snapshot.isValid()) {
++        CORPSE_REPORT("Cannot look up '%s' in an invalid snapshot", m_name.c_str());
++        return { };
++    }
++    int pid = static_cast<int>(snapshot.process()->pid());
++    CORPSE_DIAGNOSTICS(diagnostics, "looking up the symbol '%s' in pid %d", m_name.c_str(), pid);
++    m_readBudget = maxTotalBytesRead;
++    for (const Image& image : snapshot.images()) {
++        if (Address address = resolveInImage(snapshot.memory(), image.loadAddress(), image.dynamicSection(), m_name))
++            return address;
++    }
++    if (diagnostics.value(DiagnosticCounter::ImagesSkippedForReadBudget))
++        CORPSE_REPORT("No symbol '%s' in pid %d: the lookup gave up after reading %zu MB, so some images were not searched", m_name.c_str(), pid, maxTotalBytesRead / MB);
++    else if (!diagnostics.value(DiagnosticCounter::SymbolTablesSearched))
++        CORPSE_REPORT("No symbol '%s' in pid %d: no GNU hash table could be read, so this is a memory access problem", m_name.c_str(), pid);
++    else
++        CORPSE_REPORT("No symbol '%s' in pid %d: only exported symbols are in a dynamic symbol table, so a symbol the linker hid is invisible here", m_name.c_str(), pid);
+     return { };
+ }
+ 
+ #endif // OS(DARWIN)
+ 
++bool Symbol::hasReadBudget(size_t length)
++{
++    if (length > m_readBudget) {
++        Diagnostics::count(DiagnosticCounter::ImagesSkippedForReadBudget);
++        return false;
++    }
++    m_readBudget -= length;
++    return true;
++}
++
+ Symbol::Symbol(Snapshot& snapshot, const char* name)
+     : m_name(name ? name : "")
+ {
+diff --git a/Source/JavaScriptCore/corpse/CorpseSymbol.h b/Source/JavaScriptCore/corpse/CorpseSymbol.h
+index 3765ea17d34e..c4c40ca9492d 100644
+--- a/Source/JavaScriptCore/corpse/CorpseSymbol.h
++++ b/Source/JavaScriptCore/corpse/CorpseSymbol.h
+@@ -44,7 +44,12 @@ class Snapshot;
+ 
+ // A symbol looked up in a corpse by name. The lookup happens on construction.
+ //
+-// Only regular and absolute exports are read out of an image's trie. A re-export is
++// On Linux, an image's dynamic symbol table is searched through its GNU hash
++// table, in the loader's order, as dlsym(RTLD_DEFAULT) searches it: only the
++// symbols an image exports, at their default version. A thread-local is not
++// found, and neither is an indirect function, whose symbol is its resolver.
++//
++// On Darwin, only regular and absolute exports are read out of an image's trie. A re-export is
+ // skipped rather than followed, so a name that one image re-exports resolves in the
+ // image that defines it, as long as that image is loaded in the corpse. A
+ // thread-local is not found at all.
+@@ -67,16 +72,16 @@ private:
+     Address lookUpName(Snapshot&);
+ #if OS(DARWIN)
+     Address resolveInImage(Memory&, Address loadAddress, std::string_view name);
+-    bool hasReadBudget(size_t length);
++#else
++    Address resolveInImage(Memory&, Address loadAddress, Address dynamicSection, std::string_view name);
+ #endif
++    bool hasReadBudget(size_t length);
+ 
+     std::string m_name;
+     Address m_address;
+ 
+-#if OS(DARWIN)
+     // What this lookup may still copy out of the corpse. Set when the search starts.
+     size_t m_readBudget { 0 };
+-#endif
+ };
+ 
+ } // namespace Corpse
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseDiagnosticsTest.cpp b/Source/JavaScriptCore/corpse/tests/CorpseDiagnosticsTest.cpp
+index b310d01cb229..ac5602a3e70e 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseDiagnosticsTest.cpp
++++ b/Source/JavaScriptCore/corpse/tests/CorpseDiagnosticsTest.cpp
+@@ -61,7 +61,7 @@ void testDiagnostics()
+     TEST_ASSERT_EQ(outer.value(DiagnosticCounter::ImageHeadersRead), uint64_t { 0 }, "a count made before the scope opened is not in it");
+     readHeader();
+     Diagnostics::count(DiagnosticCounter::ImagesListed, 40);
+-    Diagnostics::count(DiagnosticCounter::ExportsTriesSearched);
++    Diagnostics::count(DiagnosticCounter::SymbolTablesSearched);
+     TEST_ASSERT_EQ(outer.value(DiagnosticCounter::ImageHeadersRead), uint64_t { 1 }, "a count reaches its scope from a callee");
+     TEST_ASSERT_EQ(outer.value(DiagnosticCounter::ImagesListed), uint64_t { 40 }, "a count adds what it is given");
+ 
+@@ -76,7 +76,7 @@ void testDiagnostics()
+         TEST_ASSERT_EQ(Diagnostics::context(), toUTF8CString(
+             Client::name(), ":   while reading more headers: image headers read 1\n"_s,
+             Client::name(), ":   while doing something in between\n"_s,
+-            Client::name(), ":   while running the Diagnostics suite: images listed 40, image headers read 1, exports tries searched 1\n"_s),
++            Client::name(), ":   while running the Diagnostics suite: images listed 40, image headers read 1, symbol tables searched 1\n"_s),
+             "the context names every open scope, innermost first, with the counts that are not zero");
+     }
+ 
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseSymbolTest.cpp b/Source/JavaScriptCore/corpse/tests/CorpseSymbolTest.cpp
+index 8c01cb0d1868..3b14fa869983 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseSymbolTest.cpp
++++ b/Source/JavaScriptCore/corpse/tests/CorpseSymbolTest.cpp
+@@ -58,8 +58,6 @@ void testSymbol()
+     SuiteTracer tracer("Symbol");
+     if (!tracer.shouldRun())
+         return;
+-    if (linuxSkip("Symbol", "corpses are not implemented on Linux yet"))
+-        return;
+ 
+     SelfSnapshot self;
+     if (!self.isValid())
+diff --git a/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.cpp b/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.cpp
+index 76d37dd688b3..7632fd2819a5 100644
+--- a/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.cpp
++++ b/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.cpp
+@@ -138,19 +138,6 @@ void skipSuite(const char* name, const char* why)
+     dataLogLn("SKIP: ", name, ": ", why);
+ }
+ 
+-bool linuxSkip(const char* name, const char* why)
+-{
+-#if OS(LINUX)
+-    // FIXME: Implement the corpse functionality these suites need on Linux.
+-    skipSuite(name, why);
+-    return true;
+-#else
+-    UNUSED_PARAM(name);
+-    UNUSED_PARAM(why);
+-    return false;
+-#endif
+-}
+-
+ #if ENABLE(MYA) && OS(DARWIN)
+ 
+ unsigned machPortNameCount()
+diff --git a/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h b/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h
+index 71a6fe3ac92f..a1a0abcd30f3 100644
+--- a/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h
++++ b/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h
+@@ -69,8 +69,6 @@ extern bool verbose;
+ 
+ void skipSuite(const char* name, const char* why);
+ 
+-bool linuxSkip(const char* name, const char* why);
+-
+ void testAddress();
+ void testByteParser();
+ void testDiagnostics();
+-- 
+2.54.0 (Apple Git-157)
+

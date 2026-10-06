@@ -1,0 +1,1401 @@
+From 1cd76c5b60e79870e9155bdaff237b7b7889ef63 Mon Sep 17 00:00:00 2001
+From: Justin Michaud <jmichaud@igalia.com>
+Date: Tue, 6 Oct 2026 10:52:48 -0600
+Subject: [PATCH 01/17] Fix JSC CMake build and jsc/mya entitlements on public
+ macOS builds https://bugs.webkit.org/show_bug.cgi?id=325093
+
+Reviewed by NOBODY (OOPS!).
+
+Build fixes for CMAKE on macOS, add entitlements needed for public builds on macOS,
+and clean up the mya enablement guards.
+
+* Source/JavaScriptCore/CMakeLists.txt:
+* Source/JavaScriptCore/Configurations/JSC.xcconfig:
+* Source/JavaScriptCore/Configurations/TestExecutable.xcconfig:
+* Source/JavaScriptCore/Scripts/process-entitlements.sh:
+* Source/JavaScriptCore/corpse/CorpseAddress.h:
+* Source/JavaScriptCore/corpse/CorpseByteParser.cpp:
+* Source/JavaScriptCore/corpse/CorpseByteParser.h:
+* Source/JavaScriptCore/corpse/CorpseClient.cpp:
+* Source/JavaScriptCore/corpse/CorpseClient.h:
+* Source/JavaScriptCore/corpse/CorpseError.cpp:
+* Source/JavaScriptCore/corpse/CorpseError.h:
+* Source/JavaScriptCore/corpse/CorpseExportsTrie.cpp:
+* Source/JavaScriptCore/corpse/CorpseExportsTrie.h:
+* Source/JavaScriptCore/corpse/CorpseMachVMSPI.h:
+* Source/JavaScriptCore/corpse/CorpseMemory.cpp:
+* Source/JavaScriptCore/corpse/CorpseMemory.h:
+* Source/JavaScriptCore/corpse/CorpseMemoryPtr.h:
+* Source/JavaScriptCore/corpse/CorpseMemorySpan.h:
+* Source/JavaScriptCore/corpse/CorpseProcess.cpp:
+* Source/JavaScriptCore/corpse/CorpseProcess.h:
+* Source/JavaScriptCore/corpse/CorpseRegion.cpp:
+* Source/JavaScriptCore/corpse/CorpseRegion.h:
+* Source/JavaScriptCore/corpse/CorpseSnapshot.cpp:
+* Source/JavaScriptCore/corpse/CorpseSnapshot.h:
+* Source/JavaScriptCore/corpse/CorpseSymbol.cpp:
+* Source/JavaScriptCore/corpse/CorpseSymbol.h:
+* Source/JavaScriptCore/corpse/CorpseThread.cpp:
+* Source/JavaScriptCore/corpse/CorpseThread.h:
+* Source/JavaScriptCore/corpse/tests/CorpseAddressTest.cpp:
+* Source/JavaScriptCore/corpse/tests/CorpseAddressTest.h:
+* Source/JavaScriptCore/corpse/tests/CorpseByteParserTest.cpp:
+* Source/JavaScriptCore/corpse/tests/CorpseByteParserTest.h:
+* Source/JavaScriptCore/corpse/tests/CorpseExportsTrieTest.cpp:
+* Source/JavaScriptCore/corpse/tests/CorpseExportsTrieTest.h:
+* Source/JavaScriptCore/corpse/tests/CorpseMemoryTest.cpp:
+* Source/JavaScriptCore/corpse/tests/CorpseMemoryTest.h:
+* Source/JavaScriptCore/corpse/tests/CorpseProcessTest.cpp:
+* Source/JavaScriptCore/corpse/tests/CorpseProcessTest.h:
+* Source/JavaScriptCore/corpse/tests/CorpseRegionTest.cpp:
+* Source/JavaScriptCore/corpse/tests/CorpseRegionTest.h:
+* Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.cpp:
+* Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.h:
+* Source/JavaScriptCore/corpse/tests/CorpseSymbolTest.cpp:
+* Source/JavaScriptCore/corpse/tests/CorpseSymbolTest.h:
+* Source/JavaScriptCore/corpse/tests/CorpseThreadTest.cpp:
+* Source/JavaScriptCore/corpse/tests/CorpseThreadTest.h:
+* Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.cpp:
+* Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h:
+* Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp:
+* Source/JavaScriptCore/mya/mya.cpp:
+(main):
+* Source/JavaScriptCore/shell/CMakeLists.txt:
+* Source/JavaScriptCore/shell/PlatformCocoa.cmake:
+* Source/WTF/wtf/MemoryFootprint.h:
+* Source/WTF/wtf/PlatformEnable.h:
+* Source/WTF/wtf/PlatformEnableCocoa.h:
+* Source/WTF/wtf/PlatformJSCOnly.cmake:
+* Source/cmake/WebKitFeatures.cmake:
+* Tools/Scripts/webkitperl/BuildSubproject.pm:
+* Tools/Scripts/run-javascriptcore-tests:
+---
+ Source/JavaScriptCore/CMakeLists.txt          |  9 ++--
+ .../Configurations/JSC.xcconfig               |  5 ++
+ .../Configurations/TestExecutable.xcconfig    |  5 ++
+ .../libJavaScriptCoreTools.xcconfig           |  5 ++
+ .../Scripts/process-entitlements.sh           | 11 ++++-
+ Source/JavaScriptCore/corpse/CMakeLists.txt   |  7 +++
+ Source/JavaScriptCore/corpse/CorpseAddress.h  |  4 +-
+ .../corpse/CorpseByteParser.cpp               |  4 +-
+ .../JavaScriptCore/corpse/CorpseByteParser.h  |  4 +-
+ Source/JavaScriptCore/corpse/CorpseClient.cpp |  4 +-
+ Source/JavaScriptCore/corpse/CorpseClient.h   |  4 +-
+ Source/JavaScriptCore/corpse/CorpseError.cpp  |  4 +-
+ Source/JavaScriptCore/corpse/CorpseError.h    |  4 +-
+ .../corpse/CorpseExportsTrie.cpp              |  4 +-
+ .../JavaScriptCore/corpse/CorpseExportsTrie.h |  4 +-
+ .../JavaScriptCore/corpse/CorpseMachVMSPI.h   |  4 +-
+ Source/JavaScriptCore/corpse/CorpseMemory.cpp |  4 +-
+ Source/JavaScriptCore/corpse/CorpseMemory.h   |  4 +-
+ .../JavaScriptCore/corpse/CorpseMemoryPtr.h   |  4 +-
+ .../JavaScriptCore/corpse/CorpseMemorySpan.h  |  4 +-
+ .../JavaScriptCore/corpse/CorpseProcess.cpp   |  4 +-
+ Source/JavaScriptCore/corpse/CorpseProcess.h  |  4 +-
+ Source/JavaScriptCore/corpse/CorpseRegion.cpp |  4 +-
+ Source/JavaScriptCore/corpse/CorpseRegion.h   |  4 +-
+ .../JavaScriptCore/corpse/CorpseSnapshot.cpp  |  4 +-
+ Source/JavaScriptCore/corpse/CorpseSnapshot.h |  4 +-
+ Source/JavaScriptCore/corpse/CorpseSymbol.cpp |  4 +-
+ Source/JavaScriptCore/corpse/CorpseSymbol.h   |  4 +-
+ Source/JavaScriptCore/corpse/CorpseThread.cpp |  4 +-
+ Source/JavaScriptCore/corpse/CorpseThread.h   |  4 +-
+ .../corpse/tests/CorpseAddressTest.cpp        |  4 +-
+ .../corpse/tests/CorpseAddressTest.h          |  4 +-
+ .../corpse/tests/CorpseByteParserTest.cpp     |  4 +-
+ .../corpse/tests/CorpseByteParserTest.h       |  4 +-
+ .../corpse/tests/CorpseExportsTrieTest.cpp    |  4 +-
+ .../corpse/tests/CorpseExportsTrieTest.h      |  4 +-
+ .../corpse/tests/CorpseMemoryTest.cpp         |  4 +-
+ .../corpse/tests/CorpseMemoryTest.h           |  4 +-
+ .../corpse/tests/CorpseProcessTest.cpp        |  4 +-
+ .../corpse/tests/CorpseProcessTest.h          |  4 +-
+ .../corpse/tests/CorpseRegionTest.cpp         |  4 +-
+ .../corpse/tests/CorpseRegionTest.h           |  4 +-
+ .../corpse/tests/CorpseSnapshotTest.cpp       |  4 +-
+ .../corpse/tests/CorpseSnapshotTest.h         |  4 +-
+ .../corpse/tests/CorpseSymbolTest.cpp         |  4 +-
+ .../corpse/tests/CorpseSymbolTest.h           |  4 +-
+ .../corpse/tests/CorpseThreadTest.cpp         |  4 +-
+ .../corpse/tests/CorpseThreadTest.h           |  4 +-
+ .../corpse/tests/LibJSCToolsTestUtilities.cpp |  4 +-
+ .../corpse/tests/LibJSCToolsTestUtilities.h   |  4 +-
+ .../corpse/tests/testLibJSCTools.cpp          |  4 +-
+ Source/JavaScriptCore/mya/mya.cpp             |  8 ++--
+ Source/JavaScriptCore/shell/CMakeLists.txt    | 48 +++++++++++++++----
+ .../JavaScriptCore/shell/PlatformCocoa.cmake  | 13 -----
+ Source/WTF/wtf/MemoryFootprint.h              |  4 +-
+ Source/WTF/wtf/PlatformEnable.h               |  4 ++
+ Source/WTF/wtf/PlatformEnableCocoa.h          |  4 ++
+ Source/WTF/wtf/PlatformJSCOnly.cmake          |  2 +
+ Source/cmake/WebKitFeatures.cmake             |  9 ++++
+ Tools/Scripts/run-javascriptcore-tests        | 12 ++---
+ Tools/Scripts/webkitperl/BuildSubproject.pm   |  2 +-
+ 61 files changed, 194 insertions(+), 134 deletions(-)
+
+diff --git a/Source/JavaScriptCore/CMakeLists.txt b/Source/JavaScriptCore/CMakeLists.txt
+index 0e7fe5b58b3e..31280592b8db 100644
+--- a/Source/JavaScriptCore/CMakeLists.txt
++++ b/Source/JavaScriptCore/CMakeLists.txt
+@@ -1635,9 +1635,7 @@ if (USE_INSPECTOR_SOCKET_SERVER)
+     )
+ endif ()
+ 
+-# The corpse memory-analysis support is built on Mach task and corpse APIs, so
+-# its headers have no content off Darwin and there is nothing to build or export.
+-if (APPLE)
++if (ENABLE_MYA)
+     list(APPEND JavaScriptCore_PRIVATE_INCLUDE_DIRECTORIES
+         "${JAVASCRIPTCORE_DIR}/corpse"
+     )
+@@ -1912,9 +1910,8 @@ add_dependencies(JavaScriptCoreSharedScripts JSCBuiltins)
+ 
+ # The corpse code is part of JavaScriptCoreTools, which ships as a static library used
+ # only by tools for assisting in the development of JavaScriptCore and WebKit. This code
+-# is not needed for JavaScriptCore and WebKit functionality as a browser engine. The
+-# corpse code rely on Mach APIs which are only available on Apple platforms.
+-if (APPLE)
++# is not needed for JavaScriptCore and WebKit functionality as a browser engine.
++if (ENABLE_MYA)
+   add_subdirectory(corpse)
+ endif ()
+ 
+diff --git a/Source/JavaScriptCore/Configurations/JSC.xcconfig b/Source/JavaScriptCore/Configurations/JSC.xcconfig
+index 48ea6dd500cc..57602d0d7970 100644
+--- a/Source/JavaScriptCore/Configurations/JSC.xcconfig
++++ b/Source/JavaScriptCore/Configurations/JSC.xcconfig
+@@ -44,6 +44,11 @@ CODE_SIGN_INJECT_BASE_ENTITLEMENTS[sdk=macosx*] = NO;
+ OTHER_CODE_SIGN_FLAGS[sdk=iphone*] = -i com.apple.jsc --entitlements ${WK_PROCESSED_XCENT_FILE};
+ OTHER_CODE_SIGN_FLAGS[sdk=macosx*] = --entitlements ${WK_PROCESSED_XCENT_FILE};
+ 
++ENTITLEMENTS_REQUIRED = $(ENTITLEMENTS_REQUIRED_USE_INTERNAL_SDK_$(USE_INTERNAL_SDK));
++ENTITLEMENTS_REQUIRED_USE_INTERNAL_SDK_ = NO;
++ENTITLEMENTS_REQUIRED_USE_INTERNAL_SDK_NO = NO;
++ENTITLEMENTS_REQUIRED_USE_INTERNAL_SDK_YES = $(ENTITLEMENTS_REQUIRED);
++
+ // Explicitly add the PrivateHeaders directory to the search path so that generated header files can be found in production builds.
+ HEADER_SEARCH_PATHS = "$(JAVASCRIPTCORE_FRAMEWORKS_DIR)/JavaScriptCore.framework/PrivateHeaders" $(inherited);
+ HEADER_SEARCH_PATHS = "${BUILT_PRODUCTS_DIR}/DerivedSources/JavaScriptCore" $(HEADER_SEARCH_PATHS);
+diff --git a/Source/JavaScriptCore/Configurations/TestExecutable.xcconfig b/Source/JavaScriptCore/Configurations/TestExecutable.xcconfig
+index e2a6eb2469c3..180735644f28 100644
+--- a/Source/JavaScriptCore/Configurations/TestExecutable.xcconfig
++++ b/Source/JavaScriptCore/Configurations/TestExecutable.xcconfig
+@@ -32,6 +32,11 @@ CODE_SIGN_INJECT_BASE_ENTITLEMENTS[sdk=macosx*] = NO;
+ OTHER_CODE_SIGN_FLAGS[sdk=iphone*] = -i com.apple.jsc --entitlements ${WK_PROCESSED_XCENT_FILE};
+ OTHER_CODE_SIGN_FLAGS[sdk=macosx*] = --entitlements ${WK_PROCESSED_XCENT_FILE};
+ 
++ENTITLEMENTS_REQUIRED = $(ENTITLEMENTS_REQUIRED_USE_INTERNAL_SDK_$(USE_INTERNAL_SDK));
++ENTITLEMENTS_REQUIRED_USE_INTERNAL_SDK_ = NO;
++ENTITLEMENTS_REQUIRED_USE_INTERNAL_SDK_NO = NO;
++ENTITLEMENTS_REQUIRED_USE_INTERNAL_SDK_YES = $(ENTITLEMENTS_REQUIRED);
++
+ SKIP_INSTALL = $(SKIP_INSTALL_$(FORCE_TOOL_INSTALL));
+ SKIP_INSTALL_ = YES;
+ SKIP_INSTALL_NO = YES;
+diff --git a/Source/JavaScriptCore/Configurations/libJavaScriptCoreTools.xcconfig b/Source/JavaScriptCore/Configurations/libJavaScriptCoreTools.xcconfig
+index 6c9d6d091079..406c72b658e3 100644
+--- a/Source/JavaScriptCore/Configurations/libJavaScriptCoreTools.xcconfig
++++ b/Source/JavaScriptCore/Configurations/libJavaScriptCoreTools.xcconfig
+@@ -56,3 +56,8 @@ STRIP_INSTALLED_PRODUCT = NO;
+ // The sources include "config.h" and their own headers from the source tree,
+ // plus JavaScriptCore's generated and private headers.
+ HEADER_SEARCH_PATHS = $(SRCROOT) $(SRCROOT)/corpse "$(JAVASCRIPTCORE_FRAMEWORKS_DIR)/JavaScriptCore.framework/PrivateHeaders" $(inherited);
++
++// A heap walk reads every value of a heap through WTF's containers, which at
++// -O0 makes a walk of a small heap take twice as long. JavaScriptCore itself
++// stays as the configuration says.
++WK_DEFAULT_GCC_OPTIMIZATION_LEVEL[config=Debug] = 2;
+diff --git a/Source/JavaScriptCore/Scripts/process-entitlements.sh b/Source/JavaScriptCore/Scripts/process-entitlements.sh
+index 8e8c00f5d4ff..ad473d3721fc 100755
+--- a/Source/JavaScriptCore/Scripts/process-entitlements.sh
++++ b/Source/JavaScriptCore/Scripts/process-entitlements.sh
+@@ -86,6 +86,14 @@ function mac_process_mya_entitlements()
+     fi
+ }
+ 
++function mac_process_testLibJSCTools_entitlements()
++{
++    if [[ "${RC_XBS}" != YES && "${WK_USE_RESTRICTED_ENTITLEMENTS}" != YES ]]
++    then
++        plistbuddy Add :com.apple.security.get-task-allow bool YES
++    fi
++}
++
+ # ========================================
+ # macCatalyst entitlements
+ # ========================================
+@@ -236,8 +244,7 @@ then
+           "${PRODUCT_NAME}" == testRegExp ]]; then mac_process_jsc_entitlements
+     elif [[ "${PRODUCT_NAME}" == testapi ]]; then mac_process_testapi_entitlements
+     elif [[ "${PRODUCT_NAME}" == mya ]]; then mac_process_mya_entitlements
+-    # testLibJSCTools only ever snapshots its own process, which needs no entitlement.
+-    elif [[ "${PRODUCT_NAME}" == testLibJSCTools ]]; then true
++    elif [[ "${PRODUCT_NAME}" == testLibJSCTools ]]; then mac_process_testLibJSCTools_entitlements
+     else echo "Unsupported/unknown product: ${PRODUCT_NAME}"
+     fi
+ elif [[ "${WK_PLATFORM_NAME}" == maccatalyst || "${WK_PLATFORM_NAME}" == iosmac ]]
+diff --git a/Source/JavaScriptCore/corpse/CMakeLists.txt b/Source/JavaScriptCore/corpse/CMakeLists.txt
+index 42c529add0ba..f3f240aa558f 100644
+--- a/Source/JavaScriptCore/corpse/CMakeLists.txt
++++ b/Source/JavaScriptCore/corpse/CMakeLists.txt
+@@ -31,3 +31,10 @@ WEBKIT_LIBRARY(JavaScriptCoreTools)
+ 
+ # The corpse sources use JavaScriptCore's generated headers.
+ add_dependencies(JavaScriptCoreTools JavaScriptCore)
++
++# A heap walk reads every value of a heap through WTF's containers, which at
++# -O0 makes a walk of a small heap take twice as long. JavaScriptCore itself
++# stays as the build type says.
++if (CMAKE_BUILD_TYPE STREQUAL "Debug")
++    target_compile_options(JavaScriptCoreTools PRIVATE -O2)
++endif ()
+diff --git a/Source/JavaScriptCore/corpse/CorpseAddress.h b/Source/JavaScriptCore/corpse/CorpseAddress.h
+index b2d56d3431d1..fb52905a87d2 100644
+--- a/Source/JavaScriptCore/corpse/CorpseAddress.h
++++ b/Source/JavaScriptCore/corpse/CorpseAddress.h
+@@ -25,7 +25,7 @@
+ 
+ #pragma once
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include <bit>
+ #include <compare>
+@@ -121,4 +121,4 @@ template<> struct HashTraits<JSC::Corpse::Address> : GenericHashTraits<JSC::Corp
+ 
+ } // namespace WTF
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseByteParser.cpp b/Source/JavaScriptCore/corpse/CorpseByteParser.cpp
+index ea65768b3344..a7be6c7c5422 100644
+--- a/Source/JavaScriptCore/corpse/CorpseByteParser.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseByteParser.cpp
+@@ -26,7 +26,7 @@
+ #include "config.h"
+ #include "CorpseByteParser.h"
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include <wtf/LEBDecoder.h>
+ #include <wtf/StdLibExtras.h>
+@@ -68,4 +68,4 @@ std::optional<std::string_view> ByteParser::consumeCString()
+ } // namespace Corpse
+ } // namespace JSC
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseByteParser.h b/Source/JavaScriptCore/corpse/CorpseByteParser.h
+index f5c404e03c1b..9e7419a0c87f 100644
+--- a/Source/JavaScriptCore/corpse/CorpseByteParser.h
++++ b/Source/JavaScriptCore/corpse/CorpseByteParser.h
+@@ -25,7 +25,7 @@
+ 
+ #pragma once
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include <optional>
+ #include <span>
+@@ -68,4 +68,4 @@ private:
+ } // namespace Corpse
+ } // namespace JSC
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseClient.cpp b/Source/JavaScriptCore/corpse/CorpseClient.cpp
+index 800479f273de..1df7cccc406d 100644
+--- a/Source/JavaScriptCore/corpse/CorpseClient.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseClient.cpp
+@@ -26,7 +26,7 @@
+ #include "config.h"
+ #include "CorpseClient.h"
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ namespace JSC {
+ namespace Corpse {
+@@ -42,4 +42,4 @@ void Client::setName(ASCIILiteral name)
+ } // namespace Corpse
+ } // namespace JSC
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseClient.h b/Source/JavaScriptCore/corpse/CorpseClient.h
+index b5ab8c1c380a..89ccc7b46824 100644
+--- a/Source/JavaScriptCore/corpse/CorpseClient.h
++++ b/Source/JavaScriptCore/corpse/CorpseClient.h
+@@ -25,7 +25,7 @@
+ 
+ #pragma once
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include <wtf/text/ASCIILiteral.h>
+ 
+@@ -48,4 +48,4 @@ private:
+ } // namespace Corpse
+ } // namespace JSC
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseError.cpp b/Source/JavaScriptCore/corpse/CorpseError.cpp
+index 0f7ea774d502..f948a6a2181d 100644
+--- a/Source/JavaScriptCore/corpse/CorpseError.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseError.cpp
+@@ -26,7 +26,7 @@
+ #include "config.h"
+ #include "CorpseError.h"
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include "CorpseClient.h"
+ 
+@@ -55,4 +55,4 @@ void Error::report(const char* format, ...)
+ 
+ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseError.h b/Source/JavaScriptCore/corpse/CorpseError.h
+index 6a4ab690dd75..69f93adb0340 100644
+--- a/Source/JavaScriptCore/corpse/CorpseError.h
++++ b/Source/JavaScriptCore/corpse/CorpseError.h
+@@ -25,7 +25,7 @@
+ 
+ #pragma once
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include <wtf/Assertions.h>
+ 
+@@ -42,4 +42,4 @@ public:
+ } // namespace Corpse
+ } // namespace JSC
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseExportsTrie.cpp b/Source/JavaScriptCore/corpse/CorpseExportsTrie.cpp
+index 39de6d19fee1..76494c072a51 100644
+--- a/Source/JavaScriptCore/corpse/CorpseExportsTrie.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseExportsTrie.cpp
+@@ -26,7 +26,7 @@
+ #include "config.h"
+ #include "CorpseExportsTrie.h"
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include <mach-o/loader.h>
+ #include <optional>
+@@ -141,4 +141,4 @@ std::expected<ExportsTrie::Export, ExportsTrie::Failure> ExportsTrie::lookUp(std
+ } // namespace Corpse
+ } // namespace JSC
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseExportsTrie.h b/Source/JavaScriptCore/corpse/CorpseExportsTrie.h
+index 40d504ac42bd..0ea898aa27d3 100644
+--- a/Source/JavaScriptCore/corpse/CorpseExportsTrie.h
++++ b/Source/JavaScriptCore/corpse/CorpseExportsTrie.h
+@@ -25,7 +25,7 @@
+ 
+ #pragma once
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include <JavaScriptCore/CorpseByteParser.h>
+ #include <expected>
+@@ -66,4 +66,4 @@ public:
+ } // namespace Corpse
+ } // namespace JSC
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseMachVMSPI.h b/Source/JavaScriptCore/corpse/CorpseMachVMSPI.h
+index 8337d40140b4..4c3befb11d86 100644
+--- a/Source/JavaScriptCore/corpse/CorpseMachVMSPI.h
++++ b/Source/JavaScriptCore/corpse/CorpseMachVMSPI.h
+@@ -33,7 +33,7 @@ DECLARE_SYSTEM_HEADER
+ 
+ #include <wtf/spi/cocoa/MachVMSPI.h>
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ WTF_EXTERN_C_BEGIN
+ 
+@@ -42,4 +42,4 @@ kern_return_t mach_vm_remap_new(vm_map_t targetTask, mach_vm_address_t*, mach_vm
+ 
+ WTF_EXTERN_C_END
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseMemory.cpp b/Source/JavaScriptCore/corpse/CorpseMemory.cpp
+index e3679cb1698c..116888294b55 100644
+--- a/Source/JavaScriptCore/corpse/CorpseMemory.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseMemory.cpp
+@@ -26,7 +26,7 @@
+ #include "config.h"
+ #include "CorpseMemory.h"
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include "CorpseMachVMSPI.h"
+ 
+@@ -246,4 +246,4 @@ void Memory::dump(const char* indent) const
+ 
+ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseMemory.h b/Source/JavaScriptCore/corpse/CorpseMemory.h
+index 3cee94c4c9bb..ffc79741b629 100644
+--- a/Source/JavaScriptCore/corpse/CorpseMemory.h
++++ b/Source/JavaScriptCore/corpse/CorpseMemory.h
+@@ -25,7 +25,7 @@
+ 
+ #pragma once
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include <JavaScriptCore/CorpseAddress.h>
+ #include <mach/mach.h>
+@@ -156,4 +156,4 @@ private:
+ #include <JavaScriptCore/CorpseMemoryPtr.h>
+ #include <JavaScriptCore/CorpseMemorySpan.h>
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseMemoryPtr.h b/Source/JavaScriptCore/corpse/CorpseMemoryPtr.h
+index da89ab20753f..067eb3aef049 100644
+--- a/Source/JavaScriptCore/corpse/CorpseMemoryPtr.h
++++ b/Source/JavaScriptCore/corpse/CorpseMemoryPtr.h
+@@ -25,7 +25,7 @@
+ 
+ #pragma once
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include <JavaScriptCore/CorpseMemory.h>
+ #include <mach/mach.h>
+@@ -145,4 +145,4 @@ Memory::Ptr<T> Memory::ptr(Address address)
+ } // namespace Corpse
+ } // namespace JSC
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseMemorySpan.h b/Source/JavaScriptCore/corpse/CorpseMemorySpan.h
+index 532ea2d2da3a..a334cefc0f56 100644
+--- a/Source/JavaScriptCore/corpse/CorpseMemorySpan.h
++++ b/Source/JavaScriptCore/corpse/CorpseMemorySpan.h
+@@ -25,7 +25,7 @@
+ 
+ #pragma once
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include <JavaScriptCore/CorpseMemory.h>
+ #include <cstddef>
+@@ -194,4 +194,4 @@ Memory::Span<T> Memory::span(Address address, size_t count)
+ } // namespace Corpse
+ } // namespace JSC
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseProcess.cpp b/Source/JavaScriptCore/corpse/CorpseProcess.cpp
+index d980d94701c0..22eb771541a9 100644
+--- a/Source/JavaScriptCore/corpse/CorpseProcess.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseProcess.cpp
+@@ -26,7 +26,7 @@
+ #include "config.h"
+ #include "CorpseProcess.h"
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include "CorpseError.h"
+ 
+@@ -107,4 +107,4 @@ void Process::detach()
+ 
+ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseProcess.h b/Source/JavaScriptCore/corpse/CorpseProcess.h
+index 83df1bda88e1..7f190c5efcad 100644
+--- a/Source/JavaScriptCore/corpse/CorpseProcess.h
++++ b/Source/JavaScriptCore/corpse/CorpseProcess.h
+@@ -25,7 +25,7 @@
+ 
+ #pragma once
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include <mach/mach.h>
+ #include <sys/types.h>
+@@ -75,4 +75,4 @@ private:
+ } // namespace Corpse
+ } // namespace JSC
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseRegion.cpp b/Source/JavaScriptCore/corpse/CorpseRegion.cpp
+index 7d912d228ca3..d53fb063cf00 100644
+--- a/Source/JavaScriptCore/corpse/CorpseRegion.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseRegion.cpp
+@@ -26,7 +26,7 @@
+ #include "config.h"
+ #include "CorpseRegion.h"
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include <mach/mach_vm.h>
+ 
+@@ -72,4 +72,4 @@ std::optional<Region> Region::findContaining(mach_port_t task, Address address)
+ } // namespace Corpse
+ } // namespace JSC
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseRegion.h b/Source/JavaScriptCore/corpse/CorpseRegion.h
+index d2bfcaa0adb6..0115c7a5c307 100644
+--- a/Source/JavaScriptCore/corpse/CorpseRegion.h
++++ b/Source/JavaScriptCore/corpse/CorpseRegion.h
+@@ -25,7 +25,7 @@
+ 
+ #pragma once
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include <JavaScriptCore/CorpseAddress.h>
+ #include <mach/mach.h>
+@@ -60,4 +60,4 @@ private:
+ } // namespace Corpse
+ } // namespace JSC
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseSnapshot.cpp b/Source/JavaScriptCore/corpse/CorpseSnapshot.cpp
+index 7794ab97413b..acac5392a318 100644
+--- a/Source/JavaScriptCore/corpse/CorpseSnapshot.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseSnapshot.cpp
+@@ -26,7 +26,7 @@
+ #include "config.h"
+ #include "CorpseSnapshot.h"
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include "CorpseError.h"
+ 
+@@ -104,4 +104,4 @@ Address Snapshot::symbol(const char* name)
+ 
+ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseSnapshot.h b/Source/JavaScriptCore/corpse/CorpseSnapshot.h
+index ed5f35b89a4c..b69f6c117ffe 100644
+--- a/Source/JavaScriptCore/corpse/CorpseSnapshot.h
++++ b/Source/JavaScriptCore/corpse/CorpseSnapshot.h
+@@ -25,7 +25,7 @@
+ 
+ #pragma once
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include <JavaScriptCore/CorpseAddress.h>
+ #include <JavaScriptCore/CorpseMemory.h>
+@@ -106,4 +106,4 @@ private:
+ } // namespace Corpse
+ } // namespace JSC
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseSymbol.cpp b/Source/JavaScriptCore/corpse/CorpseSymbol.cpp
+index 900a0b41d55d..0d2caa9d25af 100644
+--- a/Source/JavaScriptCore/corpse/CorpseSymbol.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseSymbol.cpp
+@@ -26,7 +26,7 @@
+ #include "config.h"
+ #include "CorpseSymbol.h"
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include "CorpseError.h"
+ #include "CorpseExportsTrie.h"
+@@ -433,4 +433,4 @@ Symbol::Symbol(Snapshot& snapshot, const char* name)
+ 
+ #undef CORPSE_DIAGNOSTIC_DO
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseSymbol.h b/Source/JavaScriptCore/corpse/CorpseSymbol.h
+index 160f5a9a1b53..aec3fd6abce9 100644
+--- a/Source/JavaScriptCore/corpse/CorpseSymbol.h
++++ b/Source/JavaScriptCore/corpse/CorpseSymbol.h
+@@ -25,7 +25,7 @@
+ 
+ #pragma once
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include <JavaScriptCore/CorpseAddress.h>
+ #include <mach/mach.h>
+@@ -111,4 +111,4 @@ private:
+ } // namespace Corpse
+ } // namespace JSC
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseThread.cpp b/Source/JavaScriptCore/corpse/CorpseThread.cpp
+index f70ee5151c61..d09f7f250a94 100644
+--- a/Source/JavaScriptCore/corpse/CorpseThread.cpp
++++ b/Source/JavaScriptCore/corpse/CorpseThread.cpp
+@@ -26,7 +26,7 @@
+ #include "config.h"
+ #include "CorpseThread.h"
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include "CorpseError.h"
+ #include "CorpseProcess.h"
+@@ -186,4 +186,4 @@ Vector<Thread> Thread::collect(const Snapshot& snapshot)
+ 
+ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/CorpseThread.h b/Source/JavaScriptCore/corpse/CorpseThread.h
+index 64b2ae2d433f..d63d9f055fdf 100644
+--- a/Source/JavaScriptCore/corpse/CorpseThread.h
++++ b/Source/JavaScriptCore/corpse/CorpseThread.h
+@@ -25,7 +25,7 @@
+ 
+ #pragma once
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include <JavaScriptCore/CorpseAddress.h>
+ #include <JavaScriptCore/CorpseRegion.h>
+@@ -79,4 +79,4 @@ private:
+ } // namespace Corpse
+ } // namespace JSC
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseAddressTest.cpp b/Source/JavaScriptCore/corpse/tests/CorpseAddressTest.cpp
+index 8a78befa5ff1..f0b29e998abc 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseAddressTest.cpp
++++ b/Source/JavaScriptCore/corpse/tests/CorpseAddressTest.cpp
+@@ -26,7 +26,7 @@
+ #include "config.h"
+ #include "CorpseAddressTest.h"
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include "LibJSCToolsTestUtilities.h"
+ 
+@@ -202,4 +202,4 @@ void testAddress()
+ 
+ } // namespace JSCToolsTest
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseAddressTest.h b/Source/JavaScriptCore/corpse/tests/CorpseAddressTest.h
+index 2af264d1993e..802d16b0cf55 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseAddressTest.h
++++ b/Source/JavaScriptCore/corpse/tests/CorpseAddressTest.h
+@@ -25,7 +25,7 @@
+ 
+ #pragma once
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ namespace JSCToolsTest {
+ 
+@@ -33,4 +33,4 @@ void testAddress();
+ 
+ } // namespace JSCToolsTest
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseByteParserTest.cpp b/Source/JavaScriptCore/corpse/tests/CorpseByteParserTest.cpp
+index 9b9ae8b7cd3d..0e518e6de7a2 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseByteParserTest.cpp
++++ b/Source/JavaScriptCore/corpse/tests/CorpseByteParserTest.cpp
+@@ -26,7 +26,7 @@
+ #include "config.h"
+ #include "CorpseByteParserTest.h"
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include "LibJSCToolsTestUtilities.h"
+ 
+@@ -184,4 +184,4 @@ void testByteParser()
+ 
+ } // namespace JSCToolsTest
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseByteParserTest.h b/Source/JavaScriptCore/corpse/tests/CorpseByteParserTest.h
+index 02c3681aee74..8a1dfdc216d5 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseByteParserTest.h
++++ b/Source/JavaScriptCore/corpse/tests/CorpseByteParserTest.h
+@@ -25,7 +25,7 @@
+ 
+ #pragma once
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ namespace JSCToolsTest {
+ 
+@@ -33,4 +33,4 @@ void testByteParser();
+ 
+ } // namespace JSCToolsTest
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseExportsTrieTest.cpp b/Source/JavaScriptCore/corpse/tests/CorpseExportsTrieTest.cpp
+index e2c2c33d1707..641774767cf9 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseExportsTrieTest.cpp
++++ b/Source/JavaScriptCore/corpse/tests/CorpseExportsTrieTest.cpp
+@@ -26,7 +26,7 @@
+ #include "config.h"
+ #include "CorpseExportsTrieTest.h"
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include "LibJSCToolsTestUtilities.h"
+ 
+@@ -810,4 +810,4 @@ void fuzzExportsTrie(uint64_t seed, unsigned iterations)
+ 
+ } // namespace JSCToolsTest
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseExportsTrieTest.h b/Source/JavaScriptCore/corpse/tests/CorpseExportsTrieTest.h
+index 29e8bc6b4f8f..f8ad61bf05ea 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseExportsTrieTest.h
++++ b/Source/JavaScriptCore/corpse/tests/CorpseExportsTrieTest.h
+@@ -25,7 +25,7 @@
+ 
+ #pragma once
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include <stdint.h>
+ 
+@@ -40,4 +40,4 @@ void fuzzExportsTrie(uint64_t seed, unsigned iterations);
+ 
+ } // namespace JSCToolsTest
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseMemoryTest.cpp b/Source/JavaScriptCore/corpse/tests/CorpseMemoryTest.cpp
+index 280305d612ac..c28ea098a7ca 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseMemoryTest.cpp
++++ b/Source/JavaScriptCore/corpse/tests/CorpseMemoryTest.cpp
+@@ -26,7 +26,7 @@
+ #include "config.h"
+ #include "CorpseMemoryTest.h"
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include "LibJSCToolsTestUtilities.h"
+ 
+@@ -437,4 +437,4 @@ void testMemory()
+ 
+ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseMemoryTest.h b/Source/JavaScriptCore/corpse/tests/CorpseMemoryTest.h
+index 28279bfbaa36..753a38e88d94 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseMemoryTest.h
++++ b/Source/JavaScriptCore/corpse/tests/CorpseMemoryTest.h
+@@ -25,7 +25,7 @@
+ 
+ #pragma once
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ namespace JSCToolsTest {
+ 
+@@ -36,4 +36,4 @@ void testMemory();
+ 
+ } // namespace JSCToolsTest
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseProcessTest.cpp b/Source/JavaScriptCore/corpse/tests/CorpseProcessTest.cpp
+index d9edbc522b7b..6395a25706c5 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseProcessTest.cpp
++++ b/Source/JavaScriptCore/corpse/tests/CorpseProcessTest.cpp
+@@ -26,7 +26,7 @@
+ #include "config.h"
+ #include "CorpseProcessTest.h"
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include "LibJSCToolsTestUtilities.h"
+ 
+@@ -211,4 +211,4 @@ void testProcess()
+ 
+ } // namespace JSCToolsTest
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseProcessTest.h b/Source/JavaScriptCore/corpse/tests/CorpseProcessTest.h
+index 1245c56e1e07..1057e6711ced 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseProcessTest.h
++++ b/Source/JavaScriptCore/corpse/tests/CorpseProcessTest.h
+@@ -25,7 +25,7 @@
+ 
+ #pragma once
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ namespace JSCToolsTest {
+ 
+@@ -33,4 +33,4 @@ void testProcess();
+ 
+ } // namespace JSCToolsTest
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseRegionTest.cpp b/Source/JavaScriptCore/corpse/tests/CorpseRegionTest.cpp
+index 1fbd05f971f3..6e12d9301fb8 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseRegionTest.cpp
++++ b/Source/JavaScriptCore/corpse/tests/CorpseRegionTest.cpp
+@@ -26,7 +26,7 @@
+ #include "config.h"
+ #include "CorpseRegionTest.h"
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include "LibJSCToolsTestUtilities.h"
+ 
+@@ -178,4 +178,4 @@ void testRegion()
+ 
+ } // namespace JSCToolsTest
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseRegionTest.h b/Source/JavaScriptCore/corpse/tests/CorpseRegionTest.h
+index b2c14df1c4db..c7e36be3eab1 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseRegionTest.h
++++ b/Source/JavaScriptCore/corpse/tests/CorpseRegionTest.h
+@@ -25,7 +25,7 @@
+ 
+ #pragma once
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ namespace JSCToolsTest {
+ 
+@@ -36,4 +36,4 @@ void testRegion();
+ 
+ } // namespace JSCToolsTest
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.cpp b/Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.cpp
+index 7ba2cefe1ca9..cc1eb821d63a 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.cpp
++++ b/Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.cpp
+@@ -26,7 +26,7 @@
+ #include "config.h"
+ #include "CorpseSnapshotTest.h"
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include "LibJSCToolsTestUtilities.h"
+ 
+@@ -127,4 +127,4 @@ void testSnapshot()
+ 
+ } // namespace JSCToolsTest
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.h b/Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.h
+index 4a0b7759f219..38f92ed3dc8b 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.h
++++ b/Source/JavaScriptCore/corpse/tests/CorpseSnapshotTest.h
+@@ -25,7 +25,7 @@
+ 
+ #pragma once
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ namespace JSCToolsTest {
+ 
+@@ -36,4 +36,4 @@ void testSnapshot();
+ 
+ } // namespace JSCToolsTest
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseSymbolTest.cpp b/Source/JavaScriptCore/corpse/tests/CorpseSymbolTest.cpp
+index 28e5fd3b46e1..85e70bcd74b5 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseSymbolTest.cpp
++++ b/Source/JavaScriptCore/corpse/tests/CorpseSymbolTest.cpp
+@@ -26,7 +26,7 @@
+ #include "config.h"
+ #include "CorpseSymbolTest.h"
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include "LibJSCToolsTestUtilities.h"
+ 
+@@ -159,4 +159,4 @@ void testSymbol()
+ 
+ } // namespace JSCToolsTest
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseSymbolTest.h b/Source/JavaScriptCore/corpse/tests/CorpseSymbolTest.h
+index e66d0a11c6a6..87af2ea0cd04 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseSymbolTest.h
++++ b/Source/JavaScriptCore/corpse/tests/CorpseSymbolTest.h
+@@ -25,7 +25,7 @@
+ 
+ #pragma once
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ namespace JSCToolsTest {
+ 
+@@ -33,4 +33,4 @@ void testSymbol();
+ 
+ } // namespace JSCToolsTest
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseThreadTest.cpp b/Source/JavaScriptCore/corpse/tests/CorpseThreadTest.cpp
+index bee4b17a47bb..ef74186f5152 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseThreadTest.cpp
++++ b/Source/JavaScriptCore/corpse/tests/CorpseThreadTest.cpp
+@@ -26,7 +26,7 @@
+ #include "config.h"
+ #include "CorpseThreadTest.h"
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include "LibJSCToolsTestUtilities.h"
+ 
+@@ -115,4 +115,4 @@ void testThreads()
+ 
+ } // namespace JSCToolsTest
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/CorpseThreadTest.h b/Source/JavaScriptCore/corpse/tests/CorpseThreadTest.h
+index 8a897ad7551c..7420c5f4c49c 100644
+--- a/Source/JavaScriptCore/corpse/tests/CorpseThreadTest.h
++++ b/Source/JavaScriptCore/corpse/tests/CorpseThreadTest.h
+@@ -25,7 +25,7 @@
+ 
+ #pragma once
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ namespace JSCToolsTest {
+ 
+@@ -36,4 +36,4 @@ void testThreads();
+ 
+ } // namespace JSCToolsTest
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.cpp b/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.cpp
+index ace4dc13eb2d..45ed72585af3 100644
+--- a/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.cpp
++++ b/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.cpp
+@@ -26,7 +26,7 @@
+ #include "config.h"
+ #include "LibJSCToolsTestUtilities.h"
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include <JavaScriptCore/CorpseProcess.h>
+ #include <JavaScriptCore/CorpseSnapshot.h>
+@@ -229,4 +229,4 @@ void ParkedThreads::stopAndJoin()
+ 
+ } // namespace JSCToolsTest
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h b/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h
+index f1d9cad44733..c8c486bad005 100644
+--- a/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h
++++ b/Source/JavaScriptCore/corpse/tests/LibJSCToolsTestUtilities.h
+@@ -25,7 +25,7 @@
+ 
+ #pragma once
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include <mach/mach.h>
+ #include <memory>
+@@ -181,4 +181,4 @@ private:
+ 
+ } // namespace JSCToolsTest
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp b/Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp
+index 36e55f2db6e3..fd0739294774 100644
+--- a/Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp
++++ b/Source/JavaScriptCore/corpse/tests/testLibJSCTools.cpp
+@@ -27,7 +27,7 @@
+ 
+ #include <wtf/DataLog.h>
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include "CorpseAddressTest.h"
+ #include "CorpseByteParserTest.h"
+@@ -159,4 +159,4 @@ int main(int, char**)
+     return 0;
+ }
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+diff --git a/Source/JavaScriptCore/mya/mya.cpp b/Source/JavaScriptCore/mya/mya.cpp
+index 1ee8ccd46547..0d14f4636997 100644
+--- a/Source/JavaScriptCore/mya/mya.cpp
++++ b/Source/JavaScriptCore/mya/mya.cpp
+@@ -25,7 +25,7 @@
+ 
+ #include "config.h"
+ 
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+ 
+ #include <JavaScriptCore/CorpseAddress.h>
+ #include <JavaScriptCore/CorpseClient.h>
+@@ -1392,16 +1392,16 @@ private:
+ 
+ WTF_ALLOW_UNSAFE_BUFFER_USAGE_END
+ 
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+ 
+ int main(int argc, char** argv)
+ {
+-#if (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#if ENABLE(MYA)
+     return Mya::Shell().run(argc, argv);
+ #else
+     UNUSED_PARAM(argc);
+     UNUSED_PARAM(argv);
+     printf("Not supported platform for mya\n");
+     return 1;
+-#endif // (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#endif // ENABLE(MYA)
+ }
+diff --git a/Source/JavaScriptCore/shell/CMakeLists.txt b/Source/JavaScriptCore/shell/CMakeLists.txt
+index 53920c730b0c..95976222a869 100644
+--- a/Source/JavaScriptCore/shell/CMakeLists.txt
++++ b/Source/JavaScriptCore/shell/CMakeLists.txt
+@@ -22,9 +22,7 @@ if (ENABLE_FUZZILLI)
+   list(APPEND jsc_SOURCES ../fuzzilli/Fuzzilli.cpp)
+ endif ()
+ 
+-# mya analyzes process corpses through Mach task APIs, so it only builds on
+-# Apple platforms. Its sources do not compile elsewhere.
+-if (APPLE)
++if (ENABLE_MYA)
+     set(mya_SOURCES ../mya/mya.cpp)
+     set(mya_FRAMEWORKS
+         JavaScriptCore
+@@ -37,12 +35,15 @@ if (APPLE)
+     )
+ 
+     # The corpse support mya uses lives in the tools static library.
+-    set(mya_LIBRARIES JavaScriptCoreTools edit)
++    set(mya_LIBRARIES JavaScriptCoreTools)
++    if (APPLE)
++        list(APPEND mya_LIBRARIES edit)
++    endif ()
+ endif ()
+ 
+ WEBKIT_EXECUTABLE_DECLARE(jsc)
+ 
+-if (APPLE)
++if (ENABLE_MYA)
+     WEBKIT_EXECUTABLE_DECLARE(mya)
+ endif ()
+ 
+@@ -104,8 +105,7 @@ if (DEVELOPER_MODE)
+     set(testdfg_PRIVATE_INCLUDE_DIRECTORIES ${jsc_PRIVATE_INCLUDE_DIRECTORIES})
+     set(testdfg_FRAMEWORKS ${jsc_FRAMEWORKS})
+ 
+-    # The tools library and its tests are only relevant for Apple platforms.
+-    if (APPLE)
++    if (ENABLE_MYA)
+         set(testLibJSCTools_SOURCES
+             ../corpse/tests/CorpseAddressTest.cpp
+             ../corpse/tests/CorpseByteParserTest.cpp
+@@ -160,7 +160,7 @@ if (DEVELOPER_MODE)
+     WEBKIT_EXECUTABLE_DECLARE(testdfg)
+     WEBKIT_EXECUTABLE_DECLARE(testwasmdebugger)
+ 
+-    if (APPLE)
++    if (ENABLE_MYA)
+         WEBKIT_EXECUTABLE_DECLARE(testLibJSCTools)
+     endif ()
+ 
+@@ -171,6 +171,34 @@ if (DEVELOPER_MODE)
+     endif ()
+ endif ()
+ 
++# JSCOnly on macOS needs these too, so they cannot live in PlatformCocoa.cmake.
++if (APPLE)
++    WEBKIT_GENERATE_ENTITLEMENTS(jsc USING ../Scripts/process-entitlements.sh)
++    if (ENABLE_MYA)
++        WEBKIT_GENERATE_ENTITLEMENTS(mya USING ../Scripts/process-entitlements.sh)
++    endif ()
++    if (DEVELOPER_MODE)
++        WEBKIT_GENERATE_ENTITLEMENTS(testapi USING ../Scripts/process-entitlements.sh)
++        WEBKIT_GENERATE_ENTITLEMENTS(testRegExp USING ../Scripts/process-entitlements.sh)
++        WEBKIT_GENERATE_ENTITLEMENTS(testmasm USING ../Scripts/process-entitlements.sh)
++        WEBKIT_GENERATE_ENTITLEMENTS(testb3 USING ../Scripts/process-entitlements.sh)
++        WEBKIT_GENERATE_ENTITLEMENTS(testair USING ../Scripts/process-entitlements.sh)
++        WEBKIT_GENERATE_ENTITLEMENTS(testdfg USING ../Scripts/process-entitlements.sh)
++        if (ENABLE_MYA)
++            WEBKIT_GENERATE_ENTITLEMENTS(testLibJSCTools USING ../Scripts/process-entitlements.sh)
++        endif ()
++    endif ()
++endif ()
++
++# Lets build scripts request the mya executables without knowing whether ENABLE_MYA is on.
++add_custom_target(MyaExecutables)
++if (ENABLE_MYA)
++    add_dependencies(MyaExecutables mya)
++    if (DEVELOPER_MODE)
++        add_dependencies(MyaExecutables testLibJSCTools)
++    endif ()
++endif ()
++
+ WEBKIT_INCLUDE_CONFIG_FILES_IF_EXISTS()
+ 
+ WEBKIT_EXECUTABLE(jsc)
+@@ -179,7 +207,7 @@ if (SHOULD_INSTALL_JS_SHELL)
+     install(TARGETS jsc DESTINATION "${LIBEXEC_INSTALL_DIR}")
+ endif ()
+ 
+-if (APPLE)
++if (ENABLE_MYA)
+     WEBKIT_EXECUTABLE(mya)
+ 
+     if (SHOULD_INSTALL_JS_SHELL)
+@@ -196,7 +224,7 @@ if (DEVELOPER_MODE)
+     WEBKIT_EXECUTABLE(testdfg)
+     WEBKIT_EXECUTABLE(testwasmdebugger)
+ 
+-    if (APPLE)
++    if (ENABLE_MYA)
+         WEBKIT_EXECUTABLE(testLibJSCTools)
+     endif ()
+ 
+diff --git a/Source/JavaScriptCore/shell/PlatformCocoa.cmake b/Source/JavaScriptCore/shell/PlatformCocoa.cmake
+index 3ebba0330703..a872d6a15217 100644
+--- a/Source/JavaScriptCore/shell/PlatformCocoa.cmake
++++ b/Source/JavaScriptCore/shell/PlatformCocoa.cmake
+@@ -12,16 +12,3 @@ set_source_files_properties(${testapi_OBJC_SOURCES} PROPERTIES
+     COMPILE_FLAGS -fobjc-arc
+     SKIP_PRECOMPILE_HEADERS ON
+ )
+-
+-WEBKIT_GENERATE_ENTITLEMENTS(jsc USING ../Scripts/process-entitlements.sh)
+-WEBKIT_GENERATE_ENTITLEMENTS(mya USING ../Scripts/process-entitlements.sh)
+-if (DEVELOPER_MODE)
+-    WEBKIT_GENERATE_ENTITLEMENTS(testapi USING ../Scripts/process-entitlements.sh)
+-    WEBKIT_GENERATE_ENTITLEMENTS(testRegExp USING ../Scripts/process-entitlements.sh)
+-    WEBKIT_GENERATE_ENTITLEMENTS(testmasm USING ../Scripts/process-entitlements.sh)
+-    WEBKIT_GENERATE_ENTITLEMENTS(testb3 USING ../Scripts/process-entitlements.sh)
+-    WEBKIT_GENERATE_ENTITLEMENTS(testair USING ../Scripts/process-entitlements.sh)
+-    WEBKIT_GENERATE_ENTITLEMENTS(testdfg USING ../Scripts/process-entitlements.sh)
+-    WEBKIT_GENERATE_ENTITLEMENTS(testLibJSCTools USING ../Scripts/process-entitlements.sh)
+-endif ()
+-
+diff --git a/Source/WTF/wtf/MemoryFootprint.h b/Source/WTF/wtf/MemoryFootprint.h
+index bc7123f54214..f3b51db4e591 100644
+--- a/Source/WTF/wtf/MemoryFootprint.h
++++ b/Source/WTF/wtf/MemoryFootprint.h
+@@ -28,7 +28,7 @@
+ #include <cstdint>
+ #include <wtf/ExportMacros.h>
+ 
+-#if PLATFORM(COCOA)
++#if OS(DARWIN)
+ #include <mach/port.h>
+ #endif
+ 
+@@ -36,7 +36,7 @@ namespace WTF {
+ 
+ WTF_EXPORT_PRIVATE size_t memoryFootprint();
+ 
+-#if PLATFORM(COCOA)
++#if OS(DARWIN)
+ WTF_EXPORT_PRIVATE size_t memoryFootprint(mach_port_t);
+ #endif
+ 
+diff --git a/Source/WTF/wtf/PlatformEnable.h b/Source/WTF/wtf/PlatformEnable.h
+index 8b15031e0e49..74a76d791152 100644
+--- a/Source/WTF/wtf/PlatformEnable.h
++++ b/Source/WTF/wtf/PlatformEnable.h
+@@ -1006,6 +1006,10 @@
+ #define ENABLE_TREE_DEBUGGING 1
+ #endif
+ 
++#if !defined(ENABLE_MYA)
++#define ENABLE_MYA 0
++#endif
++
+ /* This feature works by embedding the OpcodeID in the 32 bit just before the generated LLint code
+    that executes each opcode. It cannot be supported by the CLoop since there's no way to embed the
+    OpcodeID word in the CLoop's switch statement cases. It is also currently not implemented for MSVC.
+diff --git a/Source/WTF/wtf/PlatformEnableCocoa.h b/Source/WTF/wtf/PlatformEnableCocoa.h
+index 26d1c5367a67..4ec91eb7b62c 100644
+--- a/Source/WTF/wtf/PlatformEnableCocoa.h
++++ b/Source/WTF/wtf/PlatformEnableCocoa.h
+@@ -1241,4 +1241,8 @@
+ #define ENABLE_DRAG_SOURCE_CUSTOMIZATION 1
+ #endif
+ 
++#if !defined(ENABLE_MYA) && (OS(MACOS) || USE(APPLE_INTERNAL_SDK)) && !PLATFORM(MACCATALYST) && !PLATFORM(IOS_FAMILY_SIMULATOR)
++#define ENABLE_MYA 1
++#endif
++
+ #endif // PLATFORM(COCOA)
+diff --git a/Source/WTF/wtf/PlatformJSCOnly.cmake b/Source/WTF/wtf/PlatformJSCOnly.cmake
+index b78f74481936..23a84969f02a 100644
+--- a/Source/WTF/wtf/PlatformJSCOnly.cmake
++++ b/Source/WTF/wtf/PlatformJSCOnly.cmake
+@@ -104,6 +104,8 @@ elseif (APPLE)
+         ${WTF_DERIVED_SOURCES_DIR}/mach_excServer.c
+         ${WTF_DERIVED_SOURCES_DIR}/mach_excUser.c
+     )
++
++    set_source_files_properties(darwin/OSLogPrintStream.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
+ elseif (CMAKE_SYSTEM_NAME MATCHES "Linux")
+     list(APPEND WTF_SOURCES
+         linux/CurrentProcessMemoryStatus.cpp
+diff --git a/Source/cmake/WebKitFeatures.cmake b/Source/cmake/WebKitFeatures.cmake
+index b424de8b234a..0ac5380e2a00 100644
+--- a/Source/cmake/WebKitFeatures.cmake
++++ b/Source/cmake/WebKitFeatures.cmake
+@@ -176,6 +176,14 @@ macro(WEBKIT_OPTION_BEGIN)
+         set(ENABLE_BACK_FORWARD_LIST_SWIFT_DEFAULT ${_swift_features_default})
+     endif ()
+ 
++    if (NOT DEFINED ENABLE_MYA_DEFAULT)
++        if (APPLE)
++            set(ENABLE_MYA_DEFAULT ON)
++        else ()
++            set(ENABLE_MYA_DEFAULT OFF)
++        endif ()
++    endif ()
++
+     WEBKIT_OPTION_DEFINE(ENABLE_ACCESSIBILITY_ISOLATED_TREE "Toggle accessibility isolated tree support" PRIVATE OFF)
+     WEBKIT_OPTION_DEFINE(ENABLE_API_TESTS "Enable public API unit tests" PRIVATE OFF)
+     WEBKIT_OPTION_DEFINE(ENABLE_APPLE_PAY "Toggle Apple Pay support" PRIVATE OFF)
+@@ -256,6 +264,7 @@ macro(WEBKIT_OPTION_BEGIN)
+     WEBKIT_OPTION_DEFINE(ENABLE_MINIBROWSER "Toggle MiniBrowser compilation." PRIVATE OFF)
+     WEBKIT_OPTION_DEFINE(ENABLE_MODEL_ELEMENT "Toggle Model Element support" PRIVATE OFF)
+     WEBKIT_OPTION_DEFINE(ENABLE_MOUSE_CURSOR_SCALE "Toggle Scaled mouse cursor support" PRIVATE OFF)
++    WEBKIT_OPTION_DEFINE(ENABLE_MYA "Toggle the mya MemorY Analyzer tool" PRIVATE ${ENABLE_MYA_DEFAULT})
+     WEBKIT_OPTION_DEFINE(ENABLE_NAVIGATOR_STANDALONE "Toogle standalone navigator support" PRIVATE OFF)
+     WEBKIT_OPTION_DEFINE(ENABLE_NOTIFICATIONS "Toggle Notifications support" PRIVATE ON)
+     WEBKIT_OPTION_DEFINE(ENABLE_OFFSCREEN_CANVAS "Toggle OffscreenCanvas support" PRIVATE OFF)
+diff --git a/Tools/Scripts/run-javascriptcore-tests b/Tools/Scripts/run-javascriptcore-tests
+index 5744af7a1e37..34ec9b5511a2 100755
+--- a/Tools/Scripts/run-javascriptcore-tests
++++ b/Tools/Scripts/run-javascriptcore-tests
+@@ -570,12 +570,6 @@ $runTestLibJSCTools = enableTestOrNot($runTestLibJSCTools);
+ $runJSCStress = enableTestOrNot($runJSCStress);
+ $runMozillaTests = enableTestOrNot($runMozillaTests);
+ 
+-# libJavaScriptCoreTools and its test is built on Mach APIs and only available on Apple platforms.
+-if ($runTestLibJSCTools && $^O ne "darwin") {
+-    print "Not running testLibJSCTools: it is only available on Apple platforms.\n";
+-    $runTestLibJSCTools = DONT_RUN;
+-}
+-
+ my @buildArgs;
+ 
+ if ($buildJSC) {
+@@ -685,6 +679,12 @@ my $productDir = jscProductDir();
+ if (!isWindows()) {
+     $ENV{DYLD_FRAMEWORK_PATH} = $productDir;
+ }
++
++if ($runTestLibJSCTools && !-x testPath($productDir, "testLibJSCTools")) {
++    print "Not running testLibJSCTools: it is not built (ENABLE_MYA is off).\n";
++    $runTestLibJSCTools = DONT_RUN;
++}
++
+ $ENV{JSCTEST_timeout} = 120 unless $ENV{JSCTEST_timeout}; # Set a 120 second timeout on all jsc tests (if environment variable not defined already).
+ $ENV{JSCTEST_hardTimeout} = 300 unless $ENV{JSCTEST_hardTimeout}; # Set a 300 second hard timeout on all jsc tests (if environment variable not defined already). If the test does not finish after 300 seconds from soft-timeout, we terminate the shell.
+ $ENV{TZ}="US/Pacific"; # Some tests fail if the time zone is not set to US/Pacific (<https://webkit.org/b/136363>)
+diff --git a/Tools/Scripts/webkitperl/BuildSubproject.pm b/Tools/Scripts/webkitperl/BuildSubproject.pm
+index 6e6a22565777..92b0ff953a07 100644
+--- a/Tools/Scripts/webkitperl/BuildSubproject.pm
++++ b/Tools/Scripts/webkitperl/BuildSubproject.pm
+@@ -172,7 +172,7 @@ if (isCMakeBuild()) {
+         # By default we build using all of the available CPUs
+         $makeArgs .= ($makeArgs ? " " : "") . "-j" . numberOfCPUs() if $makeArgs !~ /-j\s*\d+/;
+         $buildTarget = "jsc testb3 testair testapi testmasm testdfg testwasmdebugger";
+-        $buildTarget .= " testLibJSCTools" if $^O eq "darwin"; # libJavaScriptCoreTools only available on Apple platforms.
++        $buildTarget .= " MyaExecutables";
+         $buildTarget .= " $makeArgs";
+     } elsif (canUseNinja()) {
+         $buildTarget .= "jsc testapi testmasm";
+-- 
+2.54.0 (Apple Git-157)
+

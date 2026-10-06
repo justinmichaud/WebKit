@@ -1,0 +1,164 @@
+From aa60c4c3548a817714da410911ee4359d38f24c2 Mon Sep 17 00:00:00 2001
+From: Justin Michaud <jmichaud@igalia.com>
+Date: Tue, 6 Oct 2026 10:19:57 -0600
+Subject: [PATCH 22/23] [mya] Add a `memory` command that accounts for a Darwin
+ process's footprint Need the bug URL (OOPS!).
+
+Reviewed by NOBODY (OOPS!).
+
+`memory [<vm>]` (Darwin only) breaks the target's physical footprint down:
+
+- the footprint in the snapshot and in the live process;
+- the private memory of each VM tag: regions, footprint bytes by page
+  disposition as the snapshot was taken, the regions' own dirty and
+  compressed counts, the live process's, and what is reusable;
+- libpas's pages, by its enumerator's records: objects, free payload,
+  metadata, and what libpas records nothing in, and objects in pages outside
+  the footprint;
+- and the balance: footprint = libpas's pages + other private memory + the
+  graphics, media, network and neural memory of the tagged ledgers + what no
+  region or ledger shows, such as page tables.
+
+Uses the footprint recorded with the snapshot and the heap walk's libpas
+page accounting.
+
+* Source/JavaScriptCore/mya/mya.cpp:
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/JavaScriptCore/mya/mya.cpp | 105 ++++++++++++++++++++++++++++++
+ 1 file changed, 105 insertions(+)
+
+diff --git a/Source/JavaScriptCore/mya/mya.cpp b/Source/JavaScriptCore/mya/mya.cpp
+index 0ada26b31c15..78ab2f552d36 100644
+--- a/Source/JavaScriptCore/mya/mya.cpp
++++ b/Source/JavaScriptCore/mya/mya.cpp
+@@ -229,6 +229,9 @@ private:
+         fputs("  heap [<vm>]               Walk the JS heap of the VM at <vm>, or of WebCore's main VM\n", out);
+         fputs("  heapdump <file> [<vm>]    Write the heap as a GCDebugging heap snapshot Web Inspector reads\n", out);
+         fputs("  refs <start> <end>        List the words of writable memory that hold an address in [start, end)\n", out);
++#if OS(DARWIN)
++        fputs("  memory [<vm>]             Account for the target's footprint by VM tag, and for libpas's pages\n", out);
++#endif
+         fputs("  p[/x] &<symbol>           Print a symbol's address, /x for hex\n", out);
+         fputs("  history (hi, hist) ...    Show and manage the command history\n", out);
+         fputs("  help [<command>]          Show this help, or help for <command>\n", out);
+@@ -776,6 +779,101 @@ private:
+         }
+     }
+ 
++    static std::optional<uint64_t> physicalFootprint(mach_port_t task)
++    {
++        task_vm_info_data_t info { };
++        mach_msg_type_number_t count = TASK_VM_INFO_COUNT;
++        if (task_info(task, TASK_VM_INFO, reinterpret_cast<task_info_t>(&info), &count) != KERN_SUCCESS)
++            return std::nullopt;
++        return info.phys_footprint;
++    }
++
++    // What the target's memory footprint is made of: each VM tag's private dirty
++    // and compressed pages, in the snapshot and in the live process, and what
++    // libpas's own dirty and compressed pages hold, by its enumerator's records.
++    void handleMemory(Lexer lex)
++    {
++        using JSC::Corpse::HeapWalk;
++        using JSC::Corpse::Region;
++        Snapshot* snapshot = snapshotById(m_currentSnapshot);
++        if (!snapshot) {
++            SAFE_FPRINTF(stderr, "No snapshot in use. Capture one with `snapshot`, or select one with `snapshot <n>`.\n");
++            return;
++        }
++        Address vm;
++        Address javaScriptCore;
++        if (!findHeap(*snapshot, lex, vm, javaScriptCore))
++            return;
++        HeapWalk heap(*snapshot, vm, javaScriptCore);
++        if (!heap.isValid()) {
++            SAFE_FPRINTF(stderr, "mya: No JS heap at 0x%llx\n", static_cast<unsigned long long>(vm.toTargetVMAddress()));
++            return;
++        }
++        uint64_t pageSize = vm_kernel_page_size;
++        struct Totals {
++            size_t regions { 0 };
++            uint64_t footprint { 0 }; // By the pages' dispositions, as the snapshot was taken.
++            uint64_t counted { 0 }; // By the regions' own dirty and compressed page counts.
++            uint64_t reusable { 0 };
++        };
++        auto byTag = [&](const Vector<Region>& regions, bool fromSnapshot) {
++            HashMap<unsigned, Totals, IntHash<unsigned>, WTF::UnsignedWithZeroKeyHashTraits<unsigned>> result;
++            for (const Region& region : regions) {
++                if (!region.isPrivate())
++                    continue;
++                auto& totals = result.add(region.userTag(), Totals { }).iterator->value;
++                ++totals.regions;
++                totals.footprint += fromSnapshot ? snapshot->footprintBytes(region) : 0;
++                totals.counted += (region.dirtyPageCount() + region.swappedPageCount()) * pageSize;
++                totals.reusable += region.reusablePageCount() * pageSize;
++            }
++            return result;
++        };
++        const Vector<Region>& snapshotRegions = snapshot->regions();
++        auto snapshotTotals = byTag(snapshotRegions, true);
++        Process* process = snapshot->process();
++        bool hasLive = process && process->isAttached();
++        auto liveTotals = hasLive ? byTag(Region::all(process->taskPort()), false) : decltype(snapshotTotals) { };
++
++        auto footprint = snapshot->physicalFootprint();
++        auto liveFootprint = hasLive ? physicalFootprint(process->taskPort()) : std::nullopt;
++        SAFE_PRINTF("Physical footprint: %llu KB in the snapshot, %s KB live\n", static_cast<unsigned long long>(footprint.value_or(0) / KB),
++            (liveFootprint ? String::number(*liveFootprint / KB) : "unknown"_s).utf8());
++        Vector<std::pair<unsigned, Totals>> tags;
++        for (auto& [tag, totals] : snapshotTotals)
++            tags.append({ tag, totals });
++        std::ranges::sort(tags, std::ranges::greater { }, [](auto& entry) { return entry.second.footprint; });
++        uint64_t sum = 0;
++        SAFE_PRINTF("  %-28s %8s %12s %12s %12s %12s\n", "private memory by VM tag"_s, "regions"_s, "footprint KB"_s, "counted KB"_s, "live KB"_s, "reusable KB"_s);
++        for (auto& [tag, totals] : tags) {
++            uint64_t live = liveTotals.contains(tag) ? liveTotals.get(tag).counted : 0;
++            sum += totals.footprint;
++            if (!totals.footprint && !totals.counted && !live)
++                continue;
++            SAFE_PRINTF("  %-28s %8zu %12llu %12llu %12llu %12llu\n", vmTagName(tag).utf8(), totals.regions, static_cast<unsigned long long>(totals.footprint / KB),
++                static_cast<unsigned long long>(totals.counted / KB), static_cast<unsigned long long>(live / KB), static_cast<unsigned long long>(totals.reusable / KB));
++        }
++        SAFE_PRINTF("  %-28s %8s %12llu\n", "sum"_s, ""_s, static_cast<unsigned long long>(sum / KB));
++
++        auto records = heap.libpasRecords();
++        auto pages = records ? heap.libpasPages(*records) : std::nullopt;
++        if (!pages)
++            return;
++        SAFE_PRINTF("libpas, as the snapshot was taken: %llu KB of dirty or compressed pages (%llu KB compressed), holding\n",
++            static_cast<unsigned long long>(pages->footprintBytes / KB), static_cast<unsigned long long>(pages->compressedBytes / KB));
++        SAFE_PRINTF("  %llu KB of objects, %llu KB of payload no live object holds, %llu KB of metadata, %llu KB libpas records nothing in\n",
++            static_cast<unsigned long long>(pages->objectBytes / KB), static_cast<unsigned long long>(pages->freePayloadBytes / KB),
++            static_cast<unsigned long long>(pages->metaBytes / KB), static_cast<unsigned long long>(pages->unrecordedBytes / KB));
++        SAFE_PRINTF("  and %llu KB of objects in pages outside the footprint; %llu KB of libpas's pages are reusable\n",
++            static_cast<unsigned long long>(pages->objectBytesElsewhere / KB), static_cast<unsigned long long>(pages->reusableBytes / KB));
++        uint64_t otherTags = sum - std::min(sum, snapshotTotals.contains(VM_MEMORY_TCMALLOC) ? snapshotTotals.get(VM_MEMORY_TCMALLOC).footprint : 0);
++        uint64_t ledger = snapshot->taggedLedgerBytes();
++        uint64_t accounted = pages->footprintBytes + otherTags + ledger;
++        int64_t residual = static_cast<int64_t>(footprint.value_or(0)) - static_cast<int64_t>(accounted);
++        SAFE_PRINTF("Footprint %llu KB = libpas's pages %llu KB + other private memory %llu KB + graphics, media, network and neural memory %llu KB + %lld KB that no region or ledger shows, such as page tables\n",
++            static_cast<unsigned long long>(footprint.value_or(0) / KB), static_cast<unsigned long long>(pages->footprintBytes / KB),
++            static_cast<unsigned long long>(otherTags / KB), static_cast<unsigned long long>(ledger / KB), static_cast<long long>(residual / static_cast<int64_t>(KB)));
++    }
+ #endif
+ 
+     // `heapdump <file> [<vm>]`: the walk's heap dump, as a GCDebugging heap snapshot Web Inspector reads.
+@@ -1726,6 +1824,13 @@ private:
+             handleRefs(lex);
+             return;
+         }
++#if OS(DARWIN)
++        if (is("memory")) {
++            recordCommand(line);
++            handleMemory(lex);
++            return;
++        }
++#endif
+         if (command == "p" || command == "print") {
+             recordCommand(line);
+             handlePrint(format, lex);
+-- 
+2.54.0 (Apple Git-157)
+

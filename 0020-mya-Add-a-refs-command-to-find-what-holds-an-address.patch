@@ -1,0 +1,178 @@
+From 7270bd54df036464e03c7349f26dd2af3f8f7f2e Mon Sep 17 00:00:00 2001
+From: Justin Michaud <jmichaud@igalia.com>
+Date: Tue, 6 Oct 2026 10:19:57 -0600
+Subject: [PATCH 20/23] [mya] Add a `refs` command to find what holds an
+ address range Need the bug URL (OOPS!).
+
+Reviewed by NOBODY (OOPS!).
+
+`refs <start> <end>` lists every word of the current snapshot's writable
+memory whose value lies in [start, end), with the region it is in (and, on
+Darwin, the region's VM tag): what holds an allocation, for instance one the
+heap walk reports as missed. Memory the target cannot write holds no address
+it allocated, so read-only regions are skipped, and only the resident parts
+of each region are read, so large untouched reservations cost nothing. It
+lists the first 200 and counts the rest.
+
+Independent of the heap walk: it needs only the region list.
+
+* Source/JavaScriptCore/mya/mya.cpp:
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+---
+ Source/JavaScriptCore/mya/mya.cpp | 111 ++++++++++++++++++++++++++++++
+ 1 file changed, 111 insertions(+)
+
+diff --git a/Source/JavaScriptCore/mya/mya.cpp b/Source/JavaScriptCore/mya/mya.cpp
+index 4d6c91ef425a..b28a1203cc51 100644
+--- a/Source/JavaScriptCore/mya/mya.cpp
++++ b/Source/JavaScriptCore/mya/mya.cpp
+@@ -52,6 +52,10 @@
+ #include <sys/types.h>
+ #include <unistd.h>
+ #include <vector>
++#if OS(DARWIN)
++#include <mach/mach.h>
++#include <mach/mach_vm.h>
++#endif
+ #include <wtf/ASCIICType.h>
+ #include <wtf/Assertions.h>
+ #include <wtf/CheckedArithmetic.h>
+@@ -62,6 +66,7 @@
+ #include <wtf/StdLibExtras.h>
+ #include <wtf/Vector.h>
+ #include <wtf/text/CString.h>
++#include <wtf/text/MakeString.h>
+ 
+ #if HAVE(READLINE)
+ // readline/history.h has a Function typedef that conflicts with WTF::Function;
+@@ -217,6 +222,7 @@ private:
+         fputs("  status (st)               Show whether mya is attached\n", out);
+         fputs("  snapshot (sn, snap) ...   Capture and manage snapshots\n", out);
+         fputs("  thread (th) ...           Inspect the threads in a snapshot\n", out);
++        fputs("  refs <start> <end>        List the words of writable memory that hold an address in [start, end)\n", out);
+         fputs("  p[/x] &<symbol>           Print a symbol's address, /x for hex\n", out);
+         fputs("  history (hi, hist) ...    Show and manage the command history\n", out);
+         fputs("  help [<command>]          Show this help, or help for <command>\n", out);
+@@ -681,6 +687,106 @@ private:
+             static_cast<int>(token.length()), token.data());
+     }
+ 
++#if OS(DARWIN)
++    static String vmTagName(unsigned tag)
++    {
++        switch (tag) {
++        case 0: return "untagged"_s;
++        case VM_MEMORY_MALLOC: return "malloc"_s;
++        case VM_MEMORY_MALLOC_SMALL: return "malloc small"_s;
++        case VM_MEMORY_MALLOC_LARGE: return "malloc large"_s;
++        case VM_MEMORY_MALLOC_HUGE: return "malloc huge"_s;
++        case VM_MEMORY_MALLOC_TINY: return "malloc tiny"_s;
++        case VM_MEMORY_MALLOC_NANO: return "malloc nano"_s;
++        case VM_MEMORY_MALLOC_MEDIUM: return "malloc medium"_s;
++        case VM_MEMORY_MALLOC_LARGE_REUSABLE: return "malloc large reusable"_s;
++        case VM_MEMORY_MALLOC_LARGE_REUSED: return "malloc large reused"_s;
++        case VM_MEMORY_STACK: return "stack"_s;
++        case VM_MEMORY_GUARD: return "guard"_s;
++        case VM_MEMORY_IOKIT: return "IOKit"_s;
++        case VM_MEMORY_SHARED_PMAP: return "shared pmap"_s;
++        case VM_MEMORY_DYLD: return "dyld"_s;
++        case VM_MEMORY_DYLD_MALLOC: return "dyld malloc"_s;
++        case VM_MEMORY_TCMALLOC: return "libpas (WebKit Malloc)"_s;
++        case VM_MEMORY_JAVASCRIPT_CORE: return "JavaScriptCore"_s;
++        case VM_MEMORY_JAVASCRIPT_JIT_EXECUTABLE_ALLOCATOR: return "JIT code"_s;
++        case VM_MEMORY_JAVASCRIPT_JIT_REGISTER_FILE: return "JS register file"_s;
++        case VM_MEMORY_OS_ALLOC_ONCE: return "OS alloc once"_s;
++        case VM_MEMORY_LIBDISPATCH: return "libdispatch"_s;
++        case VM_MEMORY_ACCELERATE: return "Accelerate"_s;
++        case VM_MEMORY_COREGRAPHICS: return "CoreGraphics"_s;
++        case VM_MEMORY_FOUNDATION: return "Foundation"_s;
++        case VM_MEMORY_CORESERVICES: return "CoreServices"_s;
++        case VM_MEMORY_IMAGEIO: return "ImageIO"_s;
++        case VM_MEMORY_COLORSYNC: return "ColorSync"_s;
++        case VM_MEMORY_APPLICATION_SPECIFIC_1: return "application specific 1"_s;
++        default: return makeString("tag "_s, tag);
++        }
++    }
++#endif
++
++    // `refs <start> <end>`: every word of the snapshot's writable memory whose
++    // value lies in [start, end), such as what holds an allocation the heap
++    // walk reaches only inside it. Memory the target cannot write holds no
++    // address it allocated.
++    void handleRefs(Lexer lex)
++    {
++        using JSC::Corpse::Region;
++        Snapshot* snapshot = snapshotById(m_currentSnapshot);
++        if (!snapshot) {
++            SAFE_FPRINTF(stderr, "No snapshot in use. Capture one with `snapshot`, or select one with `snapshot <n>`.\n");
++            return;
++        }
++        std::array<uint64_t, 2> bounds { };
++        for (uint64_t& bound : bounds) {
++            std::string token { lex.atEnd() ? std::string_view { } : lex.nextToken() };
++            char* end = nullptr;
++            bound = strtoull(token.c_str(), &end, 16);
++            if (token.empty() || *end) {
++                fputs("Usage: refs <start, in hex> <end, in hex>\n", stderr);
++                return;
++            }
++        }
++        if (!lex.atEnd() || bounds[0] >= bounds[1]) {
++            fputs("Usage: refs <start, in hex> <end, in hex>\n", stderr);
++            return;
++        }
++        constexpr size_t maxReferences = 200;
++        constexpr size_t wordsPerRead = 64 * 1024;
++        size_t found = 0;
++        for (const Region& region : snapshot->regions()) {
++            if (!region.isReadable() || !region.isWritable())
++                continue;
++            for (auto [start, size] : region.residentParts(snapshot->corpsePort())) {
++                for (uint64_t offset = 0; offset + sizeof(uint64_t) <= size;) {
++                    size_t count = std::min<uint64_t>(wordsPerRead, (size - offset) / sizeof(uint64_t));
++                    Address chunk = start + offset;
++                    offset += count * sizeof(uint64_t);
++                    auto words = snapshot->memory().span<uint64_t>(chunk, count);
++                    if (!words)
++                        continue;
++                    std::span<const uint64_t> values { words };
++                    for (size_t index = 0; index < values.size(); ++index) {
++                        uint64_t value = Address { values[index] }.stripped().toTargetVMAddress();
++                        if (value < bounds[0] || value >= bounds[1])
++                            continue;
++                        if (found++ >= maxReferences)
++                            continue;
++#if OS(DARWIN)
++                        String tag = makeString(" ("_s, vmTagName(region.userTag()), ')');
++#else
++                        String tag;
++#endif
++                        SAFE_PRINTF("  0x%llx holds 0x%llx (+%llu), in the region 0x%llx-0x%llx%s\n", static_cast<unsigned long long>((chunk + index * sizeof(uint64_t)).toTargetVMAddress()),
++                            static_cast<unsigned long long>(value), static_cast<unsigned long long>(value - bounds[0]),
++                            static_cast<unsigned long long>(region.base().toTargetVMAddress()), static_cast<unsigned long long>(region.end().toTargetVMAddress()), tag.utf8());
++                    }
++                }
++            }
++        }
++        SAFE_PRINTF("%zu words hold an address in [0x%llx, 0x%llx)\n", found, static_cast<unsigned long long>(bounds[0]), static_cast<unsigned long long>(bounds[1]));
++    }
++
+     // Dispatches `p[/<format>] <expression>`. The only expression understood so
+     // far is `&<symbol>`, which resolves the symbol in the snapshot in use.
+     // `format` is the text after the '/', empty when none was given.
+@@ -1337,6 +1443,11 @@ private:
+             handleThread(lex);
+             return;
+         }
++        if (is("refs")) {
++            recordCommand(line);
++            handleRefs(lex);
++            return;
++        }
+         if (command == "p" || command == "print") {
+             recordCommand(line);
+             handlePrint(format, lex);
+-- 
+2.54.0 (Apple Git-157)
+
