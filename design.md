@@ -193,50 +193,167 @@ hand, as above, the variable is set on the command line.
 The TypeFields suite loads WebCore from beside JavaScriptCore into the test
 process (patch 11), and is skipped when WebCore is not built.
 
-**What `ENABLE_MYA_HEAP` changes.** Build flags, each for a stated reason, and
-one line of WTF:
-- `-fstandalone-debug`, so that each image describes the types it uses (in
-  CMake; Darwin's clang defaults to it);
-- in CMake, no `-dwarf-linkage-names=Abstract`, under which an implicit
-  destructor has no linkage name (patch 2);
-- in CMake, no `-gsimple-template-names`, under which the debug info names an
-  instance of a class template without its arguments, and liblldb gives the
-  instances of one template of one size one class: in the CMake Cocoa build the
-  `AlignedStorage` of `LazyNeverDestroyed<JITOperationList>` read as
-  `AlignedStorage<JSC::BytecodeRewriter::Insertion, 8>`, another 48-byte one,
-  and the HeapWalk suite reached 97.57%;
-- in the CMake build on Apple, no `-fpch-debuginfo` for the precompiled prefix
-  header: with it, the header's types are described only in its object, every
-  other compile unit declares them, and liblldb gives a declared instance of a
-  class template no template arguments, so it names a static member of a class
-  with one as its argument wrongly, and the `s_info` of the typed array views,
-  their constructors and their prototypes named no class;
-- dSYMs on Darwin (`dwarf-with-dsym` in Xcode for JavaScriptCore, WebCore,
-  WebKit and WebGPU, `dsymutil` after each link in CMake): liblldb finds the
-  compile unit of a global variable only in a dSYM, not through the debug map;
-  and with compilation caching (`COMPILATION_CACHE_ENABLE_CACHING`) an object
-  file's debug info refers to its precompiled header's in the cache, which only
-  dsymutil reads. Without WebCore's dSYM, liblldb prints "Unable to locate module
-  needed for external types" and every type WebCore takes from its prefix
-  header is a declaration;
-- `-Wl,--build-id` on Linux, so that every image has an identity (patch 6):
-  lld writes none unless asked, and only some distributions' clang asks;
-- `PAS_BMALLOC_HIDDEN=0`, in CMake and in Xcode (`WK_MYA_HEAP`), so that mya
-  and the tests can call libpas's enumerator (patch 9);
-- `DEBUG_FISSION` off (A4);
-- no change to symbol visibility: the walk reads the symbol table, which keeps
-  hidden symbols. In Xcode, with JavaScriptCore, WTF and bmalloc built hidden
-  and TAPI as usual (7,024 symbols exported from JavaScriptCore), every
-  assertion passes, the HeapWalk suite's reach is 99.71% either way, and
-  google.com's walk is unchanged (99.63% reached, 86.29% typed, 24,722 global
-  variables). The CMake Cocoa build fails the same check of the HeapWalk suite
-  with symbols hidden (11,427 exported) and with them all exported (168,226),
-  and Linux passes hidden; hiding symbols leaves the tests unable to call what
-  JavaScriptCore does not export, such as `OutOfLineCodeOrigin`'s allocator;
-- `-O2` for `libJavaScriptCoreTools` in a Debug build: a walk reads every value
-  of a heap through WTF's containers, which at `-O0` take twice as long.
-  JavaScriptCore itself stays as the configuration says;
-- `hashTraitsDeleteBucket` zeroes a deleted bucket's destroyed value (patch 11).
+Every build flag the heap walk adds or drops, and why, is under Build changes.
+`ENABLE_MYA_HEAP` also changes one line of WTF: `hashTraitsDeleteBucket` zeroes
+a deleted bucket's destroyed value (patch 11).
+
+## Build changes
+
+Every build setting the heap walk adds, drops or depends on, with what it does
+and the measurement that keeps it. A setting stays only if a test fails without
+it, or, for speed, with timings taken both ways. "Fails without it" means a
+build without the setting and a run of testLibJSCTools; the numbers are from
+macOS 27 on an M-series Mac with Xcode 27 (Apple clang 2100, `LLDB.framework`
+lldb-2103.0.34.103), on 2026-10-06. Linux entries are measured separately.
+
+`ENABLE_MYA_HEAP` is on only in Debug builds: `WK_MYA_HEAP` in
+`CommonBase.xcconfig` (Debug, macOS) and `ENABLE_MYA_HEAP` in
+`WebKitFeatures.cmake` (Debug, wherever `ENABLE_MYA` is on). A production build
+sees none of the settings below that are marked "under `ENABLE_MYA_HEAP`".
+
+### Added
+
+**`PAS_BMALLOC_HIDDEN=0`** (under `ENABLE_MYA_HEAP`; `CommonBase.xcconfig`,
+`WebKitCommon.cmake`, and `bmalloc/PlatformCocoa.cmake`, which otherwise
+defines it to 1). libpas marks its API hidden when the define is 1, which keeps
+it out of JavaScriptCore's exports. mya and the tests enumerate a heap through
+`pas_enumerator_*` and `pas_root_create` (patch 9), so they need it exported.
+Without it, Xcode fails to link testLibJSCTools on `_pas_enumerator_create`,
+`_pas_root_create` and `_pas_heap_lock`, and CMake fails to link `mya` on
+`_pas_enumerator_create`, `_pas_enumerator_destroy` and
+`_pas_enumerator_enumerate_all`.
+
+**liblldb** (under `ENABLE_MYA_HEAP`). The walk reads debug info through
+liblldb's SB API (patch 2). On Darwin it links Xcode's `LLDB.framework`:
+`WK_LLDB_LDFLAGS` in JavaScriptCore's `Base.xcconfig` adds `-F` and an rpath for
+`$(DEVELOPER_DIR)/../SharedFrameworks`, `CorpseSnapshot.cpp` autolinks
+`-framework LLDB` (an Xcode target has no optional dependencies, so the link is
+asked for only where the headers were found), and `FindLLDB.cmake` gives CMake
+the same framework with the same rpath. Homebrew's liblldb 22.1.8 cannot be
+used: in the full suite, once the TypeFields suite has loaded WebCore into the
+process, the HeapDump suite segfaults in `clang::ASTContext::getASTRecordLayout`,
+called from `SBType::GetByteSize` in `ReachWalk::walkGlobalVariables`. The same
+build linked against `LLDB.framework` passes. A JavaScriptCore-only build never
+loads WebCore and does not show it.
+
+The SB API headers are an open problem: Apple ships `LLDB.framework` without
+them, and no public source matches it. Xcode's own Python module for lldb,
+generated from the headers Apple built with, gives every enumerator's value at
+run time, which is the reference: of its 879 enumerators, swiftlang/
+llvm-project's `swift/release/6.4.x` headers lack 10 (`eArgTypeDeviceUUID` and
+the `eTraceStatus` and `eTraceRecording` values) and give 12 others values one
+lower; Homebrew 22.1.8's lack 37 and give 86 the wrong value (it has
+`eFormatFloat128` in the middle of `lldb::Format`). No branch of
+swiftlang/llvm-project has `eArgTypeDeviceUUID`. The build takes the headers from
+`WK_LLDB_HEADERS_DIR` (Xcode) or `LLDB_INCLUDE_DIR` (CMake); with none, the
+HeapWalk suite fails rather than skips.
+
+**`ENTITLEMENTS_REQUIRED`** (`JSC.xcconfig` and `TestExecutable.xcconfig`,
+`NO` unless the internal SDK is in use). Without it, a build against the public
+SDK signs testLibJSCTools with no entitlements, so it loses `get-task-allow`
+and cannot attach to its own child targets: 26 attaches fail with "Could not
+attach to PID N: (os/kern) failure (0x5)", 32 failures in all.
+
+**dSYMs for JavaScriptCore and WebCore** (under `ENABLE_MYA_HEAP`;
+`DEBUG_INFORMATION_FORMAT = dwarf-with-dsym` in their `DebugRelease.xcconfig`).
+Speed only. liblldb reads a dSYM several times faster than a debug map's object
+files. Full suite, JavaScriptCore only: 37.1-39.4 s with its dSYM, 99.8-116.9 s
+without. With WebCore built beside it: 51.9-55.9 s with WebCore's dSYM,
+119.3-124.8 s without. Correctness does not depend on them: every suite passes
+through the debug map, and WebCore's types read the same either way, although
+its object files point at their precompiled header's debug info in the
+compilation cache (`llvmcas://...`), which liblldb cannot open ("Unable to
+locate module needed for external types"): every type probed, from
+`std::string` to `WebCore::Document`, is complete through the debug map too,
+with the same size and fields. dsymutil takes 80 s on WebCore, on every link.
+
+**`-O2` for `libJavaScriptCoreTools` in Debug** (`libJavaScriptCoreTools.xcconfig`,
+`corpse/CMakeLists.txt`). Speed only. A walk reads every value of a heap through
+WTF's containers; the HeapWalk suite takes 21.1-21.8 s with the tools at `-O2`
+and 29.1-29.3 s at `-O0`. JavaScriptCore itself stays as the configuration says.
+
+**`OS_ACTIVITY_MODE=disable`** for testLibJSCTools on Darwin
+(`run-javascriptcore-tests`). Speed only. The variable turns off os_log and
+os_activity in the process; with it the HeapWalk suite takes 10.0-10.1 s, without
+it 20.7-21.2 s, and the full suite 20.7-21.1 s against 37.1-39.4 s.
+
+**`-fobjc-arc` for `wtf/darwin/OSLogPrintStream.mm`** (`PlatformJSCOnly.cmake`).
+The CMake JSCOnly port on macOS compiles that file, which Xcode builds with ARC.
+Without it: "OSLogPrintStream.mm:27:2: error: This file requires ARC".
+
+**`-fstandalone-debug`** (under `ENABLE_MYA_HEAP`; `WebKitCommon.cmake`). Each
+compile unit describes in full every type it uses, rather than only those whose
+vtable or key function it emits, so every image describes the types of its own
+values. Darwin's clang already defaults to it, and a macOS CMake build without
+the flag passes every suite; it exists for Linux, where clang defaults to
+limited debug info.
+
+**`-Wl,--build-id`** (under `ENABLE_MYA_HEAP`, Linux; `WebKitCommon.cmake`). An
+ELF image's identity is its GNU build-id, which refuses an image rebuilt since
+it was loaded (patch 6); lld writes none unless asked. Linux only.
+
+### Dropped
+
+**`-mllvm -dwarf-linkage-names=Abstract`** (removed from the global flags
+under `ENABLE_MYA_HEAP`; `WebKitCommon.cmake`). With it, clang gives a linkage
+name only to the abstract declaration of a function. An instance of a class
+template then has no member function with a linkage name, so the walk cannot
+tell which class a vtable's destructor belongs to: "'JSC::WeakGCMap<...>', the
+class of the destructor in the vtable at ..., declares no member function with
+a linkage name", for `WeakGCMap`, `WeakGCSet`, `CallableWrapper` and
+`ObjectPropertyChangeAdaptiveWatchpoint` instances. With the flag the macOS
+CMake build fails 20 assertions, among them the HeapWalk suite's global
+variables, closures of function templates, and unexplained misses.
+
+**`-gsimple-template-names`** (removed under `ENABLE_MYA_HEAP`;
+`WebKitCommon.cmake`). With it, the debug info names an instance of a class
+template without its arguments, and liblldb takes instances of one template
+for one another. With the flag the macOS CMake build fails 10 assertions: values
+read as types bigger than their allocations, pointers followed to types bigger
+than their pointees, and closures whose call operator is not found.
+
+**`-fpch-debuginfo`** for the precompiled prefix header (dropped under
+`ENABLE_MYA_HEAP`; `_WEBKIT_ADD_PCH_OBJECT` in `WebKitMacros.cmake`, which only
+runs for clang on Apple). With it, the prefix header's types are described only
+in the header's own object and every other compile unit only declares them.
+Read through the debug map, the HeapDump suite then misses JSC's edges from
+`UnlinkedProgramCodeBlock` to `JSString` and `JSCellButterfly` in 5 runs of 7;
+without the flag, in none of 8. A dSYM also hides it (0 of 7), but costs a
+dsymutil on every link.
+
+**Split DWARF** (`DEBUG_FISSION` off under `ENABLE_MYA_HEAP`; applied in
+`WebKitCommon.cmake` rather than `OptionsCommon.cmake`, so that it sees the
+port's options). liblldb reads `.debug_names` but not `.gdb_index`, so with
+split DWARF it indexes every `.dwo` file by hand when it loads an image (A4).
+Linux only.
+
+### Tried and left out
+
+Each was proposed for the heap walk and fails no test without it:
+- RTTI and default visibility for JavaScriptCore, WTF and bmalloc: every suite
+  passes with `-fno-rtti` and hidden symbols, in Xcode and in CMake on macOS.
+  The walk reads the symbol table, which keeps hidden symbols.
+- Default visibility, TAPI off and export-everything for WebCore, PAL,
+  WebCoreTestSupport, WebGPU, WebKit, ANGLE and libwebrtc, and the matching
+  exemption in `check-for-weak-vtables-and-externals`: a full WebKit build
+  without them passes every suite, TypeFields included. WebCore exports 17,526
+  symbols and its symbol table holds 1.42 million, 4,680 of them WebCore vtables.
+- dSYMs for WebKit and WebGPU: no suite reads them.
+- `dsymutil` after every link in CMake: every suite passes without it once
+  `-fpch-debuginfo` is dropped, and it saves 8% of the suite (36.6-39.0 s
+  against 40.1-43.1 s).
+- An rpath to the Command Line Tools' `LLDB.framework`: it is another lldb than
+  Xcode's, so the headers would not match it.
+
+### Build structure
+
+Not flags, for completeness: `ENABLE_MYA` and `ENABLE_MYA_HEAP` are CMake
+options (`WebKitFeatures.cmake`) and `ENABLE_MYA` a Cocoa define
+(`PlatformEnableCocoa.h`); mya and testLibJSCTools build wherever `ENABLE_MYA`
+is on rather than only on Apple; `build-jsc` builds them through the
+`MyaExecutables` target; `run-javascriptcore-tests` skips testLibJSCTools when it
+is not built, instead of off Darwin; and CMake on Apple, the JSCOnly port included,
+signs jsc, mya and the test executables with entitlements, as Xcode does.
 
 ## The patches
 
@@ -1604,26 +1721,16 @@ pointers hold.
 
 ## Build gotchas
 
-- **SB API headers.** Xcode's `LLDB.framework` has no SB headers. They come from
-  Homebrew's llvm (`/opt/homebrew/opt/llvm/include`, LLVM 22), and the Xcode
-  build links the framework (`WK_LLDB_LDFLAGS` in `Base.xcconfig`, and
-  `-framework LLDB` autolinked from `CorpseSnapshot.cpp`), with an rpath to
-  Xcode's `SharedFrameworks` and one to the Command Line Tools'. Homebrew's
-  liblldb 22.1.8 segfaults in `CXXRecordDecl::setBases` completing some WebCore
-  types during a walk. The SB API is binary compatible: the symbols mya and the
-  tests import are all exported by lldb-2103, every enumerator they use has the
-  same value, and an SB function only LLVM 22 has fails at link time. The
-  framework is not documented as public API, loads Python and Swift's compiler
-  libraries at launch, and records a signpost and a log message per SB call
-  (Build and test). The CMake build on macOS still links Homebrew's liblldb.
+- **SB API headers.** Xcode's `LLDB.framework` has no SB headers, and no public
+  source matches it (Build changes, liblldb). Point `WK_LLDB_HEADERS_DIR` (Xcode)
+  or `LLDB_INCLUDE_DIR` (CMake) at an `include` directory holding `lldb/API`.
 - **Ninja.** The CMake JSCOnly port on macOS enables Swift, so it needs a real
   ninja (`/opt/homebrew/bin/ninja`).
 - **ARC.** JSCOnly on macOS compiles `wtf/darwin/OSLogPrintStream.mm` without ARC
   unless that file gets `-fobjc-arc`.
 - **Darwin but not Cocoa.** JSCOnly on macOS is `OS(DARWIN)` but not
   `PLATFORM(COCOA)`: `MachSendRight` is empty there, so `corpse/` must not use it.
-  It emits no dSYMs of its own; under `ENABLE_MYA_HEAP` CMake runs `dsymutil`
-  after each link.
+  It emits no dSYMs of its own, and liblldb reads its debug map.
 - **The build-system marker.** `build-jsc --jsc-only` or `--cmake` switches
   `WebKitBuild/BuildSystem` to CMake. The Xcode harness run then looks in
   `cmake-mac`, prints "not built", and still reports 0 failures. Run

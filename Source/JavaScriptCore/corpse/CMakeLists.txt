@@ -42,7 +42,7 @@ WEBKIT_LIBRARY(JavaScriptCoreTools)
 add_dependencies(JavaScriptCoreTools JavaScriptCore)
 
 # A heap walk reads every value of a heap through WTF's containers, which at
-# -O0 makes a walk of a small heap take twice as long. JavaScriptCore itself
+# -O0 makes a walk of a small heap take 1.4 times as long. JavaScriptCore itself
 # stays as the build type says.
 if (CMAKE_BUILD_TYPE STREQUAL "Debug")
     target_compile_options(JavaScriptCoreTools PRIVATE -O2)

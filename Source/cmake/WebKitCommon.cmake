@@ -359,8 +359,9 @@ if (NOT HAS_RUN_WEBKIT_COMMON)
     if (ENABLE_MYA_HEAP)
         # So that each image describes the types it uses.
         WEBKIT_APPEND_GLOBAL_COMPILER_FLAGS(-fstandalone-debug)
-        # The vtable check needs every destructor's linkage name, and with
-        # Abstract linkage names an implicit destructor has none.
+        # With Abstract linkage names an instance of a class template has no
+        # member function with a linkage name, so its vtable's destructor names
+        # no class.
         # With simple template names, liblldb gives the instances of one class
         # template of one size one class, whose members are only one's.
         foreach (_flags CMAKE_C_FLAGS CMAKE_OBJC_FLAGS CMAKE_CXX_FLAGS CMAKE_OBJCXX_FLAGS)

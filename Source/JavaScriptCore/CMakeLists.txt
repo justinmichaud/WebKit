@@ -1647,8 +1647,9 @@ if (ENABLE_MYA_HEAP)
     endif ()
     if (NOT LLDB_FOUND)
         message(WARNING "mya_heap is on but liblldb was not found. "
-            "Install liblldb-dev (Debian, Ubuntu), lldb-devel (Fedora) or llvm (Homebrew), "
-            "set LLDB_ROOT, or turn off ENABLE_MYA_HEAP.")
+            "Install liblldb-dev (Debian, Ubuntu) or lldb-devel (Fedora), set LLDB_ROOT, "
+            "on macOS set LLDB_INCLUDE_DIR to the headers of Xcode's LLDB.framework, "
+            "or turn off ENABLE_MYA_HEAP.")
     endif ()
 endif ()
 
