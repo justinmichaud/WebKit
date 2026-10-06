@@ -839,8 +839,7 @@ if ($runTestAPI) {
     runTest("testapi", "allApiTestsPassedWithSystemMalloc", "Malloc=1");
 }
 if ($runTestWasmDebugger) { runTest("testwasmdebugger", "allWasmDebuggerTestsPassed") }
-# Xcode's LLDB.framework records an os_signpost and an os_log message per SB API call, which doubles the heap walk.
-if ($runTestLibJSCTools) { runTest("testLibJSCTools", "allLibJSCToolsTestsPassed", isAppleCocoaWebKit() ? "OS_ACTIVITY_MODE=disable" : "") }
+if ($runTestLibJSCTools) { runTest("testLibJSCTools", "allLibJSCToolsTestsPassed") }
 
 # Find JavaScriptCore directory
 chdirWebKit();

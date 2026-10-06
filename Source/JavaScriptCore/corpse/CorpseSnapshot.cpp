@@ -47,8 +47,8 @@
 #include <wtf/TZoneMallocInlines.h>
 
 #if HAVE(LLDB) && OS(DARWIN) && !defined(BUILDING_WITH_CMAKE)
-// Xcode has no optional dependencies, so LLDB.framework is linked only when liblldb's headers are found.
-__asm__(".linker_option \"-framework\", \"LLDB\"");
+// Xcode has no optional dependencies, so liblldb is linked only when its headers are found.
+__asm__(".linker_option \"-llldb\"");
 #endif
 
 WTF_ALLOW_UNSAFE_BUFFER_USAGE_BEGIN

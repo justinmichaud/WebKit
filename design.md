@@ -147,9 +147,36 @@ name for Apple's clang, which names a destructor's declaration with the unified
 Build on the machine you are on, the harness is broken. Do not build on a
 different machine or in a workspace for now.
 
+### Installing liblldb
+
+On macOS, mya and the tests use liblldb and its SB API headers from LLVM 21.1.8's
+own release for Apple silicon (Build changes says why not Xcode's or Homebrew's):
+
+```
+curl -LO https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.8/LLVM-21.1.8-macOS-ARM64.tar.xz
+shasum -a 256 LLVM-21.1.8-macOS-ARM64.tar.xz
+# b95bdd32a33a81ee4d40363aaeb26728a26783fcef26a4d80f65457433ea4669
+mkdir -p ~/Library/Developer
+tar -C ~/Library/Developer -xJf LLVM-21.1.8-macOS-ARM64.tar.xz \
+    'LLVM-21.1.8-macOS-ARM64/lib/liblldb*' 'LLVM-21.1.8-macOS-ARM64/include/lldb'
+```
+
+That unpacks only liblldb and its headers (174 MB of the 7.8 GB) to
+`~/Library/Developer/LLVM-21.1.8-macOS-ARM64`, where both builds look. To use
+another LLVM install, name it with `LLDB_ROOT`: a build setting for Xcode
+(`make debug ARGS="LLDB_ROOT=<dir>"`; the environment variable does not reach
+xcodebuild) and `-DLLDB_ROOT=<dir>` for CMake, whose cache keeps the first
+liblldb it finds until configured with `-ULLDB_INCLUDE_DIR -ULLDB_LIBRARY`. LLVM
+publishes no Intel macOS build of 21.1.8.
+
+On Linux, liblldb comes from the distribution or apt.llvm.org, with its headers
+(Build gotchas, Debian).
+
+### Building and running
+
 ```
 Tools/Scripts/build-jsc --debug --xcode --export-compile-commands
-OS_ACTIVITY_MODE=disable DYLD_FRAMEWORK_PATH=WebKitBuild/Debug WebKitBuild/Debug/testLibJSCTools --verbose
+DYLD_FRAMEWORK_PATH=WebKitBuild/Debug WebKitBuild/Debug/testLibJSCTools --verbose
 Tools/Scripts/run-javascriptcore-tests --debug --no-build --testlibjsctools
 
 Tools/Scripts/build-jsc --jsc-only --debug
@@ -183,12 +210,25 @@ pthread` the walk reads each thread's pthread-specific data from (patch 14).
 `--verbose` prints, for the HeapWalk suite, the walk's reach and typed coverage,
 in and out of process, with the largest misses and untyped allocations.
 
-On Darwin, mya and the tests link Xcode's `LLDB.framework`, which records an
-os_signpost and an os_log message for every SB API call. A process started with
-`OS_ACTIVITY_MODE=disable` skips them: the HeapWalk suite takes 9.8 s with it
-and 21 s without, and a web process's walk 27.4 s against 28.7 s.
-`run-javascriptcore-tests` starts testLibJSCTools with it on Darwin; run by
-hand, as above, the variable is set on the command line.
+A web process's walk reads the debug info of every WebKit image it loads.
+The build writes dSYMs for JavaScriptCore and WebCore; give the others one too,
+with dsymutil reading Xcode's compilation cache (without `-cas` it leaves out
+the precompiled headers' types, and liblldb can crash on what is left):
+
+```
+cd WebKitBuild/Debug
+for image in WebKit WebKitLegacy WebGPU _WebKit_SwiftUI; do
+    xcrun dsymutil -cas ~/Library/Developer/Xcode/DerivedData/CompilationCache.noindex/builtin \
+        $image.framework/Versions/A/$image -o $image.framework.dSYM
+done
+for image in libANGLE-shared.dylib libwebrtc.dylib libWebKitSwift.dylib; do
+    xcrun dsymutil -cas ~/Library/Developer/Xcode/DerivedData/CompilationCache.noindex/builtin $image -o $image.dSYM
+done
+```
+
+A dSYM made by hand describes the image it was made from, so make it again
+after a rebuild relinks that image; liblldb ignores one whose UUID no longer
+matches.
 
 The TypeFields suite loads WebCore from beside JavaScriptCore into the test
 process (patch 11), and is skipped when WebCore is not built.
@@ -223,30 +263,52 @@ Without it, Xcode fails to link testLibJSCTools on `_pas_enumerator_create`,
 `_pas_enumerator_create`, `_pas_enumerator_destroy` and
 `_pas_enumerator_enumerate_all`.
 
-**liblldb** (under `ENABLE_MYA_HEAP`). The walk reads debug info through
-liblldb's SB API (patch 2). On Darwin it links Xcode's `LLDB.framework`:
-`WK_LLDB_LDFLAGS` in JavaScriptCore's `Base.xcconfig` adds `-F` and an rpath for
-`$(DEVELOPER_DIR)/../SharedFrameworks`, `CorpseSnapshot.cpp` autolinks
-`-framework LLDB` (an Xcode target has no optional dependencies, so the link is
-asked for only where the headers were found), and `FindLLDB.cmake` gives CMake
-the same framework with the same rpath. Homebrew's liblldb 22.1.8 cannot be
-used: in the full suite, once the TypeFields suite has loaded WebCore into the
-process, the HeapDump suite segfaults in `clang::ASTContext::getASTRecordLayout`,
-called from `SBType::GetByteSize` in `ReachWalk::walkGlobalVariables`. The same
-build linked against `LLDB.framework` passes. A JavaScriptCore-only build never
-loads WebCore and does not show it.
+**liblldb 19 to 21, with its own headers** (under `ENABLE_MYA_HEAP`). The walk
+reads debug info through liblldb's SB API (patch 2). On macOS it uses LLVM
+21.1.8's own release (Build and test, Installing liblldb): `LLDB_ROOT`, by default
+`~/Library/Developer/LLVM-21.1.8-macOS-ARM64`, gives both the headers and the
+library. In Xcode, JavaScriptCore's `Base.xcconfig` adds `$(LLDB_ROOT)/include`
+to the header search paths and `-L` and an rpath for `$(LLDB_ROOT)/lib`, and
+`CorpseSnapshot.cpp` autolinks `-llldb` (an Xcode target has no optional
+dependencies, so the link is asked for only where the headers were found);
+`FindLLDB.cmake` takes the library from the headers' own install. A CMake configure
+on macOS with liblldb 22 or newer stops; Xcode has no such check.
 
-The SB API headers are an open problem: Apple ships `LLDB.framework` without
-them, and no public source matches it. Xcode's own Python module for lldb,
-generated from the headers Apple built with, gives every enumerator's value at
-run time, which is the reference: of its 879 enumerators, swiftlang/
-llvm-project's `swift/release/6.4.x` headers lack 10 (`eArgTypeDeviceUUID` and
-the `eTraceStatus` and `eTraceRecording` values) and give 12 others values one
-lower; Homebrew 22.1.8's lack 37 and give 86 the wrong value (it has
-`eFormatFloat128` in the middle of `lldb::Format`). No branch of
-swiftlang/llvm-project has `eArgTypeDeviceUUID`. The build takes the headers from
-`WK_LLDB_HEADERS_DIR` (Xcode) or `LLDB_INCLUDE_DIR` (CMake); with none, the
-HeapWalk suite fails rather than skips.
+The headers must be the library's own. SB objects are opaque, but the API's
+enumerators are not: Xcode's lldb Python module, generated from the headers
+`LLDB.framework` was built with, gives 879 enumerators' values, and Homebrew
+22.1.8's headers lack 37 of them and give 86 a different value (`eFormatFloat128`
+sits in the middle of `lldb::Format`). Apple ships `LLDB.framework` without
+headers, and no public source matches it: swiftlang/llvm-project's
+`swift/release/6.4.x` lacks 10 of its enumerators and gives 12 others values one
+lower, and no branch there has `eArgTypeDeviceUUID`. So Xcode's lldb is not used.
+
+liblldb 22 and newer cannot read WebCore. WebCore instantiates templates on
+values of class type (C++20), such as `LengthPercentage<CSS::Range{-INF, INF,
+0, 0}, float>`. DWARF gives such a template value parameter its type but no
+value, and liblldb makes it a type argument, so `LengthPercentage<Range{-INF,
+...}, float>` and `LengthPercentage<Range{0, ...}, float>` get the same template
+arguments. Since commit 4dfe212dade7 (2025-10-29, in LLVM 22 and main),
+`TypeSystemClang::CreateClassTemplateSpecializationDecl` returns null for a
+specialization with arguments it has already seen, so the second type is not
+parsed ("DW_TAG_member '__elems_' refers to type ... which was unable to be
+parsed", then "DW_TAG_inheritance failed to resolve the base class"), and
+liblldb segfaults in `clang::CXXRecordDecl::setBases`. Three SB calls reproduce
+it with WebCore's dSYM: `FindFirstType` and `IsPolymorphicClass` on
+`WebCore::Style::SurroundData`, `NonInheritedMiscData` and `NonInheritedRareData`,
+in that order. Homebrew's liblldb 22.1.8 crashes so in the walk of a google.com
+web process; LLVM 21.1.8's walks it twice with no error, 99.97% reached and
+82.47% typed, in 24-25 s at 11.1-12.2 GB resident, the same coverage as Xcode's
+lldb. Homebrew packages no lldb older than its `lldb` formula, 23.
+
+liblldb (upstream main, 22.1.8 and Xcode's) also leaves a member of type
+`_Atomic(T)` incomplete when `T` is only declared in its compile unit: `TypeSystemClang::RequireCompleteType`,
+called from `DWARFASTParserClang::ParseSingleMember`, completes a declared
+class only when the member's type is itself a class. clang then lays out a
+class with no definition and liblldb segfaults in
+`clang::ASTContext::getASTRecordLayout`, from `SBType::GetByteSize`. WebCore's
+`WTF::Atomic<IntSize>` (`surfaceMaximumSize()::maximumSize`) does this when its
+debug info is read through the debug map; WebCore's dSYM avoids it (below).
 
 **`ENTITLEMENTS_REQUIRED`** (`JSC.xcconfig` and `TestExecutable.xcconfig`,
 `NO` unless the internal SDK is in use). Without it, a build against the public
@@ -256,26 +318,28 @@ attach to PID N: (os/kern) failure (0x5)", 32 failures in all.
 
 **dSYMs for JavaScriptCore and WebCore** (under `ENABLE_MYA_HEAP`;
 `DEBUG_INFORMATION_FORMAT = dwarf-with-dsym` in their `DebugRelease.xcconfig`).
-Speed only. liblldb reads a dSYM several times faster than a debug map's object
-files. Full suite, JavaScriptCore only: 37.1-39.4 s with its dSYM, 99.8-116.9 s
-without. With WebCore built beside it: 51.9-55.9 s with WebCore's dSYM,
-119.3-124.8 s without. Correctness does not depend on them: every suite passes
-through the debug map, and WebCore's types read the same either way, although
-its object files point at their precompiled header's debug info in the
-compilation cache (`llvmcas://...`), which liblldb cannot open ("Unable to
-locate module needed for external types"): every type probed, from
-`std::string` to `WebCore::Document`, is complete through the debug map too,
-with the same size and fields. dsymutil takes 80 s on WebCore, on every link.
+For WebCore the dSYM is needed. With compilation caching
+(`COMPILATION_CACHE_ENABLE_CACHING`), each of WebCore's object files describes
+the types of its precompiled prefix header only by reference: a skeleton unit
+whose `DW_AT_dwo_name` is `llvmcas://<id>`, an object in Xcode's compilation
+cache (`~/Library/Developer/Xcode/DerivedData/CompilationCache.noindex`). In those
+compile units a type the prefix header defines, such as `WebCore::IntSize`, is
+only a declaration. LLVM's liblldb cannot read the cache at all ("'llvmcas:/...'
+does not exist", "Unable to locate module needed for external types"), and
+Xcode's reads it only through the `.cas-config` the build writes into the
+target's build directory, which a build of another scheme removes as stale.
+Read through the debug map, WebCore then crashes liblldb (`_Atomic(T)`, above).
+dsymutil reads the cache and writes the definitions into the dSYM. Run by hand,
+it needs `-cas` (Build and test). JavaScriptCore's objects have no such
+references, so its dSYM is for speed: liblldb reads a dSYM several times faster
+than a debug map's object files. Full suite, JavaScriptCore only: 37.1-39.4 s with
+its dSYM, 99.8-116.9 s without. With WebCore beside it: 51.9-55.9 s with WebCore's
+dSYM, 119.3-124.8 s without. dsymutil takes 80 s on WebCore, on every link.
 
 **`-O2` for `libJavaScriptCoreTools` in Debug** (`libJavaScriptCoreTools.xcconfig`,
 `corpse/CMakeLists.txt`). Speed only. A walk reads every value of a heap through
 WTF's containers; the HeapWalk suite takes 21.1-21.8 s with the tools at `-O2`
 and 29.1-29.3 s at `-O0`. JavaScriptCore itself stays as the configuration says.
-
-**`OS_ACTIVITY_MODE=disable`** for testLibJSCTools on Darwin
-(`run-javascriptcore-tests`). Speed only. The variable turns off os_log and
-os_activity in the process; with it the HeapWalk suite takes 10.0-10.1 s, without
-it 20.7-21.2 s, and the full suite 20.7-21.1 s against 37.1-39.4 s.
 
 **`-fobjc-arc` for `wtf/darwin/OSLogPrintStream.mm`** (`PlatformJSCOnly.cmake`).
 The CMake JSCOnly port on macOS compiles that file, which Xcode builds with ARC.
@@ -338,12 +402,18 @@ Each was proposed for the heap walk and fails no test without it:
   exemption in `check-for-weak-vtables-and-externals`: a full WebKit build
   without them passes every suite, TypeFields included. WebCore exports 17,526
   symbols and its symbol table holds 1.42 million, 4,680 of them WebCore vtables.
-- dSYMs for WebKit and WebGPU: no suite reads them.
+- dSYMs for WebKit and WebGPU: no suite reads them. Their objects carry the
+  same `llvmcas://` references as WebCore's, so a `mya heap` walk of a web
+  process may need them for the same reason; that is untested.
 - `dsymutil` after every link in CMake: every suite passes without it once
   `-fpch-debuginfo` is dropped, and it saves 8% of the suite (36.6-39.0 s
   against 40.1-43.1 s).
 - An rpath to the Command Line Tools' `LLDB.framework`: it is another lldb than
   Xcode's, so the headers would not match it.
+- Xcode's `LLDB.framework`, and Homebrew's liblldb: see liblldb, above.
+- `OS_ACTIVITY_MODE=disable` for testLibJSCTools: Xcode's `LLDB.framework` logs
+  every SB API call, and with it the HeapWalk suite took 10.0-10.1 s against
+  20.7-21.2 s. LLVM's liblldb does not; the suite takes 8.5-9.5 s either way.
 
 ### Build structure
 
@@ -1721,9 +1791,9 @@ pointers hold.
 
 ## Build gotchas
 
-- **SB API headers.** Xcode's `LLDB.framework` has no SB headers, and no public
-  source matches it (Build changes, liblldb). Point `WK_LLDB_HEADERS_DIR` (Xcode)
-  or `LLDB_INCLUDE_DIR` (CMake) at an `include` directory holding `lldb/API`.
+- **liblldb.** Install it as Build and test says. A build without it still
+  builds, and the HeapWalk suite fails: "mya_heap is enabled but liblldb's
+  headers were not found".
 - **Ninja.** The CMake JSCOnly port on macOS enables Swift, so it needs a real
   ninja (`/opt/homebrew/bin/ninja`).
 - **ARC.** JSCOnly on macOS compiles `wtf/darwin/OSLogPrintStream.mm` without ARC

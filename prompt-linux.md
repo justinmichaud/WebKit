@@ -46,12 +46,22 @@ changes" section of `design.md`. Use it as a hypothesis on Linux, not a result: 
 | CMake `dsymutil` after each link | **Dropped**: Apple only, and unneeded once `-fpch-debuginfo` is gone. |
 
 Also learned on macOS, possibly relevant here:
-- **liblldb versions matter for correctness, not just features.** Homebrew's liblldb 22.1.8 (upstream
-  LLVM) segfaults in `clang::ASTContext::getASTRecordLayout`, called from `SBType::GetByteSize` in
-  `ReachWalk::walkGlobalVariables`, during the HeapDump suite, once the TypeFields suite has loaded
-  WebCore into the process. Xcode's lldb passes the same build. Still being diagnosed on macOS.
-  TypeFields is Darwin-only, so a JSCOnly Linux run cannot hit this path; say so if you see anything
-  like it, for example in a `mya heap` walk of a GTK or WPE web process.
+- **A liblldb crash on macOS, diagnosed.** With WebCore read through its debug map, liblldb (both
+  Homebrew 22.1.8 and Xcode's) segfaults in `clang::ASTContext::getASTRecordLayout` sizing a
+  `WTF::Atomic<IntSize>` global: `IntSize` is only a declaration there (its definition is in the
+  Xcode compilation cache, which upstream liblldb cannot read), and liblldb's forced completion of
+  incomplete member classes (`TypeSystemClang::RequireCompleteType`) does not look through
+  `_Atomic(T)`. The cache is Darwin-only, but the gap is in upstream liblldb: on Linux, any
+  `std::atomic<T>` member whose `T` is only declared in a compile unit would hit the same path, for
+  example under limited debug info (claim 8). If testLibJSCTools segfaults in
+  `getASTRecordLayout`, that is the first suspect.
+- **liblldb 22 and newer cannot read WebCore** (macOS, measured). WebCore's templates on values of
+  class type (`LengthPercentage<CSS::Range{...}, float>`) all get the same template arguments in
+  liblldb, and since upstream commit 4dfe212dade7 (LLVM 22) liblldb refuses the repeated
+  specialization and later segfaults in `CXXRecordDecl::setBases`. macOS now requires liblldb 19 to 21
+  (`FATAL_ERROR` in `Source/JavaScriptCore/CMakeLists.txt`, Apple only). A JSCOnly run never loads
+  WebCore; report whether a GTK or WPE web process's walk hits it with liblldb 22, so the bound can
+  apply to Linux too.
 - **Never mix lldb headers and library from different builds.** Enumerator values shift between
   releases (Homebrew 22 vs Xcode: 86 of 879 differ). `FindLLDB.cmake` takes the library from the
   headers' own install; confirm on each distro that the configure picks a matching pair, and report

@@ -31,36 +31,23 @@
 # ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 if (APPLE)
-    # Xcode's LLDB.framework ships without the SB API headers. LLDB_INCLUDE_DIR is
-    # the include directory of the swiftlang/llvm-project lldb that framework was
-    # built from; another lldb's headers disagree with it on enumerator values.
-    set(LLDB_INCLUDE_DIR "" CACHE PATH "SB API headers matching Xcode's LLDB.framework")
-    if (LLDB_INCLUDE_DIR AND NOT EXISTS "${LLDB_INCLUDE_DIR}/lldb/API/LLDB.h")
-        message(FATAL_ERROR "LLDB_INCLUDE_DIR (${LLDB_INCLUDE_DIR}) has no lldb/API/LLDB.h")
-    endif ()
-    execute_process(COMMAND xcode-select -p OUTPUT_VARIABLE _LLDB_DEVELOPER_DIR OUTPUT_STRIP_TRAILING_WHITESPACE)
-    find_library(LLDB_LIBRARY
-        NAMES LLDB
-        PATHS "${_LLDB_DEVELOPER_DIR}/../SharedFrameworks"
-        NO_DEFAULT_PATH
-    )
-    if (LLDB_LIBRARY)
-        execute_process(COMMAND plutil -extract CFBundleShortVersionString raw "${LLDB_LIBRARY}/Resources/Info.plist"
-            OUTPUT_VARIABLE LLDB_VERSION OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-    endif ()
+    # Xcode's LLDB.framework ships no SB API headers. The lib/liblldb* and
+    # include/lldb of LLVM's LLVM-21.1.8-macOS-ARM64.tar.xz release, unpacked
+    # into ~/Library/Developer, have both; LLDB_ROOT names another install.
+    set(LLDB_PREFIXES "$ENV{HOME}/Library/Developer/LLVM-21.1.8-macOS-ARM64")
 else ()
     file(GLOB LLDB_PREFIXES "/usr/lib/llvm-*")
     # Newest first.
     list(SORT LLDB_PREFIXES COMPARE NATURAL ORDER DESCENDING)
-
-    find_path(LLDB_INCLUDE_DIR
-        NAMES lldb/API/LLDB.h
-        PATHS ${LLDB_PREFIXES}
-        PATH_SUFFIXES include
-    )
 endif ()
 
-if (LLDB_INCLUDE_DIR AND NOT APPLE)
+find_path(LLDB_INCLUDE_DIR
+    NAMES lldb/API/LLDB.h
+    PATHS ${LLDB_PREFIXES}
+    PATH_SUFFIXES include
+)
+
+if (LLDB_INCLUDE_DIR)
     # The library must come from the headers' own install, or a machine with
     # several LLVMs could link one against another's headers.
     get_filename_component(LLDB_PREFIX "${LLDB_INCLUDE_DIR}" DIRECTORY)
@@ -73,9 +60,9 @@ if (LLDB_INCLUDE_DIR AND NOT APPLE)
 endif ()
 
 # The SB headers carry no version, but the installed library's name does
-# (liblldb-18.so.1 on Debian, liblldb.22.1.8.dylib from Homebrew), as does the
-# directory of an install (/usr/lib/llvm-18, Cellar/llvm/22.1.8).
-if (LLDB_LIBRARY AND NOT APPLE)
+# (liblldb-18.so.1 on Debian, liblldb.21.1.8.dylib in LLVM's release), as does
+# the directory of an install (/usr/lib/llvm-18).
+if (LLDB_LIBRARY)
     file(REAL_PATH "${LLDB_LIBRARY}" _LLDB_REAL_LIBRARY)
     file(REAL_PATH "${LLDB_INCLUDE_DIR}" _LLDB_REAL_INCLUDE_DIR)
     get_filename_component(_LLDB_LIBRARY_NAME "${_LLDB_REAL_LIBRARY}" NAME)
@@ -109,9 +96,5 @@ if (LLDB_FOUND)
             INTERFACE_LINK_LIBRARIES "${LLDB_LIBRARY}"
             INTERFACE_INCLUDE_DIRECTORIES "${LLDB_INCLUDE_DIR}"
         )
-        if (APPLE)
-            get_filename_component(_LLDB_FRAMEWORK_DIR "${LLDB_LIBRARY}" DIRECTORY)
-            set_property(TARGET LLDB::LLDB PROPERTY INTERFACE_LINK_OPTIONS "LINKER:-rpath,${_LLDB_FRAMEWORK_DIR}")
-        endif ()
     endif ()
 endif ()

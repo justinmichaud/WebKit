@@ -156,15 +156,16 @@ WK_PROCESSED_XCENT_FILE=$(TEMP_FILE_DIR)/$(FULL_PRODUCT_NAME).entitlements
 WK_USE_RESTRICTED_ENTITLEMENTS = $(USE_INTERNAL_SDK);
 WK_USE_FATAL_EXCEPTIONS = $(OVERRIDE_WK_USE_FATAL_EXCEPTIONS:default=YES);
 
-// Xcode's LLDB.framework ships without the SB API headers. WK_LLDB_HEADERS_DIR is the include
-// directory of the swiftlang/llvm-project lldb that framework was built from; another lldb's
-// headers disagree with it on enumerator values.
-WK_LLDB_SYSTEM_HEADER_SEARCH_PATHS = $(WK_LLDB_SYSTEM_HEADER_SEARCH_PATHS_$(WK_MYA_HEAP));
-WK_LLDB_SYSTEM_HEADER_SEARCH_PATHS_YES = $(WK_LLDB_HEADERS_DIR);
+// LLDB_ROOT is an LLVM install whose liblldb and SB API headers come from one build: by default
+// the lib/liblldb* and include/lldb of LLVM's LLVM-21.1.8-macOS-ARM64.tar.xz release, unpacked
+// into ~/Library/Developer. Xcode's LLDB.framework ships no headers, and liblldb 22 cannot read WebCore.
+WK_LLDB_ROOT = $(LLDB_ROOT:default=$(HOME)/Library/Developer/LLVM-21.1.8-macOS-ARM64);
 
-WK_LLDB_FRAMEWORK_DIR = $(DEVELOPER_DIR)/../SharedFrameworks;
+WK_LLDB_SYSTEM_HEADER_SEARCH_PATHS = $(WK_LLDB_SYSTEM_HEADER_SEARCH_PATHS_$(WK_MYA_HEAP));
+WK_LLDB_SYSTEM_HEADER_SEARCH_PATHS_YES = $(WK_LLDB_ROOT)/include;
+
 WK_LLDB_LDFLAGS = $(WK_LLDB_LDFLAGS_$(WK_MYA_HEAP));
-WK_LLDB_LDFLAGS_YES = -F$(WK_LLDB_FRAMEWORK_DIR) -Wl,-rpath,$(WK_LLDB_FRAMEWORK_DIR);
+WK_LLDB_LDFLAGS_YES = -L$(WK_LLDB_ROOT)/lib -Wl,-rpath,$(WK_LLDB_ROOT)/lib;
 
 // Shared variables used for dynamic or static linking of JavaScriptCore and jsc.
 

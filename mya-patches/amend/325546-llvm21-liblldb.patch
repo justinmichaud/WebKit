@@ -1,0 +1,183 @@
+From 19bda0c35ef59b367c58405d747228020543ca6f Mon Sep 17 00:00:00 2001
+From: Justin Michaud <jmichaud@igalia.com>
+Date: Tue, 6 Oct 2026 17:27:28 -0600
+Subject: [PATCH] fixup! [MYA] Add mya_heap and liblldb + rtti as dependencies.
+ https://bugs.webkit.org/show_bug.cgi?id=325546
+
+On macOS, take liblldb and its SB API headers from LLVM 21.1.8's own release
+instead of Homebrew's llvm.
+
+* Xcode: JavaScriptCore's Base.xcconfig replaces WK_BREW_PREFIX with
+  WK_LLDB_ROOT, the LLDB_ROOT build setting, by default
+  ~/Library/Developer/LLVM-21.1.8-macOS-ARM64. Headers come from its include
+  directory, the library from its lib directory, with an rpath there:
+  LLVM's liblldb is @rpath/liblldb.21.1.8.dylib. CorpseSnapshot.cpp still
+  autolinks -llldb.
+* CMake: FindLLDB.cmake looks in the same default on macOS (LLDB_ROOT still
+  overrides it), takes the library from the headers' own install as before,
+  and reads LLDB_VERSION from the library's file name.
+* CMake: JavaScriptCore's CMakeLists.txt stops a macOS configure that finds
+  liblldb 22 or newer, and its messages say where to get liblldb.
+
+Install:
+
+  curl -LO https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.8/LLVM-21.1.8-macOS-ARM64.tar.xz
+  shasum -a 256 LLVM-21.1.8-macOS-ARM64.tar.xz
+  # b95bdd32a33a81ee4d40363aaeb26728a26783fcef26a4d80f65457433ea4669
+  mkdir -p ~/Library/Developer
+  tar -C ~/Library/Developer -xJf LLVM-21.1.8-macOS-ARM64.tar.xz \
+      'LLVM-21.1.8-macOS-ARM64/lib/liblldb*' 'LLVM-21.1.8-macOS-ARM64/include/lldb'
+
+That unpacks 174 MB of the 7.8 GB release. The digest is the one in the
+release's own attestation (LLVM-21.1.8-macOS-ARM64.tar.xz.jsonl). Another
+install is named with make debug ARGS="LLDB_ROOT=<dir>" (the environment
+variable does not reach xcodebuild) or cmake -DLLDB_ROOT=<dir>. LLVM
+publishes no Intel macOS build of 21.1.8.
+
+Why not Xcode's LLDB.framework: Apple ships it without the SB API headers,
+and no public headers match it. Its own lldb Python module, generated from
+the headers it was built with, gives 879 enumerators; swiftlang/llvm-project's
+swift/release/6.4.x headers lack 10 of them and give 12 others a different
+value, and Homebrew's 22.1.8 headers lack 37 and give 86 a different value.
+A library and its headers must come from one build.
+
+Why not Homebrew: its only lldb is 22 or newer, and liblldb 22 crashes on
+WebCore's debug info. WebCore instantiates templates on values of class type,
+such as LengthPercentage<CSS::Range{-INF, INF, 0, 0}, float>. DWARF gives such
+a template value parameter a type but no value, so liblldb gives
+LengthPercentage<Range{-INF, ...}, float> and LengthPercentage<Range{0, ...},
+float> the same template arguments. Since llvm-project commit 4dfe212dade7
+(LLVM 22), TypeSystemClang::CreateClassTemplateSpecializationDecl returns null
+for a specialization whose arguments it has seen, the second type is not
+parsed, and liblldb segfaults in clang::CXXRecordDecl::setBases. Three SB
+calls on a Debug WebCore's dSYM reproduce it: FindFirstType and
+IsPolymorphicClass on WebCore::Style::SurroundData, NonInheritedMiscData and
+NonInheritedRareData, in that order. LLVM 21.1.8 predates the commit.
+
+Measured on the heap-walk branch (dev/mya-heap-walk-with-uuid), macOS 27,
+Xcode 27: walking a google.com web process with Homebrew's liblldb 22.1.8
+segfaults as above; with LLVM 21.1.8's it finishes twice, 99.97% of the heap
+reached and 82.47% typed, the same as Xcode's lldb. On this branch, with this change and
+LLVM 21.1.8's liblldb, testLibJSCTools passes in Xcode and in CMake (1025
+assertions, Typeinfo included), and a CMake configure with Homebrew's 22.1.8
+stops. TypeinfoTest does not read WebCore, so no test here fails with liblldb
+22; the bound is for the heap walk that this dependency is for.
+
+Cost: a manual download instead of brew install llvm. An Intel Mac needs a
+liblldb 19 to 21 of its own, named with LLDB_ROOT.
+
+If not taken: the heap walk cannot read a web process with the liblldb
+Homebrew installs.
+---
+ Source/JavaScriptCore/CMakeLists.txt          | 15 +++++++++++--
+ .../Configurations/Base.xcconfig              | 11 +++++-----
+ Source/cmake/FindLLDB.cmake                   | 22 +++++++++++++++++--
+ 3 files changed, 39 insertions(+), 9 deletions(-)
+
+diff --git a/Source/JavaScriptCore/CMakeLists.txt b/Source/JavaScriptCore/CMakeLists.txt
+index ce37e10a9649..f9b9d8495ecf 100644
+--- a/Source/JavaScriptCore/CMakeLists.txt
++++ b/Source/JavaScriptCore/CMakeLists.txt
+@@ -1638,10 +1638,21 @@ endif ()
+ # A machine without liblldb still builds, but the mya_heap tests fail.
+ if (ENABLE_MYA_HEAP)
+     find_package(LLDB)
++    # From 22, liblldb refuses a second specialization with template arguments it
++    # has seen, and WebCore's templates on values of class type all look alike
++    # to it; reading their types then crashes it.
++    if (APPLE AND LLDB_VERSION AND LLDB_VERSION VERSION_GREATER_EQUAL 22)
++        message(FATAL_ERROR "mya_heap on macOS needs liblldb 21 or older, but found liblldb ${LLDB_VERSION} "
++            "(${LLDB_LIBRARY}). Unpack the lib/liblldb* and include/lldb of "
++            "https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.8/LLVM-21.1.8-macOS-ARM64.tar.xz "
++            "into ~/Library/Developer, then configure again with -ULLDB_INCLUDE_DIR -ULLDB_LIBRARY.")
++    endif ()
+     if (NOT LLDB_FOUND)
+         message(WARNING "mya_heap is on but liblldb was not found. "
+-            "Install liblldb-dev (Debian, Ubuntu), lldb-devel (Fedora) or llvm (Homebrew), "
+-            "set LLDB_ROOT, or turn off ENABLE_MYA_HEAP.")
++            "Install liblldb-dev (Debian, Ubuntu) or lldb-devel (Fedora); on macOS, unpack the "
++            "lib/liblldb* and include/lldb of "
++            "https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.8/LLVM-21.1.8-macOS-ARM64.tar.xz "
++            "into ~/Library/Developer; or set LLDB_ROOT, or turn off ENABLE_MYA_HEAP.")
+     endif ()
+ endif ()
+ 
+diff --git a/Source/JavaScriptCore/Configurations/Base.xcconfig b/Source/JavaScriptCore/Configurations/Base.xcconfig
+index cefce1d7c216..f5f2a0c09cb1 100644
+--- a/Source/JavaScriptCore/Configurations/Base.xcconfig
++++ b/Source/JavaScriptCore/Configurations/Base.xcconfig
+@@ -156,15 +156,16 @@ WK_PROCESSED_XCENT_FILE=$(TEMP_FILE_DIR)/$(FULL_PRODUCT_NAME).entitlements
+ WK_USE_RESTRICTED_ENTITLEMENTS = $(USE_INTERNAL_SDK);
+ WK_USE_FATAL_EXCEPTIONS = $(OVERRIDE_WK_USE_FATAL_EXCEPTIONS:default=YES);
+ 
+-// We support HomeBrew installs of liblldb, since the version in the system sdk is not public API.
+-WK_BREW_PREFIX = /opt/homebrew/opt;
+-WK_BREW_PREFIX[arch=x86_64] = /usr/local/opt;
++// LLDB_ROOT is an LLVM install whose liblldb and SB API headers come from one build: by default
++// the lib/liblldb* and include/lldb of LLVM's LLVM-21.1.8-macOS-ARM64.tar.xz release, unpacked
++// into ~/Library/Developer. Xcode's LLDB.framework ships no headers, and liblldb 22 cannot read WebCore.
++WK_LLDB_ROOT = $(LLDB_ROOT:default=$(HOME)/Library/Developer/LLVM-21.1.8-macOS-ARM64);
+ 
+ WK_LLDB_SYSTEM_HEADER_SEARCH_PATHS = $(WK_LLDB_SYSTEM_HEADER_SEARCH_PATHS_$(WK_MYA_HEAP));
+-WK_LLDB_SYSTEM_HEADER_SEARCH_PATHS_YES = $(WK_BREW_PREFIX)/llvm/include;
++WK_LLDB_SYSTEM_HEADER_SEARCH_PATHS_YES = $(WK_LLDB_ROOT)/include;
+ 
+ WK_LLDB_LDFLAGS = $(WK_LLDB_LDFLAGS_$(WK_MYA_HEAP));
+-WK_LLDB_LDFLAGS_YES = -L$(WK_BREW_PREFIX)/llvm/lib;
++WK_LLDB_LDFLAGS_YES = -L$(WK_LLDB_ROOT)/lib -Wl,-rpath,$(WK_LLDB_ROOT)/lib;
+ 
+ // Shared variables used for dynamic or static linking of JavaScriptCore and jsc.
+ 
+diff --git a/Source/cmake/FindLLDB.cmake b/Source/cmake/FindLLDB.cmake
+index e0494c4c970c..87b4a1eb1d8c 100644
+--- a/Source/cmake/FindLLDB.cmake
++++ b/Source/cmake/FindLLDB.cmake
+@@ -2,6 +2,7 @@
+ # Once done, this will define
+ #
+ #  LLDB_FOUND - LLDB's SB API was found
++#  LLDB_VERSION - the version of that LLDB
+ #  LLDB_INCLUDE_DIRS - the LLDB include directories
+ #  LLDB_LIBRARIES - link these to use LLDB.
+ #  LLDB::LLDB - an imported target
+@@ -30,8 +31,10 @@
+ # ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+ 
+ if (APPLE)
+-    # Xcode's LLDB.framework ships no SB headers, so only Homebrew's is usable.
+-    set(LLDB_PREFIXES "/opt/homebrew/opt/llvm" "/usr/local/opt/llvm")
++    # Xcode's LLDB.framework ships no SB API headers. The lib/liblldb* and
++    # include/lldb of LLVM's LLVM-21.1.8-macOS-ARM64.tar.xz release, unpacked
++    # into ~/Library/Developer, have both; LLDB_ROOT names another install.
++    set(LLDB_PREFIXES "$ENV{HOME}/Library/Developer/LLVM-21.1.8-macOS-ARM64")
+ else ()
+     file(GLOB LLDB_PREFIXES "/usr/lib/llvm-*")
+     # Newest first.
+@@ -56,9 +59,24 @@ if (LLDB_INCLUDE_DIR)
+     )
+ endif ()
+ 
++# The SB headers carry no version, but the installed library's name does
++# (liblldb-18.so.1 on Debian, liblldb.21.1.8.dylib in LLVM's release), as does
++# the directory of an install (/usr/lib/llvm-18).
++if (LLDB_LIBRARY)
++    file(REAL_PATH "${LLDB_LIBRARY}" _LLDB_REAL_LIBRARY)
++    file(REAL_PATH "${LLDB_INCLUDE_DIR}" _LLDB_REAL_INCLUDE_DIR)
++    get_filename_component(_LLDB_LIBRARY_NAME "${_LLDB_REAL_LIBRARY}" NAME)
++    if (_LLDB_LIBRARY_NAME MATCHES "lldb[-.]([0-9]+(\\.[0-9]+)*)")
++        set(LLDB_VERSION "${CMAKE_MATCH_1}")
++    elseif (_LLDB_REAL_INCLUDE_DIR MATCHES "llvm[-/]([0-9]+(\\.[0-9]+)*)")
++        set(LLDB_VERSION "${CMAKE_MATCH_1}")
++    endif ()
++endif ()
++
+ include(FindPackageHandleStandardArgs)
+ find_package_handle_standard_args(LLDB
+     REQUIRED_VARS LLDB_INCLUDE_DIR LLDB_LIBRARY
++    VERSION_VAR LLDB_VERSION
+ )
+ 
+ mark_as_advanced(
+-- 
+2.54.0 (Apple Git-157)
+

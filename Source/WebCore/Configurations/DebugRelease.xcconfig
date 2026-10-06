@@ -29,7 +29,7 @@ ONLY_ACTIVE_ARCH = YES;
 GCC_WARN_ABOUT_DEPRECATED_FUNCTIONS = YES;
 DEBUG_INFORMATION_FORMAT = $(WK_DEBUG_INFORMATION_FORMAT_MYA_HEAP_$(WK_MYA_HEAP));
 WK_DEBUG_INFORMATION_FORMAT_MYA_HEAP_NO = dwarf;
-// liblldb reads a dSYM several times faster than a debug map's object files.
+// An object refers to its prefix header's debug info in the compilation cache, and dsymutil copies it into the dSYM.
 WK_DEBUG_INFORMATION_FORMAT_MYA_HEAP_YES = dwarf-with-dsym;
 
 SDKROOT = $(SDKROOT_$(USE_INTERNAL_SDK));

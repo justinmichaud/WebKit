@@ -1645,11 +1645,21 @@ if (ENABLE_MYA_HEAP)
             "(${LLDB_LIBRARY}). Install liblldb-22-dev from apt.llvm.org, then configure again "
             "with -ULLDB_INCLUDE_DIR -ULLDB_LIBRARY.")
     endif ()
+    # From 22, liblldb refuses a second specialization with template arguments it
+    # has seen, and WebCore's templates on values of class type all look alike
+    # to it; reading their types then crashes it.
+    if (APPLE AND LLDB_VERSION AND LLDB_VERSION VERSION_GREATER_EQUAL 22)
+        message(FATAL_ERROR "mya_heap on macOS needs liblldb 19 to 21, but found liblldb ${LLDB_VERSION} "
+            "(${LLDB_LIBRARY}). Unpack the lib/liblldb* and include/lldb of "
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.8/LLVM-21.1.8-macOS-ARM64.tar.xz "
+            "into ~/Library/Developer, then configure again with -ULLDB_INCLUDE_DIR -ULLDB_LIBRARY.")
+    endif ()
     if (NOT LLDB_FOUND)
         message(WARNING "mya_heap is on but liblldb was not found. "
-            "Install liblldb-dev (Debian, Ubuntu) or lldb-devel (Fedora), set LLDB_ROOT, "
-            "on macOS set LLDB_INCLUDE_DIR to the headers of Xcode's LLDB.framework, "
-            "or turn off ENABLE_MYA_HEAP.")
+            "Install liblldb-dev (Debian, Ubuntu) or lldb-devel (Fedora); on macOS, unpack the "
+            "lib/liblldb* and include/lldb of "
+            "https://github.com/llvm/llvm-project/releases/download/llvmorg-21.1.8/LLVM-21.1.8-macOS-ARM64.tar.xz "
+            "into ~/Library/Developer; or set LLDB_ROOT, or turn off ENABLE_MYA_HEAP.")
     endif ()
 endif ()
 
