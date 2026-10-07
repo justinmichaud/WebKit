@@ -53,7 +53,7 @@ safe point, and measures its reach under all of them.
 | A3 | **Only libpas is counted.** System malloc is not; a polymorphic object in its memory is read, uncounted, for what it holds (patch 13). | A malloc-zone enumerator for libmalloc on Darwin and an interposer on Linux. |
 | A4 | **Debug info is not split.** `ENABLE_MYA_HEAP` turns `DEBUG_FISSION` off. | Indexing `.dwo` files, and `-gpubnames`. |
 | A5 | **One reader per container**, shared by the heap walk and the reach walk. | A second copy of each container's layout. |
-| A6 | **liblldb 19 or newer.** 22 is the version tested. | Workarounds for liblldb 18. |
+| A6 | **liblldb 21 or newer, and 21 on macOS.** The walk calls SB API that 21 added. 21 is the version tested on macOS; 21 and 22 on Linux. | Workarounds for older liblldb. |
 | A7 | **Only images outside the Darwin shared cache have types.** Apple ships no DWARF for the shared cache. | Typing system objects on Darwin. |
 | A8 | **libpas's sources do not change, and a measured target is made quiet with options.** Counting allocations uses libpas's own enumerator API. A measured target runs with `useConcurrentGC=false`, `useConcurrentJIT=false` and `useWarmUpMarkedBlocks=false`, so no thread but the mutator touches the JS heap or the objects hanging off it, and no spare blocks sit in libpas. | Hooks or accessors inside libpas; races between the snapshot and the collector or compiler threads. |
 | A9 | **Linux has glibc 2.34 and Linux 5.9 or newer**, for `_Fork` and `close_range` (patch 7). Debian 12 has both. | Fallbacks for older systems. |
@@ -246,6 +246,18 @@ build without the setting and a run of testLibJSCTools; the numbers are from
 macOS 27 on an M-series Mac with Xcode 27 (Apple clang 2100, `LLDB.framework`
 lldb-2103.0.34.103), on 2026-10-06. Linux entries are measured separately.
 
+The Linux numbers are from Debian 12 on aarch64 (80 cores, a shared machine),
+2026-10-06, with Debian clang 18.1.8 and Debian LLD 18.1.8 (apt.llvm.org's
+`clang-18`), and liblldb 22.1.8 (`liblldb-22` 1:22.1.8-1~deb12u1, from
+bookworm-security) unless an entry names another; CMake took
+`/usr/lib/llvm-22/include` and `/usr/lib/llvm-22/lib/liblldb.so`, one install.
+The build is `build-jsc --jsc-only --debug`, and each variant is a full build
+with one setting changed. On HEAD the full suite passes, 1639 assertions,
+41-48 s, 3.5-4.4 GB resident, in 11 runs of 11. One check,
+`CorpseThreadTest.cpp:108` ("a parked thread has a stack pointer"), failed
+alone in 4 of about 25 variant runs, one of them a build whose code is HEAD's;
+it is not counted against any setting.
+
 `ENABLE_MYA_HEAP` is on only in Debug builds: `WK_MYA_HEAP` in
 `CommonBase.xcconfig` (Debug, macOS) and `ENABLE_MYA_HEAP` in
 `WebKitFeatures.cmake` (Debug, wherever `ENABLE_MYA` is on). A production build
@@ -261,9 +273,13 @@ it out of JavaScriptCore's exports. mya and the tests enumerate a heap through
 Without it, Xcode fails to link testLibJSCTools on `_pas_enumerator_create`,
 `_pas_root_create` and `_pas_heap_lock`, and CMake fails to link `mya` on
 `_pas_enumerator_create`, `_pas_enumerator_destroy` and
-`_pas_enumerator_enumerate_all`.
+`_pas_enumerator_enumerate_all`. On Linux, both `mya` and testLibJSCTools fail
+to link without it, lld refusing "undefined hidden symbol" for
+`pas_enumerator_create`, `pas_enumerator_destroy`,
+`pas_enumerator_enumerate_all`, `pas_root_create`, `pas_root_construct`,
+`pas_heap_lock`, `pas_lock_lock_slow` and `pas_lock_unlock_slow`.
 
-**liblldb 19 to 21, with its own headers** (under `ENABLE_MYA_HEAP`). The walk
+**liblldb 21 or newer, and 21 on macOS, with its own headers** (under `ENABLE_MYA_HEAP`). The walk
 reads debug info through liblldb's SB API (patch 2). On macOS it uses LLVM
 21.1.8's own release (Build and test, Installing liblldb): `LLDB_ROOT`, by default
 `~/Library/Developer/LLVM-21.1.8-macOS-ARM64`, gives both the headers and the
@@ -273,6 +289,39 @@ to the header search paths and `-L` and an rpath for `$(LLDB_ROOT)/lib`, and
 dependencies, so the link is asked for only where the headers were found);
 `FindLLDB.cmake` takes the library from the headers' own install. A CMake configure
 on macOS with liblldb 22 or newer stops; Xcode has no such check.
+
+The floor is 21 because of the SB API the walk calls. Built against liblldb
+18's headers, `CorpseTargetType.cpp` and `CorpseSnapshotDebugInfo.cpp` do not
+compile: `SBType::GetByteAlign`, `SBType::GetTemplateArgumentValue`,
+`SBTypeStaticField` and `SBType::GetStaticFieldWithName` are missing. Against
+19.1.7 (Debian 12's `liblldb-19-dev`) and 20.1.8 (apt.llvm.org) one is left:
+"no member named 'GetTemplateArgumentValue' in 'lldb::SBType'"
+(`CorpseTargetType.cpp:214`). 21.1.5 (apt.llvm.org) builds, and the full suite
+passes with it in 3 runs of 3, as with 22.1.8. The CMake check still names 19
+(`find_package(LLDB 19)` and the `FATAL_ERROR` in JavaScriptCore's
+`CMakeLists.txt`), so a liblldb 19 or 20 passes the configure and fails the
+compile. liblldb 18 also cannot resolve libstdc++'s vtables (patch 6), which
+21 makes moot.
+
+On Linux, `FindLLDB.cmake` reads the version from Debian's and apt.llvm.org's
+layouts (`/usr/lib/llvm-N/lib/liblldb.so` links to `liblldb-N.so.1`): 18, 19,
+20, 21 and 22 all read right, and with none named it takes the newest
+`/usr/lib/llvm-*` with headers, here 22. It reads none from Fedora 43's:
+`lldb-devel` 21.1.2 puts `liblldb.so.21.1.2` in `/usr/lib64`, which
+`lldb[-.]N` does not match, and `lldb20-devel` puts it under
+`/usr/lib64/llvm20`, which `llvm[-/]N` does not match. With no version,
+`find_package` accepts the library unchecked, so Fedora's `lldb20` configures
+and then fails to compile. Configuring again with `-ULLDB_INCLUDE_DIR
+-ULLDB_LIBRARY`, as the error message says, finds the newest install again.
+
+A GTK or WPE web process's walk with liblldb 22 has not been run on Linux, so
+whether WebCore crashes it there, as on macOS, is not known; the configure's
+advice to install liblldb 22 from apt.llvm.org is right only for JavaScriptCore.
+`ENABLE_MYA_HEAP` is on in Linux Debug developer builds, which on the bots are
+`GTK-Linux-64-bit-Debug-Tests` and `WPE-Linux-64-bit-Debug-Tests`; the
+Debian Stable and Ubuntu builders build Release. Which liblldb, if any, the
+wkdev-sdk image those bots use ships is not checked: one older than the check
+stops their configure.
 
 The headers must be the library's own. SB objects are opaque, but the API's
 enumerators are not: Xcode's lldb Python module, generated from the headers
@@ -309,6 +358,10 @@ class with no definition and liblldb segfaults in
 `clang::ASTContext::getASTRecordLayout`, from `SBType::GetByteSize`. WebCore's
 `WTF::Atomic<IntSize>` (`surfaceMaximumSize()::maximumSize`) does this when its
 debug info is read through the debug map; WebCore's dSYM avoids it (below).
+On Linux no suite crashes so with liblldb 22, including a build without
+`-fstandalone-debug`, where JSC's types are declared in more compile units: its
+failures are types read as declarations ("Type 'JSC::VM' has no size"), not
+crashes.
 
 **`ENTITLEMENTS_REQUIRED`** (`JSC.xcconfig` and `TestExecutable.xcconfig`,
 `NO` unless the internal SDK is in use). Without it, a build against the public
@@ -339,7 +392,9 @@ dSYM, 119.3-124.8 s without. dsymutil takes 80 s on WebCore, on every link.
 **`-O2` for `libJavaScriptCoreTools` in Debug** (`libJavaScriptCoreTools.xcconfig`,
 `corpse/CMakeLists.txt`). Speed only. A walk reads every value of a heap through
 WTF's containers; the HeapWalk suite takes 21.1-21.8 s with the tools at `-O2`
-and 29.1-29.3 s at `-O0`. JavaScriptCore itself stays as the configuration says.
+and 29.1-29.3 s at `-O0`. On Linux the gain is smaller: 19.0-20.3 s at `-O2`
+against 22.4-23.5 s at `-O0`, 7 runs each, 4 of them interleaved, 1.17 times.
+JavaScriptCore itself stays as the configuration says.
 
 **`-fobjc-arc` for `wtf/darwin/OSLogPrintStream.mm`** (`PlatformJSCOnly.cmake`).
 The CMake JSCOnly port on macOS compiles that file, which Xcode builds with ARC.
@@ -350,11 +405,24 @@ compile unit describes in full every type it uses, rather than only those whose
 vtable or key function it emits, so every image describes the types of its own
 values. Darwin's clang already defaults to it, and a macOS CMake build without
 the flag passes every suite; it exists for Linux, where clang defaults to
-limited debug info.
+limited debug info. On Linux a build without it fails 10, 10 and 11 assertions
+in three runs: "Type 'JSC::VM' has no size, so nothing can be read as it", then
+"The roots at ... name no VM", so the HeapWalk suite never finds the heap
+(`HeapWalkTest.cpp:1240`, 1264 and 1271) and neither does HeapDump (1497).
+The DebugInfo suite's cross-image checks pass without it.
 
 **`-Wl,--build-id`** (under `ENABLE_MYA_HEAP`, Linux; `WebKitCommon.cmake`). An
 ELF image's identity is its GNU build-id, which refuses an image rebuilt since
-it was loaded (patch 6); lld writes none unless asked. Linux only.
+it was loaded (patch 6); lld writes none unless asked. Linux only. Debian's
+clang 18 and 19 ask on their own (the driver passes `--build-id`), so on
+Debian the option changes nothing: without it every image still has its
+`.note.gnu.build-id` and the full suite passes in 3 runs of 3. A link with
+`--build-id=none`, as from a clang that does not ask, fails 39 assertions:
+every snapshot reports "The image '.../testLibJSCTools' of pid N has no
+build-id" and the same for `libJavaScriptCore.so.1`, leaves both out, and the
+image, symbol, debug-info and heap checks that need them fail. Which
+distributions' clang does not ask is not measured; the option keeps the build
+from depending on it.
 
 ### Dropped
 
@@ -367,14 +435,22 @@ class of the destructor in the vtable at ..., declares no member function with
 a linkage name", for `WeakGCMap`, `WeakGCSet`, `CallableWrapper` and
 `ObjectPropertyChangeAdaptiveWatchpoint` instances. With the flag the macOS
 CMake build fails 20 assertions, among them the HeapWalk suite's global
-variables, closures of function templates, and unexplained misses.
+variables, closures of function templates, and unexplained misses. On Linux
+the flag fails 20 assertions in each of three runs, naming the same classes
+(`WeakGCMap` 44 times, `CallableWrapper` 36, `WeakGCSet` 24,
+`ObjectPropertyChangeAdaptiveWatchpoint` 12): closures of function templates
+neither reached nor typed (`HeapWalkTest.cpp:1030`, 1051), misses left
+unexplained (1116), and ThreadSpecific values not read (1120).
 
 **`-gsimple-template-names`** (removed under `ENABLE_MYA_HEAP`;
 `WebKitCommon.cmake`). With it, the debug info names an instance of a class
 template without its arguments, and liblldb takes instances of one template
 for one another. With the flag the macOS CMake build fails 10 assertions: values
 read as types bigger than their allocations, pointers followed to types bigger
-than their pointees, and closures whose call operator is not found.
+than their pointees, and closures whose call operator is not found. On Linux
+the flag fails nothing: with it the full suite passes in 5 runs of 5, although
+it takes effect (in `HeapWalkTest.cpp.o`, names with template arguments drop
+from 10,964 to 1,638). It stays removed for macOS.
 
 **`-fpch-debuginfo`** for the precompiled prefix header (dropped under
 `ENABLE_MYA_HEAP`; `_WEBKIT_ADD_PCH_OBJECT` in `WebKitMacros.cmake`, which only
@@ -383,19 +459,31 @@ in the header's own object and every other compile unit only declares them.
 Read through the debug map, the HeapDump suite then misses JSC's edges from
 `UnlinkedProgramCodeBlock` to `JSString` and `JSCellButterfly` in 5 runs of 7;
 without the flag, in none of 8. A dSYM also hides it (0 of 7), but costs a
-dsymutil on every link.
+dsymutil on every link. A Linux build never passes the flag: its compile
+commands use CMake's own precompiled headers (`-include-pch`) and none has
+`-fpch-debuginfo`.
 
 **Split DWARF** (`DEBUG_FISSION` off under `ENABLE_MYA_HEAP`; applied in
 `WebKitCommon.cmake` rather than `OptionsCommon.cmake`, so that it sees the
 port's options). liblldb reads `.debug_names` but not `.gdb_index`, so with
 split DWARF it indexes every `.dwo` file by hand when it loads an image (A4).
-Linux only.
+Linux only, and speed only. The fission default needs `ENABLE_DEVELOPER_MODE`,
+which the GTK, WPE, Windows and PlayStation ports set and JSCOnly does not, so
+in a JSCOnly build turning it off changes nothing; it matters for GTK and WPE.
+Measured on JSCOnly with `-DDEBUG_FISSION=ON` (801 compile units with
+`-gsplit-dwarf`, 609 `.dwo` files, `.gdb_index` and no `.debug_names`), three
+runs each, interleaved with fission off: the full suite takes 50.2-50.9 s
+against 44.6-46.0 s, the DebugInfo suite 20.1-21.1 s against 17.1-17.4 s, and
+the HeapWalk suite 20.3-20.7 s against 19.0-19.8 s, and the process's peak
+resident memory doubles, 6.4 GB against 3.6 GB for the full suite. Results are
+the same: every suite passes with fission on.
 
 ### Tried and left out
 
 Each was proposed for the heap walk and fails no test without it:
 - RTTI and default visibility for JavaScriptCore, WTF and bmalloc: every suite
-  passes with `-fno-rtti` and hidden symbols, in Xcode and in CMake on macOS.
+  passes with `-fno-rtti` and hidden symbols, in Xcode and in CMake on macOS,
+  and on Linux.
   The walk reads the symbol table, which keeps hidden symbols.
 - Default visibility, TAPI off and export-everything for WebCore, PAL,
   WebCoreTestSupport, WebGPU, WebKit, ANGLE and libwebrtc, and the matching
@@ -763,17 +851,22 @@ soname, `libJavaScriptCore.so.1`.
   device and inode before Linux 6.8, and `stat` can report a per-layer pseudo
   device even after.
 
-**liblldb 19 or newer** (A6). liblldb 18 finds a loaded section by its start
-address, so of two segments that start at one address it sees only one. An ELF
-`PT_TLS` segment starts where the `PT_LOAD` holding `.tdata` does, and in
-libstdc++ that hides the vtables. `FindLLDB.cmake` reads the version from the
-library's file name, or from its install's directory, and `ENABLE_MYA_HEAP`
-refuses to configure with an older liblldb.
+**liblldb 21 or newer** (A6, Build changes). liblldb 18 also finds a loaded
+section by its start address, so of two segments that start at one address it
+sees only one. An ELF `PT_TLS` segment starts where the `PT_LOAD` holding
+`.tdata` does, and in libstdc++ that hides the vtables: for each of libstdc++'s
+249 `_ZTV` symbols, `SBTarget::ResolveLoadAddress` then `GetSymbol`, as
+`vtableClassName` calls them, finds no section with liblldb 18.1.8 and the
+vtable itself with 19.1.7 and 22.1.8. libJavaScriptCore's 1,338 vtables resolve
+with all three: lld put its `PT_TLS` 64 KB below the RELRO `PT_LOAD`, not at
+its start. `FindLLDB.cmake` reads the version from the library's file name, or
+from its install's directory, and `ENABLE_MYA_HEAP` refuses to configure with an
+older liblldb.
 
-**Speed.** With `DEBUG_FISSION` on, liblldb indexes every `.dwo` file by hand:
-one load of libJavaScriptCore's debug info takes 9.1 s and 2.4 GB. With it off
-(A4), the DebugInfo suite takes 2.9 s on Debian 12 aarch64, against 2 s on the
-Mac.
+**Speed.** With `DEBUG_FISSION` on, liblldb indexes every `.dwo` file by hand.
+On Debian 12 aarch64 the DebugInfo suite takes 20.1-21.1 s with it on and
+17.1-17.4 s with it off (A4), and its peak resident memory is 5.9-6.0 GB
+against 3.0-3.2 GB (Build changes, Split DWARF).
 
 **System debug info.** liblldb looks for a system library's debug info in
 `/usr/lib/debug/.build-id`, by build-id, so it comes from the library's `-dbgsym`
@@ -1831,8 +1924,9 @@ pointers hold.
   configure finds no liblldb there and warns, and the DebugInfo and HeapWalk
   suites fail until the SDK has the headers. `wk test <ws> -- --testlibjsctools`
   needs the `--`.
-- **Debian.** Debian 12's own liblldb is 18, which is too old (A6). Install
-  `liblldb-22-dev` from apt.llvm.org, `libstdc++6-dbgsym` from
+- **Debian.** Debian 12's `liblldb-dev` is 14, and its `liblldb-19-dev` is
+  19.1.7; both are too old (A6). Install `liblldb-22-dev`, from bookworm-security
+  (1:22.1.8-1~deb12u1) or apt.llvm.org, `libstdc++6-dbgsym` from
   `debian-debug`, whose version must be libstdc++6's own, and `libc6-dbg`. A
   build directory configured with an older liblldb needs
   `-ULLDB_INCLUDE_DIR -ULLDB_LIBRARY`. Build with `build-jsc`, not a bare
