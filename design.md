@@ -396,6 +396,22 @@ and 29.1-29.3 s at `-O0`. On Linux the gain is smaller: 19.0-20.3 s at `-O2`
 against 22.4-23.5 s at `-O0`, 7 runs each, 4 of them interleaved, 1.17 times.
 JavaScriptCore itself stays as the configuration says.
 
+**`-Xclang -mno-constructor-aliases` for `libJavaScriptCoreTools` in Debug**
+(`corpse/CMakeLists.txt`, clang outside Apple). At `-O2`, clang makes a
+destructor that does no more than its base's an alias of the base's
+(`TryEmitBaseDestructorAsAlias`), which the driver enables outside Darwin only
+(`-mconstructor-aliases`). Every `WTF::Function` the tools make then has a
+vtable whose first destructor slot is `CallableWrapperAllocatorBase`'s, and
+rule 2 (patch 2) refuses its dynamic type. An in-process snapshot holds such
+objects, freed ones among them, as libpas's thread caches keep them: without the
+flag, HeapWalk and HeapDump reported "The vtable at ... is the vtable of
+'WTF::Detail::CallableWrapper<JSC::Corpse::ReachWalk::buildPlan(...)::$_0, ...>',
+but the class its destructor gives declares
+'WTF::Detail::CallableWrapperAllocatorBase::~CallableWrapperAllocatorBase()'" in
+5 of 12 runs of the two suites (4 at a time), with the Leaks suite's changes to
+the walk, and in none with the flag. The driver does not take the flag, so it
+goes to cc1. Xcode builds need nothing: Darwin's driver does not make aliases.
+
 **`-fobjc-arc` for `wtf/darwin/OSLogPrintStream.mm`** (`PlatformJSCOnly.cmake`).
 The CMake JSCOnly port on macOS compiles that file, which Xcode builds with ARC.
 Without it: "OSLogPrintStream.mm:27:2: error: This file requires ARC".
@@ -1204,6 +1220,7 @@ and `HashTable` use patch 4's readers.
 | Class | How it is read |
 |---|---|
 | `WTF::Vector` | Every element. The buffer's allocation is reached even with no elements. |
+| `WTF::Deque` | Its members but `m_buffer`, then the elements in use: `(m_end - m_start) & m_capacityMask` of them from `m_start`, wrapping at `m_buffer`'s capacity (private, copied; `dequeStorage` in `CorpseRemote.h`). The buffer's allocation is reached even with none. |
 | `WTF::HashTable` | Every bucket, empty, deleted or live, as the bucket's type. The other members are walked as usual: a Debug `HashTable` has a `unique_ptr<Lock>`. |
 | `WTF::RobinHoodHashTable` | Every bucket of `m_table`, `m_tableSize` of them. It has no deleted buckets. |
 | `WTF::SegmentedVector` | `SegmentedVector::addressAt`: the inline elements, then each segment's. |
@@ -1256,7 +1273,7 @@ and `HashTable` use patch 4's readers.
 | `std::__1::span`, `std::span` | libc++'s `__size_` elements at `__data_`, or libstdc++'s `_M_extent._M_extent_value` at `_M_ptr`; for a static extent, which neither stores, as many as the second template argument. Elements that run past the allocation they start in are an overrun, and none is read. A span's elements are otherwise read as one object, its first. |
 | `JSC::UnlinkedMetadataTable` | Once finalized, `m_rawBuffer` as `MetadataTable::forEach` reads it: `m_numValueProfiles` `ValueProfile`s, the `LinkingData`, the offset tables (`s_offset16TableSize`, and `s_offset32TableSize` with `m_is32Bit`, private, computed from `NUMBER_OF_BYTECODE_WITH_METADATA`), then each bytecode's `Metadata`s from its offset, aligned to the `Metadata`, to the next. The `Metadata` classes are named, in their offset table's order, by JavaScriptCore's own `FOR_EACH_BYTECODE_METADATA_SIZE`, compiled into the walk, and asked for in JavaScriptCore's image. A range past the buffer's allocation is an overrun. |
 | `JSC::CodeOrigin` | On a 64-bit build, `m_compositeValue`: an `OutOfLineCodeOrigin*` when `s_maskIsOutOfLine` is set, masked with `s_maskCompositeValueForOutOfLinePointer`, and an `InlineCallFrame*` in `s_maskCompositeValueForPointer` otherwise (private, copied). |
-| `JSC::InferredValue` | `m_data`: an `InferredValueWatchpointSet*` without `IsThinFlag`, as the class named that in `InferredValue<T>`; with it, a cell in the bits of `ValueMask` (private, copied), which the walk reads with every live cell. |
+| `JSC::InferredValue` | `m_data`: an `InferredValueWatchpointSet*` without `IsThinFlag`, as the class named that in `InferredValue<T>`, which this reader does not match; with it, a cell in the bits of `ValueMask` (private, copied), which the walk reads with every live cell. |
 | `JSC::GCIncomingRefCounted` | `m_encodedPointer`: with `singletonFlag()` (private, copied), the one cell that refers to it; otherwise a `Vector<JSCell*>*`, the return type of its `vectorOfCells()`, which liblldb gives where a name would have to spell `Vector`'s defaulted arguments as liblldb does. |
 | `WebCore::ShareableElementData` | Its members, then `arraySize()` `Attribute`s where the class ends: `m_attributeArray`, a flexible array member, which liblldb leaves out of the class. `arraySize()` is `m_arraySizeAndFlags` above its flags (`ElementData::s_flagCount`, private). Attributes that run past the allocation are an overrun, and none is read. |
 | `rtld_global` (glibc's ld.so) | Its members, then each `struct pthread` its `_dl_stack_user` and `_dl_stack_used` lists hold, through each one's `list` member (`nptl-stack.c`), as the image that describes `rtld_global` describes `pthread` (patch 14). |
@@ -1376,8 +1393,8 @@ fail; without the atomic reader 3, and without the span reader 9. A metadata
 table's buffer is read from its `ValueProfile`s on: without its reader, it is
 bytes, and 3 assertions fail. The fixture's `ArrayBuffer` with two views
 keeps its views in a `Vector` its `GCIncomingRefCounted` holds: without that
-reader it is missed, and 3 assertions fail. No test makes a fat
-`InferredValue`, which only a compiler watching it does. No test makes an out-of-line `CodeOrigin`: its
+reader it is missed, and 3 assertions fail. The Leaks suite's timers run
+long enough for a compiler to watch a function, which makes its `InferredValue` fat. No test makes an out-of-line `CodeOrigin`: its
 TZone allocator is not exported from JavaScriptCore. Run with the HeapWalk
 suite, the HeapDump suite reports reads of dead cells without the rule above.
 One more, held only as
@@ -1747,7 +1764,36 @@ and Web Inspector's `HeapSnapshot.js` reads (`HeapWalk::heapDump`, `HeapDump::js
   are recorded from the object that owns them;
 - missed allocations and block leftovers are internal nodes (flag 1), which Web
   Inspector routes no root path through; every other node is not, so a path to
-  a root may pass through C++ objects.
+  a root may pass through C++ objects;
+- which references are edges is decided here, not in the walk, which follows
+  everything and labels each reference with the class whose member held it. The
+  rules are the collector's, about kinds of reference, never about one class:
+  - a handle's cell is a reference of whatever holds the handle, not of the
+    `StrongBlock` or `WeakBlock` its slot is in, which holds the handles of every
+    owner; a slot nothing reached holds its cell itself, as a `Strong` is a root;
+  - a `Weak` keeps nothing alive;
+  - a reference to a JS cell keeps it alive only from another cell, a traced
+    slot (a `JSValue`, a `WriteBarrier`, a `StructureID`, a handle) or a stack:
+    the collector never marks through a raw C++ pointer, such as
+    `CodeBlockSet`'s table of every `CodeBlock`, or `Heap::m_weakGCHashTables`,
+    which points into every `JSGlobalObject`;
+  - every reference is an edge, with its kind (`HeapDump::EdgeKind`: strong,
+    weak or untraced), so every path a person would look for is there; but
+    retained sizes count (`Edge::retains`) the strong edges, and a weak or
+    untraced one only into a node no strong edge reaches, so every live node has
+    a path from `<root>`: first the weak ones, since what holds a `Weak` to a
+    cell is what keeps it alive when marking does so in a way memory does not
+    show (a wrapper's `visitChildren`, an output constraint), then the
+    untraced ones. `json()` writes the edges that retain, so Web Inspector's
+    retained sizes are `retention()`'s.
+
+`HeapWalk::heapDump()` makes the dump `mya heapdump` writes in one call, and
+`HeapDump::nodeAt` finds the node an address lies in. `HeapDump::fromJSON` reads
+a GCDebugging snapshot back, such as JSC's own `HeapSnapshotBuilder`'s, whose
+nodes it finds only by their start. `HeapDump::retention()` computes Web
+Inspector's retained sizes: the immediate dominators from `<root>`, with
+`WTF::Dominators`, a node no path reaches being `<root>`'s, as
+`HeapSnapshot.js` has it, and each node's bytes with those it dominates.
 
 **Test (HeapDump suite).**
 - In process, at mya's safe point, after JSC's own GCDebugging snapshot of the
@@ -1765,6 +1811,54 @@ and Web Inspector's `HeapSnapshot.js` reads (`HeapWalk::heapDump`, `HeapDump::js
   pages in the footprint plus those elsewhere; libpas records what all but at
   most 256 KB of its pages hold; and the footprint is libpas's pages, the other
   private memory and the tagged ledgers, but for less than 2 MB of page tables.
+
+**Test (Leaks suite).** The leaks of
+https://github.com/justinmichaud/leak-tests, each demo's script run as it is, in
+a function standing for its module, with its timer fired by the test: 4 times,
+then a dump, then 64 more, then another. What WebCore does in C++ the test does
+in C++ as WebCore does it: an element's wrapper is held by the element through a
+`Weak` with an owner that keeps it alive, and the element by its document, which
+a global variable holds; a `MessageEvent` holds its data in a `Weak` its wrapper
+visits; a timer holds its function in a `Strong`; `postMessage` copies the
+message into a task queued in a `Deque` the worker never drains; and an
+iframe's `contentWindow.eval` returns a value whose C++ object holds the frame's
+`JSGlobalObject` in a `Weak`, which a `MarkingConstraint` running every wrapper's
+`visitOutputConstraints`, as `DOMGCOutputConstraint` does, keeps alive. The test
+records what each demo leaks (each `Uint16Array` and its storage, each copied
+message and its bytes, each frame's C++ document) and what holds it, as
+integers. A walk finds a demo's leak when, in its dumps:
+- every leaked object (and its storage, where it has a node of its own) is a node;
+- each holder is on a path from `<root>` to every one of them, whatever other
+  paths there are;
+- sorted by how much their retained sizes grew between the dumps (a node
+  matched by its address, a root's by its name), nothing grew more than a
+  holder but what holds it, what it holds, what holds another demo's leak and
+  what no path reaches, such as an allocation the walk missed; and the holder
+  grew by at least half of what leaked.
+
+The holders: `myGlobal` and `myGlobal.arr` (simple-01, 02, 04); `globObj` and
+its array (03); `globObj`, `globObj.e`, its C++ `MessageEvent` and the array in
+its data (05); the scope that holds `x` (06); `base`'s wrapper, its C++ element
+and its C++ document (07); `strings` (08); the worker's wrapper and its C++
+object (09). Nothing is matched by a JS name, which the dump does not have, so
+obfuscated names change nothing.
+
+The same checks run on JSC's own GCDebugging heap snapshots of the same heap,
+taken with each dump, which the collector's visitor builds and Web Inspector
+reads. mya's dumps find all nine leaks. JSC's find 01 to 04 and 06, whose leaks
+only JS objects hold, and miss 05, 07, 08 and 09: a C++ holder (the
+`MessageEvent`, the element and its document, the worker) or a C++ leak (a
+frame's document, a copied message) is in no node. Each rule of the dump is
+needed: without the handle rule all but 04 fail; with `Weak`s retaining, all but
+04 and 08; with raw pointers retaining, or raw pointers before `Weak`s, 08; and
+without the `Deque` reader, 09, all but its first message missed. With 16 ticks
+between the dumps rather than 64, simple-09 leaks 17 KB, and in a full run an
+18 KB allocation the walk misses, new between the dumps, outgrew it. In a full
+run, one dump in three also has a new 8 MB allocation that the walk misses,
+held by other memory, which no path reaches. The timers run long enough for a
+compiler to watch a function, which makes its `InferredValue` fat: the
+`InferredValue` reader matched the class nested in it, until it matched only
+the template's instances.
 
 **Measured: SP3 in MiniBrowser.** One iteration of a subtest
 (`index.html?suites=<subtest>&startAutomatically&iterationCount=1`, served

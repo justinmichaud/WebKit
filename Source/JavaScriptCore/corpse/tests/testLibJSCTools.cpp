@@ -151,6 +151,7 @@ int main(int argc, char** argv)
         JSCToolsTest::testHeapWalk();
         JSCToolsTest::testTypeFieldHierarchies();
         JSCToolsTest::testHeapDump();
+        JSCToolsTest::testLeaks();
         JSCToolsTest::testVM();
     }
 

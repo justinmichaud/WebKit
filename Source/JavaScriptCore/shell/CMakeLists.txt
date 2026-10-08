@@ -123,6 +123,7 @@ if (DEVELOPER_MODE)
             ../corpse/tests/CorpseVMTest.cpp
             ../corpse/tests/DebugInfoTest.cpp
             ../corpse/tests/HeapWalkTest.cpp
+            ../corpse/tests/LeakTest.cpp
             ../corpse/tests/LibJSCToolsTestUtilities.cpp
             ../corpse/tests/testLibJSCTools.cpp
         )

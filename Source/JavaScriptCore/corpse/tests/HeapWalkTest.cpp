@@ -1386,12 +1386,7 @@ void analyzeDiff(Snapshot& before, Snapshot& after, Address fixtureAddress)
         if (!fixture)
             return std::nullopt;
         HeapWalk heap(snapshot, Address { fixture->roots });
-        auto allocations = heap.isValid() ? heap.libpasAllocations() : std::nullopt;
-        if (!allocations)
-            return std::nullopt;
-        Vector<HeapWalk::Reference> references;
-        HeapWalk::Reach reach = heap.reach(*allocations, { }, { }, 0, &references);
-        return heap.heapDump(*allocations, reach, references);
+        return heap.isValid() ? heap.heapDump() : std::nullopt;
     };
     auto first = dumpOf(before);
     auto second = dumpOf(after);
@@ -1530,8 +1525,8 @@ void testHeapDump()
     // An edge between cells in JSC's snapshot is a path in the dump that passes
     // only through C++ objects, such as a code block's constants' FixedVector.
     Vector<Vector<uint32_t>> outgoing(dump.nodes.size());
-    for (auto [from, to] : dump.edges)
-        outgoing[from].append(to);
+    for (auto& edge : dump.edges)
+        outgoing[edge.from].append(edge.to);
     HashMap<uint32_t, HashSet<uint32_t>> cellsReachedFrom;
     auto reachedCells = [&](uint32_t start) -> const HashSet<uint32_t>& {
         return cellsReachedFrom.ensure(start, [&] {

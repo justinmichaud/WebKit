@@ -57,8 +57,13 @@
 #include <string_view>
 #include <wtf/BitSet.h>
 #include <wtf/CompactPtr.h>
+#include <wtf/Dominators.h>
+#include <wtf/FixedVector.h>
 #include <wtf/HashMap.h>
 #include <wtf/HashSet.h>
+#include <wtf/IndexMap.h>
+#include <wtf/IndexSet.h>
+#include <wtf/JSONValues.h>
 #include <wtf/SegmentedVector.h>
 #include <wtf/HexNumber.h>
 #include <wtf/SetForScope.h>
@@ -66,6 +71,7 @@
 #include <wtf/WTFConfig.h>
 #include <wtf/Vector.h>
 #include <wtf/text/MakeString.h>
+#include <wtf/text/StringToIntegerConversion.h>
 #include <wtf/text/StringBuilder.h>
 
 #if OS(DARWIN)
@@ -765,10 +771,14 @@ private:
     void recordReference(Address to)
     {
         Address from = m_referrer ? m_referrer : m_contextSlot ? m_contextSlot : m_contextObject.first;
-        m_references->append({ from, to, m_rootKind });
+        m_references->append({ from, to, m_rootKind, m_contextClass });
     }
-    // The cells the JSValues from `start`, `bytes` long, hold, as references of `owner`.
+    // The cells the JSValues from `start`, `bytes` long, hold, as references of `owner`, or,
+    // without one, each of its own slot.
     void referenceJSValues(Address owner, Address start, uint64_t bytes);
+    // The slots of Strong handles and the WeakImpls of Weak ones, in their blocks.
+    Vector<HeapWalk::Allocation> m_strongHandleSlots;
+    Vector<HeapWalk::Allocation> m_weakHandleSlots;
     Vector<HeapWalk::Reference>* m_references { nullptr };
     Address m_referrer; // What holds the references being read, when it is not the slot or value being read.
     String reachedBy(size_t allocationIndex) const;
@@ -854,10 +864,11 @@ private:
     // by the qualified name of a class the walk has reached. True if `value` was
     // one, and has been read.
     bool walkByName(const TargetValue&);
-    enum class Reader : uint8_t { None, Vector, HashTable, RobinHoodHashTable, TrailingArray, ButterflyArray, SegmentedVector, ConcurrentBufferArray, SymbolTableEntry, CodeBlock, AlignedStorage, CodePointer, LazyPointer, CompactPointer, PackedPointer, JSString, PropertyTable, Optional, StringImpl, ObjectButterfly, StrongBlock, InlineWatchpointSet, ArraySegment, WeakBlock, ExpressionInfo, ArrayBufferView, ArrayBufferContents, Variant, HasOwnPropertyCache, ImmutableStyleProperties, InlineMap, UnlinkedFunctionExecutable, CSSSelector, JSValue, StringImplShape, HashTableValue, PropertyCondition, InlineCacheHandler, CellButterfly, CSSPrimitiveValue, CSSPrimitiveData, MarkedSpace, TypeField, CompactPointerTuple, StructureID, Function, StructureChain, WeakPointer, CallableWrapper, ShareableElementData, Atomic, Span, UnlinkedMetadataTable, CodeOrigin, InferredValue, IncomingReferences, LoaderThreads, ThreadSpecific };
+    enum class Reader : uint8_t { None, Vector, Deque, HashTable, RobinHoodHashTable, TrailingArray, ButterflyArray, SegmentedVector, ConcurrentBufferArray, SymbolTableEntry, CodeBlock, AlignedStorage, CodePointer, LazyPointer, CompactPointer, PackedPointer, JSString, PropertyTable, Optional, StringImpl, ObjectButterfly, StrongBlock, InlineWatchpointSet, ArraySegment, WeakBlock, ExpressionInfo, ArrayBufferView, ArrayBufferContents, Variant, HasOwnPropertyCache, ImmutableStyleProperties, InlineMap, UnlinkedFunctionExecutable, CSSSelector, JSValue, StringImplShape, HashTableValue, PropertyCondition, InlineCacheHandler, CellButterfly, CSSPrimitiveValue, CSSPrimitiveData, MarkedSpace, TypeField, CompactPointerTuple, StructureID, Function, StructureChain, WeakPointer, CallableWrapper, ShareableElementData, Atomic, Span, UnlinkedMetadataTable, CodeOrigin, InferredValue, IncomingReferences, LoaderThreads, ThreadSpecific };
     Reader readerFor(const TargetType&);
     static Reader readerNamed(std::string_view qualifiedName);
     void walkVector(const TargetValue&);
+    void walkDeque(const TargetValue&);
     void walkHashTable(const TargetValue&);
     void walkRobinHoodHashTable(const TargetValue&);
     void walkTrailingArray(const TargetValue&);
@@ -1333,11 +1344,17 @@ void ReachWalk::referenceJSValues(Address owner, Address start, uint64_t bytes)
     auto words = m_snapshot.memory().span<EncodedJSValue>(start, static_cast<size_t>(bytes / sizeof(EncodedJSValue)));
     if (!words)
         return;
-    SetForScope referrer { m_referrer, owner ? owner : start };
-    for (EncodedJSValue word : std::span<const EncodedJSValue> { words }) {
+    SetForScope referrer { m_referrer, owner };
+    SetForScope contextClass { m_contextClass, m_heap.m_jsValueClass };
+    std::span<const EncodedJSValue> slots { words };
+    for (size_t index = 0; index < slots.size(); ++index) {
+        EncodedJSValue word = slots[index];
         JSValue value = JSValue::decode(word);
-        if (word && value.isCell())
-            recordReference(Address { static_cast<uint64_t>(word) });
+        if (!word || !value.isCell())
+            continue;
+        if (!owner)
+            m_referrer = start + index * sizeof(EncodedJSValue);
+        recordReference(Address { static_cast<uint64_t>(word) });
     }
 }
 
@@ -1804,6 +1821,8 @@ auto ReachWalk::readerNamed(std::string_view name) -> Reader
 {
     if (name.starts_with("WTF::Vector<"))
         return Reader::Vector;
+    if (name.starts_with("WTF::Deque<"))
+        return Reader::Deque;
     if (name.starts_with("WTF::HashTable<"))
         return Reader::HashTable;
     if (name.starts_with("WTF::RobinHoodHashTable<"))
@@ -1910,7 +1929,7 @@ auto ReachWalk::readerNamed(std::string_view name) -> Reader
         return Reader::UnlinkedMetadataTable;
     if (name == "JSC::CodeOrigin")
         return Reader::CodeOrigin;
-    if (name.starts_with("JSC::InferredValue<"))
+    if (name.starts_with("JSC::InferredValue<") && name.ends_with('>')) // Not a class nested in one, such as its InferredValueWatchpointSet.
         return Reader::InferredValue;
     if (name.starts_with("JSC::GCIncomingRefCounted<"))
         return Reader::IncomingReferences;
@@ -1931,6 +1950,9 @@ bool ReachWalk::walkByName(const TargetValue& value)
         return false;
     case Reader::Vector:
         walkVector(value);
+        return true;
+    case Reader::Deque:
+        walkDeque(value);
         return true;
     case Reader::HashTable:
         walkHashTable(value);
@@ -2213,6 +2235,29 @@ void ReachWalk::walkVector(const TargetValue& vector)
         return;
     }
     walkElements(*address, element, storage->size);
+}
+
+// The elements in use, from m_start, wrapping at the end of the buffer.
+void ReachWalk::walkDeque(const TargetValue& deque)
+{
+    walkMembers(deque, IsComplete::Yes, "m_buffer");
+    auto storage = dequeStorage(deque);
+    if (!storage)
+        return;
+    auto address = storage->buffer.pointerValue();
+    if (!address || !*address)
+        return;
+    if (auto index = allocationOf(*address, 1))
+        markReached(*index);
+    const TargetType& element = std::get<TargetType::Pointer>(storage->buffer.type().layout()).pointee;
+    if (!element.byteSize()) {
+        if (storage->size)
+            notFollowed(NotFollowed::Declaration);
+        return;
+    }
+    size_t beforeWrap = std::min(storage->size, storage->capacity - storage->start);
+    walkElements(*address + storage->start * element.byteSize(), element, beforeWrap);
+    walkElements(*address, element, storage->size - beforeWrap);
 }
 
 // Every bucket, empty, deleted or live, as the bucket's type. An empty bucket
@@ -2577,8 +2622,10 @@ void ReachWalk::walkWeakBlock(const TargetValue& block)
         return;
     uint64_t first = (block.type().byteSize() + weakImpl->byteSize() - 1) / weakImpl->byteSize();
     uint64_t capacity = WeakBlock::blockSize / weakImpl->byteSize();
-    if (first < capacity)
-        walkElements(block.address() + first * weakImpl->byteSize(), *weakImpl, capacity - first);
+    if (first >= capacity)
+        return;
+    m_weakHandleSlots.append({ block.address() + first * weakImpl->byteSize(), (capacity - first) * weakImpl->byteSize() });
+    walkElements(block.address() + first * weakImpl->byteSize(), *weakImpl, capacity - first);
 }
 
 // glibc's ld.so lists every thread's struct pthread in _rtld_global's
@@ -2832,9 +2879,11 @@ void ReachWalk::walkStrongBlock(const TargetValue& block)
 {
     walkMembers(block, IsComplete::Yes);
     uint64_t headerSize = block.type().byteSize();
-    if (headerSize < StrongBlock::blockSize)
-        typed(block.address() + headerSize, StrongBlock::blockSize - headerSize, *m_heap.m_jsValueClass);
-    // Strong handles are roots of their own.
+    if (headerSize >= StrongBlock::blockSize)
+        return;
+    typed(block.address() + headerSize, StrongBlock::blockSize - headerSize, *m_heap.m_jsValueClass);
+    m_strongHandleSlots.append({ block.address() + headerSize, StrongBlock::blockSize - headerSize });
+    // Strong handles are roots of their own: each slot holds its cell.
     referenceJSValues({ }, block.address() + headerSize, StrongBlock::blockSize - headerSize);
 }
 
@@ -3660,6 +3709,10 @@ void ReachWalk::summarize(const Vector<HeapWalk::Allocation>& excluded, size_t l
     result.globalVariables = m_globalVariables;
     result.untypedDataSymbols = m_untypedDataSymbols;
     result.overruns = WTF::move(m_overruns);
+    result.strongHandleSlots = WTF::move(m_strongHandleSlots);
+    result.weakHandleSlots = WTF::move(m_weakHandleSlots);
+    std::ranges::sort(result.strongHandleSlots, { }, &HeapWalk::Allocation::address);
+    std::ranges::sort(result.weakHandleSlots, { }, &HeapWalk::Allocation::address);
     result.unreadableArrays = WTF::move(m_unreadableArrays);
     for (auto& unread : m_unreadUnions.values()) {
         String holder = unread.field ? makeString(unread.owner->name(), "::"_s, unread.field->name)
@@ -4014,12 +4067,6 @@ auto HeapWalk::heapDump(const Vector<Allocation>& allocations, const Reach& reac
     if (!isValid())
         return dump;
     dump.nodes.append({ { }, 0, "<root>"_s, HeapDump::Kind::Root });
-    struct Range {
-        uint64_t begin;
-        uint64_t end;
-        uint32_t node;
-    };
-    Vector<Range> cells;
     Vector<uint64_t> liveBytes;
     liveBytes.fill(0, allocations.size());
     auto allocationIndex = [&](Address address) -> std::optional<size_t> {
@@ -4032,13 +4079,13 @@ auto HeapWalk::heapDump(const Vector<Allocation>& allocations, const Reach& reac
     forEachLiveCell([&](const Cell& cell) {
         const TargetType* klass = isJSCellKind(cell.kind) ? cellClass(cell.address) : nullptr;
         String name = klass ? makeString(klass->name()) : isJSCellKind(cell.kind) ? "(JS cell)"_s : "(auxiliary cell)"_s;
-        cells.append({ cell.address.toTargetVMAddress(), (cell.address + cell.size).toTargetVMAddress(), static_cast<uint32_t>(dump.nodes.size()) });
+        dump.m_cellRanges.append({ cell.address.toTargetVMAddress(), (cell.address + cell.size).toTargetVMAddress(), static_cast<uint32_t>(dump.nodes.size()) });
         dump.nodes.append({ cell.address, cell.size, WTF::move(name), HeapDump::Kind::Cell });
         if (auto index = allocationIndex(cell.address))
             liveBytes[*index] += cell.size;
         return IterationStatus::Continue;
     });
-    std::ranges::sort(cells, { }, &Range::begin);
+    std::ranges::sort(dump.m_cellRanges, { }, &HeapDump::Range::begin);
 
     HashMap<uint64_t, size_t> missIndex;
     for (size_t index = 0; index < reach.misses.size(); ++index)
@@ -4046,8 +4093,6 @@ auto HeapWalk::heapDump(const Vector<Allocation>& allocations, const Reach& reac
     constexpr std::array<ASCIILiteral, numberOfMissCauses> causes {
         "held by a reached allocation"_s, "held by static data"_s, "held by other memory"_s, "held by other misses"_s, "held by nothing"_s,
     };
-    Vector<uint32_t> allocationNodes;
-    allocationNodes.fill(0, allocations.size());
     for (size_t index = 0; index < allocations.size(); ++index) {
         const Allocation& allocation = allocations[index];
         bool isReached = index < reach.isReached.size() && reach.isReached[index];
@@ -4061,41 +4106,324 @@ auto HeapWalk::heapDump(const Vector<Allocation>& allocations, const Reach& reac
             name = makeString("(missed, "_s, miss == missIndex.end() ? "unexplained"_s : causes[static_cast<size_t>(reach.misses[miss->value].cause)], ')');
         } else
             name = type ? makeString(type->name()) : "(untyped)"_s;
-        allocationNodes[index] = dump.nodes.size();
+        dump.m_allocationRanges.append({ allocation.address.toTargetVMAddress(), (allocation.address + allocation.size).toTargetVMAddress(), static_cast<uint32_t>(dump.nodes.size()) });
         dump.nodes.append({ allocation.address, allocation.size - std::min(allocation.size, liveBytes[index]), WTF::move(name),
             isReached || liveBytes[index] ? HeapDump::Kind::Allocation : HeapDump::Kind::Missed, !!liveBytes[index] });
     }
 
     HashMap<const char*, uint32_t> rootNodes;
     auto nodeOf = [&](Address address, const char* root) -> std::optional<uint32_t> {
-        uint64_t value = address.toTargetVMAddress();
-        auto cellSpan = cells.span();
-        auto after = std::ranges::upper_bound(cellSpan, value, { }, &Range::begin);
-        if (after != cellSpan.begin() && value < (after - 1)->end)
-            return (after - 1)->node;
-        if (auto index = allocationIndex(address))
-            return allocationNodes[*index];
+        if (auto node = dump.nodeAt(address))
+            return node;
         if (!root)
             return std::nullopt;
         return rootNodes.ensure(root, [&] {
             dump.nodes.append({ { }, 0, makeString('<', String::fromLatin1(root), '>'), HeapDump::Kind::Root });
-            dump.edges.append({ 0, static_cast<uint32_t>(dump.nodes.size() - 1) });
             return static_cast<uint32_t>(dump.nodes.size() - 1);
         }).iterator->value;
     };
-    HashSet<uint64_t, IntHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>> seen;
+    // Which references keep what they reach alive, as JSC's collector decides it:
+    // - A handle's cell is a reference of whatever holds the handle, not of the block
+    //   its slot is in, which holds the handles of every owner. A slot nothing reached
+    //   holds its cell itself: a Strong is a root of its own.
+    // - A Weak keeps nothing alive.
+    // - The collector marks a cell only through another cell, a traced slot (a JSValue,
+    //   a WriteBarrier, a StructureID, a handle) or a stack, never through a raw C++
+    //   pointer, such as a table of every CodeBlock or of every WeakGCMap.
+    // A reference that keeps nothing alive is an edge only into a node no retaining edge
+    // reaches, so every live node has a path from <root>. A cell that marking keeps alive
+    // in a way memory does not show, such as a wrapper's visitChildren or an output
+    // constraint, is held by what holds a Weak to it, which is what such marking follows;
+    // only what no Weak reaches either is held by a raw pointer.
+    using Strength = HeapDump::EdgeKind;
+    auto isIn = [](const Vector<Allocation>& ranges, Address address) {
+        auto span = ranges.span();
+        auto after = std::ranges::upper_bound(span, address, { }, &Allocation::address);
+        return after != span.begin() && address - (after - 1)->address < (after - 1)->size;
+    };
+    auto isHandleSlot = [&](Address address) {
+        return isIn(reach.strongHandleSlots, address) || isIn(reach.weakHandleSlots, address);
+    };
+    auto isTraced = [](const TargetType* holder) {
+        if (!holder)
+            return false;
+        auto name = holder->name();
+        std::string_view view { name.legacyCStringPointer() };
+        return view == "JSC::JSValue" || view == "JSC::StructureID" || view.starts_with("JSC::WriteBarrierBase<");
+    };
+    auto isJSCell = [&](uint32_t node) {
+        return dump.nodes[node].kind == HeapDump::Kind::Cell;
+    };
+    using AddressSet = HashSet<uint64_t, IntHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>>;
+    HashMap<uint64_t, Vector<Address, 1>, IntHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>> handleTargets;
+    AddressSet heldHandles;
     for (const Reference& reference : references) {
-        auto to = nodeOf(reference.to, nullptr);
+        if (isHandleSlot(reference.from))
+            handleTargets.add(reference.from.toTargetVMAddress(), Vector<Address, 1> { }).iterator->value.append(reference.to);
+        else if (isHandleSlot(reference.to))
+            heldHandles.add(reference.to.toTargetVMAddress());
+    }
+    Vector<Vector<std::pair<uint32_t, Strength>>> outgoing(dump.nodes.size());
+    AddressSet seen;
+    auto addEdge = [&](const Reference& reference, Address target, std::optional<Strength> strength) {
+        auto to = nodeOf(target, nullptr);
         if (!to)
-            continue;
+            return;
         auto from = reference.from ? nodeOf(reference.from, reference.root) : nodeOf({ }, reference.root);
         if (!from || *from == *to)
+            return;
+        if (outgoing.size() < dump.nodes.size())
+            outgoing.resize(dump.nodes.size());
+        if (!strength) {
+            bool isStack = reference.root && std::string_view { reference.root } == "a thread's stack";
+            strength = !isJSCell(*to) || isJSCell(*from) || isTraced(reference.holder) || isStack ? Strength::Strong : Strength::Untraced;
+        }
+        uint64_t key = (static_cast<uint64_t>(*from) << 32) | *to;
+        if (seen.add(key).isNewEntry)
+            outgoing[*from].append({ *to, *strength });
+        else {
+            for (auto& edge : outgoing[*from]) {
+                if (edge.first == *to)
+                    edge.second = std::max(edge.second, *strength);
+            }
+        }
+    };
+    for (const Reference& reference : references) {
+        if (isHandleSlot(reference.from)) {
+            if (!heldHandles.contains(reference.from.toTargetVMAddress()))
+                addEdge(reference, reference.to, isIn(reach.weakHandleSlots, reference.from) ? Strength::Weak : Strength::Strong);
             continue;
-        if (seen.add((static_cast<uint64_t>(*from) << 32) | *to).isNewEntry)
-            dump.edges.append({ *from, *to });
+        }
+        if (isHandleSlot(reference.to)) {
+            auto targets = handleTargets.find(reference.to.toTargetVMAddress());
+            if (targets == handleTargets.end())
+                continue;
+            auto strength = isIn(reach.weakHandleSlots, reference.to) ? Strength::Weak : Strength::Strong;
+            for (Address target : targets->value)
+                addEdge(reference, target, strength);
+            continue;
+        }
+        addEdge(reference, reference.to, std::nullopt);
     }
-    std::ranges::stable_sort(dump.edges, { }, &std::pair<uint32_t, uint32_t>::first);
+    // Every strong edge from what <root> reaches; then, while some node is reached by
+    // none, the weak edges into the nodes not yet reached, from those reached, or, if there
+    // are none, the untraced ones. Those are the edges retained sizes count; the others are
+    // edges too, so every path a person would look for is there.
+    outgoing.resize(dump.nodes.size());
+    for (uint32_t node = 1; node < dump.nodes.size(); ++node) {
+        if (dump.nodes[node].kind == HeapDump::Kind::Root)
+            outgoing[0].append({ node, Strength::Strong });
+    }
+    AddressSet retaining;
+    auto key = [](uint32_t from, uint32_t to) { return (static_cast<uint64_t>(from) << 32) | to; };
+    Vector<bool> isReached;
+    isReached.fill(false, dump.nodes.size());
+    isReached[0] = true;
+    Vector<uint32_t> reached { 0 };
+    Vector<uint32_t> worklist { 0 };
+    while (!worklist.isEmpty()) {
+        while (!worklist.isEmpty()) {
+            uint32_t node = worklist.takeLast();
+            for (auto [to, strength] : outgoing[node]) {
+                if (strength != Strength::Strong)
+                    continue;
+                retaining.add(key(node, to));
+                if (!isReached[to]) {
+                    isReached[to] = true;
+                    reached.append(to);
+                    worklist.append(to);
+                }
+            }
+        }
+        for (Strength fallback : { Strength::Weak, Strength::Untraced }) {
+            size_t reachedBefore = reached.size();
+            for (size_t index = 0; index < reachedBefore; ++index) {
+                uint32_t node = reached[index];
+                for (auto [to, strength] : outgoing[node]) {
+                    if (strength == fallback && !isReached[to])
+                        retaining.add(key(node, to));
+                }
+            }
+            for (size_t index = 0; index < reachedBefore; ++index) {
+                for (auto [to, strength] : outgoing[reached[index]]) {
+                    if (strength == fallback && !isReached[to]) {
+                        isReached[to] = true;
+                        reached.append(to);
+                        worklist.append(to);
+                    }
+                }
+            }
+            if (!worklist.isEmpty())
+                break;
+        }
+    }
+    for (uint32_t node = 0; node < dump.nodes.size(); ++node) {
+        for (auto [to, strength] : outgoing[node]) {
+            // What no path reaches, such as what only missed allocations hold, keeps its edges.
+            bool retains = !isReached[node] || retaining.contains(key(node, to));
+            dump.edges.append({ node, to, strength, retains });
+        }
+    }
     return dump;
+}
+
+auto HeapWalk::HeapDump::fromJSON(const String& json) -> std::optional<HeapDump>
+{
+    RefPtr value = JSON::Value::parseJSON(json);
+    RefPtr object = value ? value->asObject() : nullptr;
+    RefPtr nodes = object ? object->getArray("nodes"_s) : nullptr;
+    RefPtr edges = object ? object->getArray("edges"_s) : nullptr;
+    RefPtr classNames = object ? object->getArray("nodeClassNames"_s) : nullptr;
+    if (!nodes || !edges || !classNames || object->getString("type"_s) != "GCDebugging"_s)
+        return std::nullopt;
+    HeapDump dump;
+    dump.nodes.append({ { }, 0, "<root>"_s, Kind::Root });
+    // <nodeId>, <sizeInBytes>, <nodeClassNameIndex>, <flags>, <labelIndex>, <cellAddress>, <wrappedAddress>.
+    constexpr size_t nodeFields = 7;
+    HashMap<uint64_t, uint32_t, IntHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>> nodeIndices;
+    nodeIndices.add(0, 0);
+    for (size_t index = 0; index + nodeFields <= nodes->length(); index += nodeFields) {
+        auto identifier = nodes->get(index)->asDouble();
+        auto size = nodes->get(index + 1)->asDouble();
+        auto classIndex = nodes->get(index + 2)->asDouble();
+        String address = nodes->get(index + 5)->asString();
+        if (!identifier || !size || !classIndex || *classIndex >= classNames->length() || !address.startsWith("0x"_s))
+            return std::nullopt;
+        auto cell = parseInteger<uint64_t>(StringView { address }.substring(2), 16);
+        if (!*identifier || !cell)
+            continue;
+        nodeIndices.add(static_cast<uint64_t>(*identifier), dump.nodes.size());
+        dump.m_cellRanges.append({ *cell, *cell + 1, static_cast<uint32_t>(dump.nodes.size()) });
+        dump.nodes.append({ Address { *cell }, static_cast<uint64_t>(*size), classNames->get(static_cast<size_t>(*classIndex))->asString(), Kind::Cell });
+    }
+    std::ranges::sort(dump.m_cellRanges, { }, &Range::begin);
+    // <fromNodeId>, <toNodeId>, <edgeTypeIndex>, <edgeExtraData>.
+    HashSet<uint64_t, IntHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>> seen;
+    for (size_t index = 0; index + 4 <= edges->length(); index += 4) {
+        auto from = edges->get(index)->asDouble();
+        auto to = edges->get(index + 1)->asDouble();
+        if (!from || !to)
+            return std::nullopt;
+        auto fromNode = nodeIndices.find(static_cast<uint64_t>(*from));
+        auto toNode = nodeIndices.find(static_cast<uint64_t>(*to));
+        if (fromNode == nodeIndices.end() || toNode == nodeIndices.end() || fromNode->value == toNode->value)
+            continue;
+        if (seen.add((static_cast<uint64_t>(fromNode->value) << 32) | toNode->value).isNewEntry)
+            dump.edges.append({ fromNode->value, toNode->value, EdgeKind::Strong, true });
+    }
+    return dump;
+}
+
+auto HeapWalk::heapDump() const -> std::optional<HeapDump>
+{
+    auto allocations = libpasAllocations();
+    if (!allocations)
+        return std::nullopt;
+    Vector<Reference> references;
+    Reach reach = this->reach(*allocations, { }, { }, 0, &references);
+    return heapDump(*allocations, reach, references);
+}
+
+std::optional<uint32_t> HeapWalk::HeapDump::nodeAt(Address address) const
+{
+    uint64_t value = address.toTargetVMAddress();
+    for (auto* ranges : { &m_cellRanges, &m_allocationRanges }) {
+        auto span = ranges->span();
+        auto after = std::ranges::upper_bound(span, value, { }, &Range::begin);
+        if (after != span.begin() && value < (after - 1)->end)
+            return (after - 1)->node;
+    }
+    return std::nullopt;
+}
+
+namespace {
+
+// A heap dump as the graph WTF::Dominators computes the dominators of, rooted at <root>.
+class HeapDumpGraph {
+    WTF_MAKE_NONCOPYABLE(HeapDumpGraph);
+public:
+    struct GraphNode {
+        unsigned index() const { return nodeIndex; }
+        unsigned nodeIndex { 0 };
+        Vector<GraphNode*> successors;
+        Vector<GraphNode*> predecessors;
+    };
+    using Node = GraphNode*;
+    using Set = IndexSet<GraphNode*>;
+    template<typename T> using Map = IndexMap<GraphNode*, T>;
+    using List = Vector<GraphNode*, 4>;
+
+    explicit HeapDumpGraph(const HeapWalk::HeapDump& dump)
+        : m_nodes(dump.nodes.size())
+    {
+        for (size_t index = 0; index < m_nodes.size(); ++index)
+            m_nodes[index].nodeIndex = index;
+        for (auto& edge : dump.edges) {
+            if (!edge.retains)
+                continue;
+            m_nodes[edge.from].successors.append(&m_nodes[edge.to]);
+            m_nodes[edge.to].predecessors.append(&m_nodes[edge.from]);
+        }
+    }
+
+    Node root() { return &m_nodes[0]; }
+    template<typename T> Map<T> newMap() { return Map<T>(m_nodes.size()); }
+    const Vector<GraphNode*>& successors(Node node) const { return node->successors; }
+    const Vector<GraphNode*>& predecessors(Node node) const { return node->predecessors; }
+    unsigned index(Node node) const { return node->nodeIndex; }
+    Node node(unsigned index) { return &m_nodes[index]; }
+    unsigned numNodes() const { return m_nodes.size(); }
+    unsigned dump(Node node) const { return node ? node->nodeIndex : UINT_MAX; }
+    void dump(PrintStream& out) const { out.print(m_nodes.size(), " nodes of a heap dump"_s); }
+
+private:
+    FixedVector<GraphNode> m_nodes;
+};
+
+} // anonymous namespace
+
+auto HeapWalk::HeapDump::retention() const -> Retention
+{
+    Retention result;
+    if (nodes.isEmpty())
+        return result;
+    HeapDumpGraph graph(*this);
+    WTF::Dominators<HeapDumpGraph> dominators(graph);
+    result.immediateDominator.fill(0, nodes.size());
+    Vector<Vector<uint32_t>> dominated(nodes.size());
+    for (uint32_t index = 1; index < nodes.size(); ++index) {
+        if (auto* dominator = dominators.idom(graph.node(index)))
+            result.immediateDominator[index] = dominator->nodeIndex;
+        dominated[result.immediateDominator[index]].append(index);
+    }
+    // Each node's own bytes and those of the nodes it dominates, children first.
+    result.retainedSize.fill(0, nodes.size());
+    Vector<std::pair<uint32_t, bool>> worklist { { 0, false } };
+    while (!worklist.isEmpty()) {
+        auto [node, childrenDone] = worklist.takeLast();
+        if (childrenDone) {
+            result.retainedSize[node] += nodes[node].size;
+            if (node)
+                result.retainedSize[result.immediateDominator[node]] += result.retainedSize[node];
+            continue;
+        }
+        worklist.append({ node, true });
+        for (uint32_t child : dominated[node])
+            worklist.append({ child, false });
+    }
+    return result;
+}
+
+bool HeapWalk::HeapDump::Retention::dominates(uint32_t dominator, uint32_t node) const
+{
+    for (size_t steps = 0; steps < immediateDominator.size(); ++steps) {
+        if (node == dominator)
+            return true;
+        if (!node)
+            return false;
+        node = immediateDominator[node];
+    }
+    return false;
 }
 
 // The JSON of a GCDebugging heap snapshot, as HeapSnapshotBuilder::json writes it.
@@ -4123,8 +4451,14 @@ String HeapWalk::HeapDump::json() const
     for (size_t index = 0; index < orderedClassNames.size(); ++index)
         out.append(index ? ","_s : ""_s, '"', orderedClassNames[index], '"');
     out.append("],\"edges\":["_s);
-    for (size_t index = 0; index < edges.size(); ++index)
-        out.append(index ? ","_s : ""_s, edges[index].first, ',', edges[index].second, ",0,0"_s);
+    // Those that retain, so that Web Inspector's retained sizes are retention()'s.
+    bool isFirstEdge = true;
+    for (auto& edge : edges) {
+        if (!edge.retains)
+            continue;
+        out.append(isFirstEdge ? ""_s : ","_s, edge.from, ',', edge.to, ",0,0"_s);
+        isFirstEdge = false;
+    }
     out.append("],\"edgeTypes\":[\"Internal\",\"Property\",\"Index\",\"Variable\"],\"edgeNames\":[],\"roots\":["_s);
     // <nodeId>, <rootReasonIndex>, <reachabilityReasonIndex>; each root's reason is its name, a label.
     Vector<String> labels { ""_s };

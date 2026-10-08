@@ -1864,6 +1864,7 @@
 		1AB0DEAD00000006000D0001 /* CorpseVMTest.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000007000D0001 /* CorpseVMTest.cpp */; };
 		1AB0DEAD00000004000D0001 /* DebugInfoTest.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 1AB0DEAD00000005000D0001 /* DebugInfoTest.cpp */; };
 		6F2C5B3C67DD494F8E6BC915 /* HeapWalkTest.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 55FCAD6FF3D94D3187DF5844 /* HeapWalkTest.cpp */; };
+		0FE6E512175B48B686F2D77D /* LeakTest.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 89B98FF8C80F49EE955ADA01 /* LeakTest.cpp */; };
 		D68DA6DA907546EFA429D8D2 /* CorpseDiagnosticsTest.cpp in Sources */ = {isa = PBXBuildFile; fileRef = 203DFA350D3248B0A8E7376B /* CorpseDiagnosticsTest.cpp */; };
 		7E83C43717D785F3003DC41B /* CorpseExportsTrie.h in Headers */ = {isa = PBXBuildFile; fileRef = 7E83C43517D785F3003DC41B /* CorpseExportsTrie.h */; settings = {ATTRIBUTES = (Private, ); }; };
 		56C6C2B7EBDCC63B6ECEA9AD /* CorpseThread.h in Headers */ = {isa = PBXBuildFile; fileRef = 211E3D6CA97F31CEB385A75A /* CorpseThread.h */; settings = {ATTRIBUTES = (Private, ); }; };
@@ -4561,6 +4562,7 @@
 		203DFA350D3248B0A8E7376B /* CorpseDiagnosticsTest.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = CorpseDiagnosticsTest.cpp; sourceTree = "<group>"; };
 		1AB0DEAD00000005000D0001 /* DebugInfoTest.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = DebugInfoTest.cpp; sourceTree = "<group>"; };
 		55FCAD6FF3D94D3187DF5844 /* HeapWalkTest.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = HeapWalkTest.cpp; sourceTree = "<group>"; };
+		89B98FF8C80F49EE955ADA01 /* LeakTest.cpp */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.cpp.cpp; path = LeakTest.cpp; sourceTree = "<group>"; };
 		44F93E0D2AE71F9F00FFA37C /* JavaScriptCoreFramework.cpp */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.cpp.cpp; path = JavaScriptCoreFramework.cpp; sourceTree = "<group>"; };
 		451539B812DC994500EF7AC4 /* Yarr.h */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.c.h; name = Yarr.h; path = yarr/Yarr.h; sourceTree = "<group>"; };
 		45E12D8806A49B0F00E9DF84 /* jsc.cpp */ = {isa = PBXFileReference; fileEncoding = 30; indentWidth = 4; lastKnownFileType = sourcecode.cpp.cpp; path = jsc.cpp; sourceTree = "<group>"; tabWidth = 4; };
@@ -6996,6 +6998,7 @@
 				1AB0DEAD00000007000D0001 /* CorpseVMTest.cpp */,
 				1AB0DEAD00000005000D0001 /* DebugInfoTest.cpp */,
 				55FCAD6FF3D94D3187DF5844 /* HeapWalkTest.cpp */,
+				89B98FF8C80F49EE955ADA01 /* LeakTest.cpp */,
 				7E83C40417D785F3003DC41B /* LibJSCToolsTestUtilities.cpp */,
 				7E83C40317D785F3003DC41B /* LibJSCToolsTestUtilities.h */,
 				7E83C40017D785F3003DC41B /* testLibJSCTools.cpp */,
@@ -14844,6 +14847,7 @@
 				1AB0DEAD00000006000D0001 /* CorpseVMTest.cpp in Sources */,
 				1AB0DEAD00000004000D0001 /* DebugInfoTest.cpp in Sources */,
 				6F2C5B3C67DD494F8E6BC915 /* HeapWalkTest.cpp in Sources */,
+				0FE6E512175B48B686F2D77D /* LeakTest.cpp in Sources */,
 				7E83C40C17D785F3003DC41B /* LibJSCToolsTestUtilities.cpp in Sources */,
 				7E83C40A17D785F3003DC41B /* testLibJSCTools.cpp in Sources */,
 			);

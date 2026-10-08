@@ -77,6 +77,7 @@ void testExportsTrie();
 void testHeapWalk();
 void testTypeFieldHierarchies();
 void testHeapDump();
+void testLeaks();
 void testProcess();
 void testSymbol();
 void testRegion();

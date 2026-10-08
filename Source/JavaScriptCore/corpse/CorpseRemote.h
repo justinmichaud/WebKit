@@ -251,6 +251,45 @@ inline std::optional<VectorStorage> vectorStorage(const TargetValue& vector)
     return VectorStorage { WTF::move(buffer), static_cast<size_t>(*size) };
 }
 
+// A Deque's storage: its m_buffer's VectorBufferBase's m_buffer and m_capacity,
+// and the elements in use, from m_start to m_end, wrapping at the capacity
+// (Deque::begin() and Deque::size(); the members are private). Nullopt, and
+// reported, for a range no Deque reaches.
+struct DequeStorage {
+    TargetValue buffer; // VectorBufferBase::m_buffer, a pointer to the first slot.
+    size_t start;
+    size_t size;
+    size_t capacity;
+};
+
+inline std::optional<DequeStorage> dequeStorage(const TargetValue& deque)
+{
+    if (!deque)
+        return std::nullopt;
+    TargetValue vectorBuffer = deque.properField("m_buffer");
+    auto* klass = vectorBuffer ? std::get_if<TargetType::Class>(&vectorBuffer.type().layout()) : nullptr;
+    if (!klass || klass->bases.isEmpty()) {
+        CORPSE_REPORT("The Deque at 0x%llx has no VectorBufferBase", static_cast<unsigned long long>(deque.address().toTargetVMAddress()));
+        return std::nullopt;
+    }
+    TargetValue base = vectorBuffer.base(klass->bases[0]);
+    TargetValue buffer = base.properField("m_buffer");
+    auto capacity = base.properField("m_capacity").integer();
+    auto start = deque.properField("m_start").integer();
+    auto end = deque.properField("m_end").integer();
+    auto mask = deque.properField("m_capacityMask").integer();
+    if (!buffer || !capacity || !start || !end || !mask)
+        return std::nullopt;
+    if (!*capacity)
+        return DequeStorage { WTF::move(buffer), 0, 0, 0 };
+    if (*capacity < 0 || *capacity > static_cast<int64_t>(maxVectorSize) || *mask + 1 != *capacity || *start < 0 || *start > *mask || *end < 0 || *end > *mask) {
+        CORPSE_REPORT("The Deque at 0x%llx claims elements %lld to %lld of %lld", static_cast<unsigned long long>(deque.address().toTargetVMAddress()),
+            static_cast<long long>(*start), static_cast<long long>(*end), static_cast<long long>(*capacity));
+        return std::nullopt;
+    }
+    return DequeStorage { WTF::move(buffer), static_cast<size_t>(*start), static_cast<size_t>((*end - *start) & *mask), static_cast<size_t>(*capacity) };
+}
+
 // A HashTable's buckets: m_table, and the table size from the metadata before
 // the buckets. Size 0 for a table with no buckets. Nullopt, and reported, if
 // the size cannot be read or no table reaches it.

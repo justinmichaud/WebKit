@@ -266,6 +266,9 @@ public:
         // Each union whose members lead somewhere and whose live member no reader picks, by the field
         // that holds it, and how many times the walk met it there, most first. Its members are not read.
         Vector<std::pair<String, uint64_t>> unreadUnions;
+        // The slots of the Strong handles, and the WeakImpls of the Weak ones, each sorted.
+        Vector<Allocation> strongHandleSlots;
+        Vector<Allocation> weakHandleSlots;
         std::array<uint64_t, numberOfNotFollowedReasons> notFollowed { };
         uint64_t cellsWithClass { 0 };
         uint64_t cellBytesBeyondClass { 0 }; // In cells bigger than their class and the storage after it the walk reads.
@@ -292,6 +295,7 @@ public:
         Address from;
         Address to;
         const char* root;
+        const TargetType* holder { nullptr }; // The class whose member held it, if the walk knows it.
     };
     Reach reach(const Vector<Allocation>&, const Vector<Allocation>& excluded, const Vector<Allocation>& notReferrers, size_t listCount, Vector<Reference>* references = nullptr) const;
 
@@ -308,11 +312,61 @@ public:
             Kind kind;
             bool isBlock { false }; // A MarkedBlock or a precise allocation, less its cells.
         };
+        // What keeps the node a reference reaches alive, as JSC's collector has it.
+        enum class EdgeKind : uint8_t {
+            Untraced, // A raw C++ pointer to a JS cell, which the collector never marks through.
+            Weak, // A Weak, which keeps nothing alive.
+            Strong, // Anything else.
+        };
+        struct Edge {
+            uint32_t from; // Node indices.
+            uint32_t to;
+            EdgeKind kind;
+            // Whether retained sizes count it: a strong edge, or the weak or untraced one that
+            // gives a node no strong edge reaches its path from <root>.
+            bool retains;
+        };
         Vector<Node> nodes; // The first is JSC's <root>.
-        Vector<std::pair<uint32_t, uint32_t>> edges; // Node indices, each pair once, by the first.
+        Vector<Edge> edges; // Each pair of nodes once, by the first. json() writes those that retain.
         String json() const;
+        // A GCDebugging heap snapshot, version 3, as json() writes it and as JSC's own
+        // HeapSnapshotBuilder does, of a heap the collector's own visitor walked: a node
+        // per cell, and an edge per reference the collector marked through. Such a dump
+        // knows where each node starts, but not how many of its bytes are the cell's, so
+        // nodeAt finds a node only by its start. Nullopt if the JSON is not such a snapshot.
+        static std::optional<HeapDump> fromJSON(const String&);
+
+        // The node whose bytes hold `address`: the live cell it lies in, or else the libpas allocation.
+        std::optional<uint32_t> nodeAt(Address) const;
+
+        // What each node keeps alive, as Web Inspector's HeapSnapshot computes it for its
+        // retained sizes: a node's immediate dominator is the last node that every path to
+        // it from <root> passes through, and its retained size is its own bytes and those of
+        // every node it dominates. A node no path reaches is <root>'s, as Web Inspector has it.
+        struct Retention {
+            Vector<uint32_t> immediateDominator; // <root>'s is itself.
+            Vector<uint64_t> retainedSize;
+            // Whether every path from <root> to `node` passes through `dominator`.
+            bool dominates(uint32_t dominator, uint32_t node) const;
+        };
+        Retention retention() const;
+
+    private:
+        friend class HeapWalk;
+        struct Range {
+            uint64_t begin;
+            uint64_t end;
+            uint32_t node;
+        };
+        // Sorted, for nodeAt.
+        Vector<Range> m_cellRanges;
+        Vector<Range> m_allocationRanges;
     };
     HeapDump heapDump(const Vector<Allocation>&, const Reach&, const Vector<Reference>&) const;
+    // The dump of every libpas allocation, as `mya heapdump` writes it: the walk's reach
+    // over libpasAllocations(), with nothing excluded. Nullopt, having reported why, if
+    // libpas's allocations cannot be read.
+    std::optional<HeapDump> heapDump() const;
 
 private:
     friend class ReachWalk;
