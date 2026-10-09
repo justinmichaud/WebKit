@@ -1,0 +1,17 @@
+#!/bin/sh
+# Runs the Leaks suite, writing its dumps, and makes the report in <out-dir>:
+# index.html, analysis.js and leaks.json, which it checks against the C++ verdicts.
+# The page is an artifact's body; preview.html wraps it to open from a local server.
+# Usage: generate <testLibJSCTools> <out-dir>
+set -e
+here=$(cd "$(dirname "$0")" && pwd)
+test=$1
+out=$2
+[ -x "$test" ] && [ -n "$out" ] || { echo "Usage: $0 <testLibJSCTools> <out-dir>" >&2; exit 2; }
+mkdir -p "$out"
+JSC_TOOLS_LEAK_REPORT="$out/leaks-full.json" "$test" Leaks
+node --max-old-space-size=8000 "$here/compact.js" "$out/leaks-full.json" "$out/leaks.json"
+rm "$out/leaks-full.json"
+cp "$here/index.html" "$here/analysis.js" "$out/"
+{ echo '<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"></head><body>'; cat "$here/index.html"; echo '</body></html>'; } > "$out/preview.html"
+node --max-old-space-size=8000 "$here/check.js" "$out/leaks.json"

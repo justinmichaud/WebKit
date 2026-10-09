@@ -1,0 +1,547 @@
+<title>Leak-tests Heap Dumps</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans+Condensed:wght@500;600&family=IBM+Plex+Sans:ital,wght@0,400;0,500;0,600;1,400&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: one reading column for prose, full-width panels for tables and trees, each scrolling on its own. */
+:root {
+  --bg: #f5f6f8; --panel: #ffffff; --ink: #1b2230; --muted: #5b6577; --rule: #d9dde5;
+  --accent: #2f5d8a; --accent-soft: #e3ecf5;
+  --good: #1f7a4d; --good-soft: #e1f2e8; --wait: #8a5a00; --wait-soft: #fbf0d9; --bad: #b42318; --bad-soft: #fde4e1;
+  --code-bg: #eef1f5; --bar: #9bb6d1;
+  --display: "IBM Plex Sans Condensed", "Arial Narrow", sans-serif;
+  --body: "IBM Plex Sans", system-ui, sans-serif;
+  --mono: "JetBrains Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #12161d; --panel: #1a2029; --ink: #e3e8ef; --muted: #98a3b4; --rule: #2d3542;
+  --accent: #8fb8e0; --accent-soft: #1f3247;
+  --good: #6fcf9a; --good-soft: #17352a; --wait: #e6b65c; --wait-soft: #3a2e14; --bad: #ff8a7a; --bad-soft: #43201c;
+  --code-bg: #222a35; --bar: #3d5a78; color-scheme: dark } }
+:root[data-theme="dark"] {
+  --bg: #12161d; --panel: #1a2029; --ink: #e3e8ef; --muted: #98a3b4; --rule: #2d3542;
+  --accent: #8fb8e0; --accent-soft: #1f3247;
+  --good: #6fcf9a; --good-soft: #17352a; --wait: #e6b65c; --wait-soft: #3a2e14; --bad: #ff8a7a; --bad-soft: #43201c;
+  --code-bg: #222a35; --bar: #3d5a78; color-scheme: dark }
+body { background: var(--bg); color: var(--ink); font: 15px/1.55 var(--body); }
+main { padding-inline: 16px; padding-block: 28px 64px; max-width: 1180px; margin: 0 auto; display: grid; gap: 28px; }
+h1, h2, h3 { font-family: var(--display); font-weight: 600; text-wrap: balance; margin: 0; line-height: 1.2; }
+h1 { font-size: 2rem; }
+h2 { font-size: 1.45rem; }
+h3 { font-size: 1.1rem; }
+p { margin: 0; max-width: 72ch; }
+.prose { display: grid; gap: 10px; }
+.eyebrow { font: 600 .72rem/1 var(--body); letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+code, pre, .mono { font-family: var(--mono); font-size: .82rem; }
+code { background: var(--code-bg); padding: 1px 4px; border-radius: 3px; }
+pre { background: var(--code-bg); padding: 12px 14px; border-radius: 6px; overflow-x: auto; margin: 0; line-height: 1.45; }
+section.panel { background: var(--panel); border: 1px solid var(--rule); border-radius: 8px; padding: 20px; display: grid; gap: 16px; min-width: 0; }
+.scroll { overflow-x: auto; min-width: 0; }
+table { border-collapse: collapse; font-size: .85rem; font-variant-numeric: tabular-nums; }
+th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+th { font-weight: 600; color: var(--muted); font-size: .75rem; letter-spacing: .04em; text-transform: uppercase; white-space: nowrap; }
+td.num, th.num { text-align: right; white-space: nowrap; }
+.pill { display: inline-block; padding: 1px 8px; border-radius: 999px; font-size: .75rem; font-weight: 600; white-space: nowrap; }
+.pill.good { background: var(--good-soft); color: var(--good); }
+.pill.wait { background: var(--wait-soft); color: var(--wait); }
+.pill.bad { background: var(--bad-soft); color: var(--bad); }
+.pill.info { background: var(--accent-soft); color: var(--accent); }
+.status { font-family: var(--mono); font-size: .85rem; color: var(--muted); }
+.rules { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
+.rule { border-top: 3px solid var(--accent); padding-top: 8px; display: grid; gap: 4px; }
+.rule b { font-family: var(--display); font-size: 1rem; }
+.rule span { color: var(--muted); font-size: .88rem; }
+.demo-nav { display: flex; flex-wrap: wrap; gap: 6px; }
+.demo-nav button, .walk-toggle button, button.link { font: inherit; font-size: .85rem; border: 1px solid var(--rule); background: var(--panel); color: var(--ink); border-radius: 6px; padding: 4px 10px; cursor: pointer; }
+.demo-nav button[aria-pressed="true"], .walk-toggle button[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: var(--panel); }
+button:focus-visible, summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+button.link { border: none; background: none; color: var(--accent); padding: 0; text-decoration: underline; }
+.two { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+.two > * { min-width: 0; }
+.verdict { display: grid; gap: 6px; padding: 12px; border-radius: 6px; background: var(--code-bg); font-size: .88rem; }
+.verdict .line { display: flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.verdict .why { color: var(--muted); }
+.legend { display: flex; flex-wrap: wrap; gap: 12px; font-size: .8rem; color: var(--muted); }
+/* The tree. */
+.tree { font-family: var(--mono); font-size: .78rem; min-width: 960px; }
+.tree ul { list-style: none; margin: 0; padding-left: 18px; border-left: 1px dotted var(--rule); }
+.tree > ul { padding-left: 0; border-left: none; }
+.tree li { margin: 0; }
+.row { display: grid; grid-template-columns: 18px minmax(260px, 1fr) 80px 92px 104px 120px 92px; gap: 8px; align-items: center; padding: 2px 4px; border-radius: 4px; }
+.row:hover { background: var(--accent-soft); }
+.row .tog { width: 18px; height: 18px; border: none; background: none; color: var(--muted); cursor: pointer; padding: 0; font: inherit; }
+.row .name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .num { text-align: right; font-variant-numeric: tabular-nums; position: relative; }
+.row .num.ret::before { content: ""; position: absolute; right: 0; top: 2px; bottom: 2px; width: var(--w, 0%); background: var(--bar); opacity: .35; border-radius: 2px; }
+.row .num span { position: relative; }
+.via { color: var(--muted); }
+.cls { color: var(--ink); font-weight: 600; }
+.addr { color: var(--muted); }
+.badge { font-family: var(--body); font-size: .66rem; font-weight: 600; padding: 0 5px; border-radius: 3px; margin-left: 4px; vertical-align: 1px; }
+.b-new { background: var(--accent-soft); color: var(--accent); }
+.b-leak { background: var(--bad-soft); color: var(--bad); }
+.b-holder { background: var(--wait-soft); color: var(--wait); }
+.b-browser { background: var(--good-soft); color: var(--good); }
+.b-entry { background: var(--good); color: var(--panel); }
+.tree-head { display: grid; grid-template-columns: 18px minmax(260px, 1fr) 80px 92px 104px 120px 92px; gap: 8px; padding: 2px 4px; color: var(--muted); font-family: var(--body); font-size: .72rem; text-transform: uppercase; letter-spacing: .05em; min-width: 960px; }
+.tree-head span:nth-child(n+3) { text-align: right; }
+.edges { margin: 2px 0 6px 26px; font-family: var(--mono); font-size: .74rem; }
+.edges td, .edges th { padding: 2px 8px; }
+.more { color: var(--muted); font-family: var(--body); font-size: .78rem; padding: 2px 4px 2px 26px; }
+.muted { color: var(--muted); }
+@media (prefers-reduced-motion: no-preference) { .row { transition: background .12s; } }
+</style>
+
+<main>
+  <header class="prose">
+    <span class="eyebrow">JavaScriptCore · corpse/tests/LeakTest.cpp · Leaks suite</span>
+    <h1>Leak-tests heap dumps</h1>
+    <p>Two leaks that go through C++ objects, dumped twice, before and after 64 timer ticks. Each pair of dumps is read two ways: mya's walk of the process, and JSC's own GCDebugging snapshot, which is what Web Inspector shows. Every number and verdict on this page is computed in your browser from those four dumps. The page computes the dominators, retained sizes, growth and entries again, and compares each verdict with the one the C++ test printed.</p>
+    <p class="status" id="status">Loading leaks.json…</p>
+  </header>
+
+  <section class="panel" id="summary" hidden>
+    <div class="prose">
+      <h2>What each walk lets a reader find</h2>
+      <p id="summary-lede"></p>
+    </div>
+    <div class="scroll"><table id="matrix"></table></div>
+    <div class="legend">
+      <span><span class="pill good">found</span> found, as the test asserts</span>
+      <span><span class="pill wait">missed</span> missed, as the test asserts</span>
+      <span><span class="pill bad">unexpected</span> differs from what the test asserts</span>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="prose">
+      <h2>What counts as finding a leak</h2>
+      <p>A person who suspects a leak takes two heap snapshots and reads what grew between them. To fix the leak, they need what holds it: the JS object the page's code keeps adding to. The test records that holder by its address, which holds nothing. A walk finds the leak only if both of these hold.</p>
+    </div>
+    <div class="rules">
+      <div class="rule"><b>It charges the leak to the holder</b><span>Every leaked object is a node. The holder is on a path from &lt;root&gt; to each one, and its retained size grew by at least half of what leaked.</span></div>
+      <div class="rule"><b>The holder's entry stands out</b><span>Nodes are grouped by retained path, the classes on their path of dominators from &lt;root&gt;. The holder's entry must be charged with at least half of the leak and with nothing of the other demo's. No unrelated entry may grow more by noise, meaning growth no leak owns.</span></div>
+    </div>
+    <p class="muted" style="font-size:.88rem">These belong to no entry: the allocator's own blocks, nodes that no path reaches, and the JS heap's record of each block (its MarkedBlock::Handle and whatever that alone holds, such as the WeakBlocks of its weak set). All of these grow with whatever the heap holds.</p>
+  </section>
+
+  <section class="panel" id="demos" hidden>
+    <div class="prose">
+      <h2>Each demo</h2>
+      <p>The script is run as written. The holder line is the test's addition: it records addresses only and holds nothing. Below each script is the list of what grew most, then the dominator tree of the whole heap, in which a parent retains everything beneath it. Each node's children are sorted by growth, so the subtrees that grew most come first, and each row shows how much of each demo's leak lies below it. Open a node's edges to see every labeled edge into and out of it. mya labels each edge with the C++ member or class that held it. JSC's snapshot supplies JS property and variable names. JSC's snapshot has no C++ objects: it records an edge for a cell only while another cell's visitChildren marks it. A removed element's C++ children, and their pointers to their wrappers, are no edges, so in JSC's snapshot each child's wrapper is a root of its own.</p>
+    </div>
+    <nav class="demo-nav" id="demo-nav" aria-label="Demos"></nav>
+    <div id="demo"></div>
+  </section>
+</main>
+
+<script src="analysis.js"></script>
+<script>
+"use strict";
+const $ = (sel, root = document) => root.querySelector(sel);
+const el = (tag, attrs = {}, ...kids) => {
+  const e = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") e.className = v;
+    else if (k === "text") e.textContent = v;
+    else if (k.startsWith("on")) e.addEventListener(k.slice(2), v);
+    else if (k === "style") e.setAttribute("style", v);
+    else e.setAttribute(k, v);
+  }
+  for (const kid of kids) if (kid != null) e.append(kid);
+  return e;
+};
+const fmt = n => Math.round(n).toLocaleString("en-US");
+const signed = n => (n > 0 ? "+" : n < 0 ? "−" : "") + fmt(Math.abs(n));
+const hexOf = n => "0x" + n.toString(16).toUpperCase();
+const shortClass = s => s.replace(/JSCToolsTest::\(anonymous namespace\)::/g, "").replace(/\bJSC::/g, "").replace(/\bWTF::/g, "")
+  .replace(/, WTF?::RawPtrTraits<[^<>]*>, WTF?::DefaultRefDerefTraits<[^<>]*>/g, "").replace(/, RawPtrTraits<[^<>]*>, DefaultRefDerefTraits<[^<>]*>/g, "");
+const kinds = ["untraced", "weak", "strong"];
+// The classes standing for WebCore's: the test's, and its wrapper's ClassInfo name in JSC's snapshot.
+const isBrowserClass = name => name === "TestWrapper" || /^JSCToolsTest::\(anonymous namespace\)::(JSTestWrapper|TestWrappable|TestNode|TestElement|TestDocument|TestWorker|TestSerializedValue|TestTimer)$/.test(name);
+
+let report;
+
+async function load() {
+  const status = $("#status");
+  try {
+    const response = await fetch("leaks.json");
+    if (!response.ok) throw new Error(`leaks.json: HTTP ${response.status}`);
+    status.textContent = "Downloading the dumps…";
+    const text = await response.text();
+    status.textContent = `Parsing ${(text.length / 1e6).toFixed(1)} MB of JSON…`;
+    await new Promise(r => setTimeout(r, 30));
+    const json = JSON.parse(text);
+    status.textContent = "Computing dominators, retained sizes and entries for four dumps…";
+    await new Promise(r => setTimeout(r, 30));
+    const t0 = performance.now();
+    report = loadReport(json);
+    computeVerdicts();
+    const ms = Math.round(performance.now() - t0);
+    const sizes = report.walks.map(w => `${w.name}: ${fmt(w.after.nodeCount)} nodes, ${fmt(w.after.edges.length)} edges`).join("; ");
+    status.textContent = `Computed in ${fmt(ms)} ms from ${(text.length / 1e6).toFixed(1)} MB of dumps. Second dumps: ${sizes}.`;
+    renderSummary();
+    renderDemos();
+  } catch (error) {
+    status.textContent = `The dumps could not be read: ${error.message}. This page needs leaks.json next to it: LeakTest.cpp writes it when JSC_TOOLS_LEAK_REPORT is set, and compact.js interns its strings.`;
+    throw error;
+  }
+}
+
+function computeVerdicts() {
+  for (const w of report.walks) {
+    let bytes = 0;
+    for (let i = 0; i < w.after.nodeCount; ++i) bytes += w.after.size[i];
+    w.rootRetainsAll = w.after.retained[0] === bytes;
+    w.totalBytes = bytes;
+  }
+  report.results = report.demos.map((demo, index) => report.walks.map((walk, wi) => {
+    const seen = whyNotSeen(walk, index, demo);
+    const find = findLeak(walk, report.demos, index);
+    const cppSeen = demo.verdicts[2 * wi], cppFound = demo.verdicts[2 * wi + 1];
+    // The test asserts that mya's dumps find both, and that JSC's find neither.
+    const expectedFound = wi === 0;
+    return {
+      seen, find, cppSeen, cppFound,
+      seenAgrees: (seen ?? "found") === cppSeen,
+      foundAgrees: (find.verdict ?? "found") === cppFound,
+      expectedSeen: wi === 0,
+      expectedFound,
+    };
+  }));
+}
+
+function cell(ok, expected, labels) {
+  if (ok === expected) return el("span", { class: "pill " + (ok ? "good" : "wait"), text: ok ? labels[0] : labels[1] });
+  return el("span", { class: "pill bad", text: ok ? "unexpected: " + labels[0] : "unexpected: " + labels[1] });
+}
+
+function renderSummary() {
+  const section = $("#summary");
+  section.hidden = false;
+  let agree = 0, total = 0;
+  report.results.forEach(rs => rs.forEach(r => { total += 2; agree += r.seenAgrees + r.foundAgrees; }));
+  const foundBy = report.walks.map((w, wi) => report.demos.filter((d, i) => report.results[i][wi].find.stage === "found").map(d => d.page.replace(".html", "")).join(" and ") || "neither");
+  $("#summary-lede").textContent = `mya's dumps find ${foundBy[0]}; JSC's own snapshot finds ${foundBy[1]}. ` +
+    `This page's verdicts agree with the C++ test's on ${agree} of ${total}. ` +
+    report.walks.map(w => `${w.name}: <root> retains ${w.rootRetainsAll ? "every" : "NOT every"} byte (${fmt(w.totalBytes)})`).join("; ") + ".";
+  const table = $("#matrix");
+  table.append(el("thead", {}, el("tr", {},
+    el("th", { text: "Demo" }),
+    el("th", { text: "mya charges" }), el("th", { text: "mya finds" }),
+    el("th", { text: "JSC charges" }), el("th", { text: "JSC finds" }),
+    el("th", { text: "Matches C++" }))));
+  const body = el("tbody");
+  report.demos.forEach((demo, i) => {
+    const [m, j] = report.results[i];
+    const agreeAll = m.seenAgrees && m.foundAgrees && j.seenAgrees && j.foundAgrees;
+    body.append(el("tr", {},
+      el("td", {}, el("button", { class: "link", text: demo.page, onclick: () => selectDemo(i, true) })),
+      el("td", {}, cell(m.seen === null, m.expectedSeen, ["charged", "not charged"])),
+      el("td", {}, cell(m.find.stage === "found", m.expectedFound, ["found", "missed"])),
+      el("td", {}, cell(j.seen === null, j.expectedSeen, ["charged", "not charged"])),
+      el("td", {}, cell(j.find.stage === "found", j.expectedFound, ["found", "missed"])),
+      el("td", {}, el("span", { class: "pill " + (agreeAll ? "good" : "bad"), text: agreeAll ? "4 of 4" : "differs" }))));
+  });
+  table.append(body);
+}
+
+// The demos.
+let current = { demo: 0, walk: 0 };
+function renderDemos() {
+  $("#demos").hidden = false;
+  const nav = $("#demo-nav");
+  report.demos.forEach((demo, i) => nav.append(el("button", { type: "button", "aria-pressed": "false", text: demo.page.replace(".html", ""), onclick: () => selectDemo(i) })));
+  let start = 0;
+  const hash = location.hash.slice(1);
+  const byHash = report.demos.findIndex(d => d.page.replace(".html", "") === hash);
+  if (byHash >= 0) start = byHash;
+  selectDemo(start);
+}
+
+function selectDemo(index, scroll) {
+  current.demo = index;
+  [...$("#demo-nav").children].forEach((b, i) => b.setAttribute("aria-pressed", String(i === index)));
+  renderDemo();
+  if (scroll) $("#demos").scrollIntoView({ behavior: matchMedia("(prefers-reduced-motion: reduce)").matches ? "auto" : "smooth" });
+}
+
+function renderDemo() {
+  const index = current.demo, demo = report.demos[index], walk = report.walks[current.walk];
+  const r = report.results[index][current.walk];
+  const root = $("#demo");
+  root.replaceChildren();
+  root.append(el("div", { class: "two" },
+    el("div", { style: "display:grid;gap:8px;min-width:0" }, el("span", { class: "eyebrow", text: demo.page + " · the demo's script" }), el("pre", { text: demo.script })),
+    el("div", { style: "display:grid;gap:8px;min-width:0" }, el("span", { class: "eyebrow", text: "What the test records of it (addresses only)" }), el("pre", { text: demo.holderScript }),
+      el("p", { class: "muted", style: "font-size:.85rem" }, `Leaked objects recorded: ${demo.leaked.length} (${demo.leaked.filter(l => l.isAfterFirstSnapshot).length} between the dumps). The test's holder: the last address it records.`))));
+
+  const toggle = el("div", { class: "walk-toggle demo-nav", role: "group", "aria-label": "Dump" });
+  report.walks.forEach((w, wi) => toggle.append(el("button", { type: "button", "aria-pressed": String(wi === current.walk), text: w.name, onclick: () => { current.walk = wi; renderDemo(); } })));
+  root.append(el("div", { style: "display:grid;gap:12px;margin-top:20px" }, toggle));
+
+  const verdict = el("div", { class: "verdict" });
+  const line = (label, ok, expected, js, cpp, agrees) => el("div", { class: "line" },
+    el("b", { text: label }), cell(ok, expected, label === "Charges" ? ["charged", "not charged"] : ["found", "missed"]),
+    el("span", { class: "why", text: js ?? (label === "Charges" ? "each holder is on a path to every leaked node, and grew by at least half of what leaked" : "") }),
+    el("span", { class: "pill " + (agrees ? "good" : "bad"), text: agrees ? "matches C++" : "C++ said: " + cpp }));
+  verdict.append(line("Charges", r.seen === null, r.expectedSeen, r.seen, r.cppSeen, r.seenAgrees));
+  const found = r.find.stage === "found" ? r.find.entry : null;
+  const foundText = found ? `the holder's entry ${describeKey(walk.keys, found.key)} is number ${walk.entries.indexOf(found) + 1} of ${fmt(walk.entries.length)} by growth: ${signed(found.growth)} bytes, charged with ${fmt(found.charge[index])} of the ${fmt(walk.leaks.bytesBetween[index])} that leaked` : r.find.verdict;
+  verdict.append(line("Finds", r.find.stage === "found", r.expectedFound, foundText, r.cppFound, r.foundAgrees));
+  root.append(el("div", { style: "margin-top:12px" }, verdict));
+
+  root.append(renderEntries(walk, index, r.find));
+  root.append(renderTree(walk, index, r.find));
+}
+
+function renderEntries(walk, index, find) {
+  const wrap = el("div", { style: "display:grid;gap:8px;margin-top:20px;min-width:0" });
+  const leaked = walk.leaks.bytesBetween[index];
+  wrap.append(el("h3", { text: "What grew most, by retained path" }));
+  if (find.stage === "missing") {
+    wrap.append(el("p", { class: "muted", text: `No list: ${find.verdict}. ${walk.name} has no node for what C++ holds, so what leaked is not in it at all.` }));
+    return wrap;
+  }
+  wrap.append(el("p", { class: "muted", style: "font-size:.85rem", text: `${fmt(leaked)} bytes in ${walk.leaks.between[index].length} nodes leaked between the dumps. The ${fmt(walk.entries.length)} entries of the second dump are sorted by growth. The holder's entry is marked; "noise" is growth that neither demo's leak owns.` }));
+  const table = el("table");
+  table.append(el("thead", {}, el("tr", {}, el("th", { class: "num", text: "#" }), el("th", { text: "Retained path (last classes)" }), el("th", { class: "num", text: "Nodes" }), el("th", { class: "num", text: "Growth" }), el("th", { class: "num", text: "Noise" }), el("th", { class: "num", text: "Charged with this leak" }), el("th", { text: "Other demo's leak" }))));
+  const body = el("tbody");
+  const other = 1 - index;
+  const row = (e, rank) => {
+    const isHolder = e === find.entry;
+    body.append(el("tr", isHolder ? { style: "background:var(--accent-soft)" } : {},
+      el("td", { class: "num", text: "#" + fmt(rank) }),
+      el("td", { class: "mono", title: walk.keys.descriptions[e.key] }, shortClass(describeKey(walk.keys, e.key)), isHolder ? el("span", { class: "badge b-holder", text: "holder's entry" }) : null),
+      el("td", { class: "num", text: fmt(e.members.length) }),
+      el("td", { class: "num", text: signed(e.growth) }),
+      el("td", { class: "num", text: signed(e.noiseGrowth) }),
+      el("td", { class: "num", text: e.charge[index] ? `${fmt(e.charge[index])} (${Math.round(100 * e.charge[index] / leaked)}%)` : "—" }),
+      el("td", { class: "num", text: e.charge[other] ? fmt(e.charge[other]) : "—" })));
+  };
+  const top = 12;
+  walk.entries.slice(0, top).forEach((e, i) => row(e, i + 1));
+  const holderRank = find.entry ? walk.entries.indexOf(find.entry) + 1 : 0;
+  if (holderRank > top) {
+    body.append(el("tr", {}, el("td", { colspan: "7", class: "muted", text: `… ${fmt(holderRank - top - 1)} entries …` })));
+    row(find.entry, holderRank);
+  }
+  if (find.noisiest && !walk.entries.slice(0, top).includes(find.noisiest) && find.noisiest !== find.entry) {
+    body.append(el("tr", {}, el("td", { colspan: "7", class: "muted", text: "The unrelated entry that grew most by noise:" })));
+    row(find.noisiest, walk.entries.indexOf(find.noisiest) + 1);
+  }
+  table.append(body);
+  wrap.append(el("div", { class: "scroll" }, table));
+  if (!find.entry) wrap.append(el("p", { class: "muted", text: find.verdict }));
+  return wrap;
+}
+
+// The dominator tree of the whole second dump, top-down, each node's children by growth, largest
+// first, so the subtrees that grew most are the first a reader sees. Each row says how much of
+// this demo's leak, and of the other's, lies below it. Open by default: the path to this demo's
+// holder, and at each level the child that grew most.
+function renderTree(walk, index, find) {
+  const g = walk.after;
+  const wrap = el("div", { style: "display:grid;gap:8px;margin-top:20px;min-width:0" });
+  wrap.append(el("h3", { text: `Heap graph, top-down by growth: the dominator tree of the second ${walk.name} dump` }));
+  const other = 1 - index;
+  // Bytes of each demo's leaked nodes (between the dumps) below each node.
+  const below = [index, other].map(d => {
+    const bytes = new Float64Array(g.nodeCount);
+    for (const n of walk.leaks.between[d]) bytes[n] += g.size[n];
+    for (let i = g.preorder.length - 1; i > 0; --i) { const n = g.preorder[i]; bytes[g.idom[n]] += bytes[n]; }
+    return bytes;
+  });
+  const [mine, theirs] = below;
+  const leakedTotal = walk.leaks.bytesBetween[index];
+  const holderNode = g.nodeStartingAt(report.demos[index].holders[report.demos[index].holders.length - 1]);
+  const toHolder = new Set(holderNode !== undefined ? g.dominatorChain(holderNode) : []);
+  const holders = new Set(report.demos[index].holders.map(a => g.nodeStartingAt(a)).filter(n => n !== undefined));
+  const leakedSet = new Set(walk.leaks.nodes[index]);
+  const entryMembers = new Set(find.stage === "found" ? find.entry.members : []);
+  const rootGrowth = Math.max(...g.children[0].map(c => walk.growth[c]), 1);
+
+  wrap.append(el("p", { class: "muted", style: "font-size:.85rem", text: `The bars show growth. "This leak" is the bytes of ${report.demos[index].page}'s leaked objects below a node (${fmt(leakedTotal)} in all, between the dumps); "other leak" is ${report.demos[other].page}'s. Opened by default: the path to the holder, and at each open node the child that grew most.` }));
+  wrap.append(el("div", { class: "legend" },
+    el("span", {}, el("span", { class: "badge b-holder", text: "holder" }), " recorded by the test"),
+    el("span", {}, el("span", { class: "badge b-leak", text: "leaked" }), " recorded leaked object"),
+    el("span", {}, el("span", { class: "badge b-new", text: "new" }), " not in the first dump"),
+    el("span", {}, el("span", { class: "badge b-browser", text: "browser" }), " stands for a WebCore class"),
+    el("span", {}, el("span", { class: "badge b-entry", text: "entry" }), " in the holder's entry, when it is found")));
+
+  let jscNames = null;
+  const jscNameOf = (from, to) => {
+    if (walk !== report.walks[0]) return "";
+    if (!jscNames) {
+      jscNames = new Map();
+      const j = report.walks[1].after;
+      for (const e of j.edges) if (e.label) jscNames.set(j.address[e.from] + ":" + j.address[e.to], e.label);
+    }
+    return jscNames.get(g.address[from] + ":" + g.address[to]) ?? "";
+  };
+  const share = bytes => bytes ? `${fmt(bytes)} (${Math.round(100 * bytes / Math.max(leakedTotal, 1))}%)` : "—";
+  const otherShare = bytes => bytes ? fmt(bytes) : "—";
+
+  const head = el("div", { class: "tree-head" }, el("span"), el("span", { text: "Node, and the edge from its dominator" }), el("span", { text: "Self" }), el("span", { text: "Retained" }), el("span", { text: "Growth" }), el("span", { text: "This leak" }), el("span", { text: "Other leak" }));
+  const tree = el("div", { class: "tree" });
+  const top = el("ul");
+  tree.append(top);
+
+  const sum = (members, array) => members.reduce((s, m) => s + array[m], 0);
+  function row(tog, name, self, retained, growth, mineBytes, theirsBytes) {
+    const bar = el("span", { class: "num ret", style: `--w:${Math.max(0, Math.min(100, 100 * growth / rootGrowth)).toFixed(1)}%` }, el("span", { text: signed(growth) }));
+    return el("div", { class: "row" }, tog, name, el("span", { class: "num", text: fmt(self) }), el("span", { class: "num", text: fmt(retained) }), bar,
+      el("span", { class: "num", text: share(mineBytes) }), el("span", { class: "num", text: otherShare(theirsBytes) }));
+  }
+  function via(parent, n, name) {
+    if (parent === undefined) return;
+    const e = g.edgeBetween(parent, n);
+    if (e) name.append(el("span", { class: "via", text: `${e.label ? shortClass(e.label) : "(no label)"} · ${kinds[e.kind]}${e.retains ? "" : ", not counted"}` + (jscNameOf(parent, n) ? ` · JS name "${jscNameOf(parent, n)}"` : "") + " → " }));
+    else name.append(el("span", { class: "via", text: `dominated through ${g.in[n].length} edges → ` }));
+  }
+
+  function nodeRow(n, parent, openByDefault) {
+    const li = el("li");
+    const kids = g.children[n];
+    const tog = el("button", { class: "tog", type: "button", "aria-label": "Expand", text: kids.length ? "▸" : "·" });
+    const name = el("span", { class: "name", title: g.className[n] });
+    via(parent, n, name);
+    name.append(el("span", { class: "cls", text: shortClass(g.className[n]) }));
+    if (g.address[n]) name.append(el("span", { class: "addr", text: " @" + hexOf(g.address[n]) }));
+    if (holders.has(n)) name.append(el("span", { class: "badge b-holder", text: "holder" }));
+    if (leakedSet.has(n)) name.append(el("span", { class: "badge b-leak", text: "leaked" }));
+    if (n && walk.isNew(n)) name.append(el("span", { class: "badge b-new", text: "new" }));
+    if (isBrowserClass(g.className[n])) name.append(el("span", { class: "badge b-browser", text: "browser" }));
+    if (entryMembers.has(n)) name.append(el("span", { class: "badge b-entry", text: "entry" }));
+    const edgesButton = el("button", { class: "link", type: "button", style: "margin-left:8px;font-size:.72rem", text: `edges ${g.in[n].length}↓ ${g.out[n].length}↑` });
+    name.append(edgesButton);
+    const r = row(tog, name, g.size[n], g.retained[n], n ? walk.growth[n] : rootGrowthOf(), mine[n], theirs[n]);
+    li.append(r);
+    let edgesBox = null;
+    edgesButton.addEventListener("click", () => {
+      if (edgesBox) { edgesBox.remove(); edgesBox = null; return; }
+      edgesBox = edgesTable(n);
+      r.after(edgesBox);
+    });
+    let list = null;
+    const open = () => {
+      list = el("ul");
+      renderChildren(list, n, kids);
+      li.append(list);
+      tog.textContent = "▾";
+      tog.setAttribute("aria-label", "Collapse");
+    };
+    tog.addEventListener("click", () => {
+      if (!kids.length) return;
+      if (list) { list.remove(); list = null; tog.textContent = "▸"; tog.setAttribute("aria-label", "Expand"); }
+      else open();
+    });
+    if (kids.length && openByDefault) open();
+    return li;
+  }
+  function rootGrowthOf() { return g.children[0].reduce((s, c) => s + walk.growth[c], 0); }
+
+  // Siblings of one class are one group when there are more than three, as they are in a list of what grew.
+  function renderChildren(ul, n, kids) {
+    const groups = new Map();
+    for (const c of kids) { const k = g.className[c]; if (!groups.has(k)) groups.set(k, []); groups.get(k).push(c); }
+    const items = [];
+    for (const [cls, members] of groups) {
+      if (members.length > 3) items.push({ cls, members, growth: sum(members, walk.growth) });
+      else for (const m of members) items.push({ node: m, growth: walk.growth[m] });
+    }
+    items.sort((a, b) => b.growth - a.growth);
+    const biggest = items[0];
+    const page = 8;
+    let shown = 0;
+    const pinned = new Set();
+    const more = el("li", { class: "more" });
+    ul.append(more);
+    const showMore = () => {
+      for (const item of items.slice(shown, shown + page)) {
+        if (pinned.has(item))
+          continue;
+        const onPath = item.node !== undefined ? toHolder.has(item.node) : item.members.some(m => toHolder.has(m));
+        const openIt = onPath || (item === biggest && item.growth > 0);
+        more.before(item.node !== undefined ? nodeRow(item.node, n, openIt) : groupRow(n, item.cls, item.members, openIt));
+      }
+      shown = Math.min(items.length, shown + page);
+      const rest = items.slice(shown);
+      // The path to the holder is always shown, wherever it ranks.
+      for (const item of rest) {
+        const onPath = item.node !== undefined ? toHolder.has(item.node) : item.members.some(m => toHolder.has(m));
+        if (onPath && !pinned.has(item)) {
+          pinned.add(item);
+          more.before(el("li", { class: "more", text: `… the path to the holder, number ${items.indexOf(item) + 1} of ${items.length} by growth:` }),
+            item.node !== undefined ? nodeRow(item.node, n, true) : groupRow(n, item.cls, item.members, true));
+        }
+      }
+      const restGrowth = rest.reduce((s, item) => s + item.growth, 0);
+      more.replaceChildren(rest.length ? el("button", { class: "link", type: "button", text: `Show ${Math.min(page, rest.length)} more of ${fmt(rest.length)} (together ${signed(restGrowth)} bytes of growth)`, onclick: showMore }) : "");
+    };
+    showMore();
+  }
+
+  function groupRow(parent, cls, members, openByDefault) {
+    const li = el("li");
+    const fresh = members.filter(m => walk.isNew(m)).length;
+    const leakedCount = members.filter(m => leakedSet.has(m)).length;
+    const tog = el("button", { class: "tog", type: "button", "aria-label": "Expand", text: "▸" });
+    const name = el("span", { class: "name", title: cls });
+    via(parent, members[0], name);
+    name.append(el("span", { class: "cls", text: `${fmt(members.length)} × ${shortClass(cls)}` }));
+    if (fresh) name.append(el("span", { class: "badge b-new", text: `${fresh} new` }));
+    if (leakedCount) name.append(el("span", { class: "badge b-leak", text: `${leakedCount} leaked` }));
+    if (isBrowserClass(cls)) name.append(el("span", { class: "badge b-browser", text: "browser" }));
+    const inEntry = members.filter(m => entryMembers.has(m)).length;
+    if (inEntry) name.append(el("span", { class: "badge b-entry", text: `${inEntry} in entry` }));
+    const r = row(tog, name, sum(members, g.size), sum(members, g.retained), sum(members, walk.growth), sum(members, mine), sum(members, theirs));
+    li.append(r);
+    let ul = null;
+    const open = () => {
+      ul = el("ul");
+      const sorted = [...members].sort((a, b) => walk.growth[b] - walk.growth[a]);
+      const page = 10;
+      let shown = 0;
+      const more = el("li", { class: "more" });
+      const showMore = () => {
+        sorted.slice(shown, shown + page).forEach(m => more.before(nodeRow(m, parent, toHolder.has(m))));
+        shown = Math.min(sorted.length, shown + page);
+        more.replaceChildren(shown < sorted.length ? el("button", { class: "link", type: "button", text: `Show ${Math.min(page, sorted.length - shown)} more of ${fmt(sorted.length - shown)}`, onclick: showMore }) : "");
+      };
+      ul.append(more);
+      showMore();
+      li.append(ul);
+      tog.textContent = "▾";
+    };
+    tog.addEventListener("click", () => {
+      if (ul) { ul.remove(); ul = null; tog.textContent = "▸"; return; }
+      open();
+    });
+    if (openByDefault) open();
+    return li;
+  }
+
+  function edgesTable(n) {
+    const t = el("table", { class: "edges" });
+    t.append(el("thead", {}, el("tr", {}, el("th", { text: "" }), el("th", { text: "Other node" }), el("th", { text: "Label (what held it)" }), el("th", { text: "Kind" }), el("th", { text: "Counted" }), ...(walk === report.walks[0] ? [el("th", { text: "JS name, from JSC's snapshot" })] : []))));
+    const body = el("tbody");
+    const add = (dir, e, otherNode) => body.append(el("tr", {},
+      el("td", { text: dir }), el("td", { text: shortClass(g.className[otherNode]) + (g.address[otherNode] ? " @" + hexOf(g.address[otherNode]) : "") }),
+      el("td", { text: e.label ? shortClass(e.label) : "—" }), el("td", { text: kinds[e.kind] }), el("td", { text: e.retains ? "yes" : "no" }),
+      ...(walk === report.walks[0] ? [el("td", { text: (dir === "in" ? jscNameOf(otherNode, n) : jscNameOf(n, otherNode)) || "—" })] : [])));
+    const cap = 60;
+    g.in[n].slice(0, cap).forEach(e => add("in", e, e.from));
+    g.out[n].slice(0, cap).forEach(e => add("out", e, e.to));
+    t.append(body);
+    const box = el("div", { class: "scroll" }, t);
+    if (g.in[n].length > cap || g.out[n].length > cap) box.append(el("p", { class: "more", text: `First ${cap} of each direction shown: ${fmt(g.in[n].length)} in, ${fmt(g.out[n].length)} out.` }));
+    return box;
+  }
+
+  top.append(nodeRow(0, undefined, true));
+  wrap.append(el("div", { class: "scroll" }, head, tree));
+  return wrap;
+}
+
+load();
+</script>

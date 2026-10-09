@@ -771,7 +771,7 @@ private:
     void recordReference(Address to)
     {
         Address from = m_referrer ? m_referrer : m_contextSlot ? m_contextSlot : m_contextObject.first;
-        m_references->append({ from, to, m_rootKind, m_contextClass });
+        m_references->append({ from, to, m_rootKind, m_contextClass, m_contextField });
     }
     // The cells the JSValues from `start`, `bytes` long, hold, as references of `owner`, or,
     // without one, each of its own slot.
@@ -4126,10 +4126,16 @@ auto HeapWalk::heapDump(const Vector<Allocation>& allocations, const Reach& reac
     // - A handle's cell is a reference of whatever holds the handle, not of the block
     //   its slot is in, which holds the handles of every owner. A slot nothing reached
     //   holds its cell itself: a Strong is a root of its own.
-    // - A Weak keeps nothing alive.
-    // - The collector marks a cell only through another cell, a traced slot (a JSValue,
-    //   a WriteBarrier, a StructureID, a handle) or a stack, never through a raw C++
-    //   pointer, such as a table of every CodeBlock or of every WeakGCMap.
+    // - A Weak keeps nothing alive, nor does an opaque root: the collector's set of them,
+    //   the only ConcurrentPtrHashSet, records what marking found, such as a removed DOM
+    //   tree's root, which what holds the tree keeps alive.
+    // - The collector marks a cell only through another cell's visitChildren, a Strong
+    //   handle or a stack. A traced slot (a JSValue, a WriteBarrier, a StructureID) in C++
+    //   memory keeps its cell alive only if a cell visits it, which memory does not show:
+    //   LLInt metadata's StructureIDs and WriteBarriers are inline caches, cleared at the end
+    //   of a collection if nothing else marked their cells (reconcileLLIntInlineCachesAtGCEnd).
+    //   So it is weak. A raw C++ pointer, such as a table of every CodeBlock or of every
+    //   WeakGCMap, is never marked through: it is untraced.
     // A reference that keeps nothing alive is an edge only into a node no retaining edge
     // reaches, so every live node has a path from <root>. A cell that marking keeps alive
     // in a way memory does not show, such as a wrapper's visitChildren or an output
@@ -4164,6 +4170,14 @@ auto HeapWalk::heapDump(const Vector<Allocation>& allocations, const Reach& reac
             heldHandles.add(reference.to.toTargetVMAddress());
     }
     Vector<Vector<std::pair<uint32_t, Strength>>> outgoing(dump.nodes.size());
+    HashMap<uint64_t, String, IntHash<uint64_t>, WTF::UnsignedWithZeroKeyHashTraits<uint64_t>> labels;
+    auto labelOf = [](const Reference& reference) -> String {
+        if (reference.holder && reference.field)
+            return makeString(reference.holder->name(), "::"_s, reference.field->name);
+        if (reference.holder)
+            return reference.holder->name();
+        return reference.root ? makeString('<', String::fromLatin1(reference.root), '>') : String { };
+    };
     AddressSet seen;
     auto addEdge = [&](const Reference& reference, Address target, std::optional<Strength> strength) {
         auto to = nodeOf(target, nullptr);
@@ -4174,11 +4188,23 @@ auto HeapWalk::heapDump(const Vector<Allocation>& allocations, const Reach& reac
             return;
         if (outgoing.size() < dump.nodes.size())
             outgoing.resize(dump.nodes.size());
+        if (!strength && dump.nodes[*from].className.startsWith("WTF::ConcurrentPtrHashSet::"_s))
+            strength = Strength::Weak;
         if (!strength) {
             bool isStack = reference.root && std::string_view { reference.root } == "a thread's stack";
-            strength = !isJSCell(*to) || isJSCell(*from) || isTraced(reference.holder) || isStack ? Strength::Strong : Strength::Untraced;
+            if (!isJSCell(*to) || isJSCell(*from) || isStack)
+                strength = Strength::Strong;
+            else
+                strength = isTraced(reference.holder) ? Strength::Weak : Strength::Untraced;
         }
         uint64_t key = (static_cast<uint64_t>(*from) << 32) | *to;
+        if (String label = labelOf(reference); !label.isEmpty()) {
+            auto& labelsOfEdge = labels.add(key, String { }).iterator->value;
+            if (labelsOfEdge.isEmpty())
+                labelsOfEdge = WTF::move(label);
+            else if (!labelsOfEdge.split(", "_s).contains(label))
+                labelsOfEdge = makeString(labelsOfEdge, ", "_s, label);
+        }
         if (seen.add(key).isNewEntry)
             outgoing[*from].append({ *to, *strength });
         else {
@@ -4261,7 +4287,7 @@ auto HeapWalk::heapDump(const Vector<Allocation>& allocations, const Reach& reac
         for (auto [to, strength] : outgoing[node]) {
             // What no path reaches, such as what only missed allocations hold, keeps its edges.
             bool retains = !isReached[node] || retaining.contains(key(node, to));
-            dump.edges.append({ node, to, strength, retains });
+            dump.edges.append({ node, to, strength, retains, labels.get(key(node, to)) });
         }
     }
     return dump;
@@ -4274,7 +4300,9 @@ auto HeapWalk::HeapDump::fromJSON(const String& json) -> std::optional<HeapDump>
     RefPtr nodes = object ? object->getArray("nodes"_s) : nullptr;
     RefPtr edges = object ? object->getArray("edges"_s) : nullptr;
     RefPtr classNames = object ? object->getArray("nodeClassNames"_s) : nullptr;
-    if (!nodes || !edges || !classNames || object->getString("type"_s) != "GCDebugging"_s)
+    RefPtr edgeTypes = object ? object->getArray("edgeTypes"_s) : nullptr;
+    RefPtr edgeNames = object ? object->getArray("edgeNames"_s) : nullptr;
+    if (!nodes || !edges || !classNames || !edgeTypes || !edgeNames || object->getString("type"_s) != "GCDebugging"_s)
         return std::nullopt;
     HeapDump dump;
     dump.nodes.append({ { }, 0, "<root>"_s, Kind::Root });
@@ -4308,8 +4336,17 @@ auto HeapWalk::HeapDump::fromJSON(const String& json) -> std::optional<HeapDump>
         auto toNode = nodeIndices.find(static_cast<uint64_t>(*to));
         if (fromNode == nodeIndices.end() || toNode == nodeIndices.end() || fromNode->value == toNode->value)
             continue;
+        // A property's or a variable's name, an index, or nothing for an internal edge.
+        String label;
+        auto type = edges->get(index + 2)->asDouble();
+        auto data = edges->get(index + 3)->asDouble();
+        String typeName = type && *type < edgeTypes->length() ? edgeTypes->get(static_cast<size_t>(*type))->asString() : String { };
+        if (data && (typeName == "Property"_s || typeName == "Variable"_s) && *data < edgeNames->length())
+            label = edgeNames->get(static_cast<size_t>(*data))->asString();
+        else if (data && typeName == "Index"_s)
+            label = makeString('[', static_cast<uint64_t>(*data), ']');
         if (seen.add((static_cast<uint64_t>(fromNode->value) << 32) | toNode->value).isNewEntry)
-            dump.edges.append({ fromNode->value, toNode->value, EdgeKind::Strong, true });
+            dump.edges.append({ fromNode->value, toNode->value, EdgeKind::Strong, true, WTF::move(label) });
     }
     return dump;
 }

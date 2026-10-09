@@ -296,6 +296,7 @@ public:
         Address to;
         const char* root;
         const TargetType* holder { nullptr }; // The class whose member held it, if the walk knows it.
+        const TargetType::Field* field { nullptr }; // That member, if the walk knows it.
     };
     Reach reach(const Vector<Allocation>&, const Vector<Allocation>& excluded, const Vector<Allocation>& notReferrers, size_t listCount, Vector<Reference>* references = nullptr) const;
 
@@ -325,6 +326,9 @@ public:
             // Whether retained sizes count it: a strong edge, or the weak or untraced one that
             // gives a node no strong edge reaches its path from <root>.
             bool retains;
+            // What held each reference between the two nodes: the member `Class::field`, the
+            // class, or, from a root, its name. Distinct ones, comma-separated.
+            String label;
         };
         Vector<Node> nodes; // The first is JSC's <root>.
         Vector<Edge> edges; // Each pair of nodes once, by the first. json() writes those that retain.

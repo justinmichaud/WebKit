@@ -1772,11 +1772,16 @@ and Web Inspector's `HeapSnapshot.js` reads (`HeapWalk::heapDump`, `HeapDump::js
     `StrongBlock` or `WeakBlock` its slot is in, which holds the handles of every
     owner; a slot nothing reached holds its cell itself, as a `Strong` is a root;
   - a `Weak` keeps nothing alive;
-  - a reference to a JS cell keeps it alive only from another cell, a traced
-    slot (a `JSValue`, a `WriteBarrier`, a `StructureID`, a handle) or a stack:
-    the collector never marks through a raw C++ pointer, such as
-    `CodeBlockSet`'s table of every `CodeBlock`, or `Heap::m_weakGCHashTables`,
-    which points into every `JSGlobalObject`;
+  - a reference to a JS cell keeps it alive only from another cell (what its
+    `visitChildren` would visit), a `Strong` handle or a stack. A traced slot (a
+    `JSValue`, a `WriteBarrier`, a `StructureID`) in C++ memory is weak: it keeps
+    its cell alive only if a cell visits it, which memory does not show, and many
+    are caches, such as LLInt metadata's, which
+    `CodeBlock::reconcileLLIntInlineCachesAtGCEnd` clears when nothing else marked
+    their cells, or the cells a DFG code block refers to. A raw C++ pointer is
+    untraced: the collector never marks through one, such as `CodeBlockSet`'s
+    table of every `CodeBlock`, or `Heap::m_weakGCHashTables`, which points into
+    every `JSGlobalObject`;
   - every reference is an edge, with its kind (`HeapDump::EdgeKind`: strong,
     weak or untraced), so every path a person would look for is there; but
     retained sizes count (`Edge::retains`) the strong edges, and a weak or
@@ -1812,53 +1817,59 @@ Inspector's retained sizes: the immediate dominators from `<root>`, with
   most 256 KB of its pages hold; and the footprint is libpas's pages, the other
   private memory and the tagged ledgers, but for less than 2 MB of page tables.
 
-**Test (Leaks suite).** The leaks of
-https://github.com/justinmichaud/leak-tests, each demo's script run as it is, in
-a function standing for its module, with its timer fired by the test: 4 times,
-then a dump, then 64 more, then another. What WebCore does in C++ the test does
-in C++ as WebCore does it: an element's wrapper is held by the element through a
-`Weak` with an owner that keeps it alive, and the element by its document, which
-a global variable holds; a `MessageEvent` holds its data in a `Weak` its wrapper
-visits; a timer holds its function in a `Strong`; `postMessage` copies the
-message into a task queued in a `Deque` the worker never drains; and an
-iframe's `contentWindow.eval` returns a value whose C++ object holds the frame's
-`JSGlobalObject` in a `Weak`, which a `MarkingConstraint` running every wrapper's
-`visitOutputConstraints`, as `DOMGCOutputConstraint` does, keeps alive. The test
-records what each demo leaks (each `Uint16Array` and its storage, each copied
-message and its bytes, each frame's C++ document) and what holds it, as
-integers. A walk finds a demo's leak when, in its dumps:
-- every leaked object (and its storage, where it has a node of its own) is a node;
-- each holder is on a path from `<root>` to every one of them, whatever other
-  paths there are;
-- sorted by how much their retained sizes grew between the dumps (a node
-  matched by its address, a root's by its name), nothing grew more than a
-  holder but what holds it, what it holds, what holds another demo's leak and
-  what no path reaches, such as an allocation the walk missed; and the holder
-  grew by at least half of what leaked.
+**Test (Leaks suite).** Two leaks that only a walk of C++ objects charges to
+what holds them, each demo's script run as it is, in a function standing for
+its module, with its timer fired by the test: 4 times, then a dump, then 64
+more, then another. What WebCore does in C++ the test does in C++ as WebCore
+does it: a node's wrapper adds its tree's root as an opaque root, and keeps
+alive its listeners' functions, which `JSEventListener` holds in a `Weak`; a
+node's wrapper lives while its root is an opaque root, as `JSNodeOwner` has it;
+a timer holds its function in a `Strong`; `postMessage` copies the message into
+a task queued in a `Deque` the worker never drains.
+- **detached-subtree**: each tick makes a `div` with 20 `span`s, each with a
+  listener that closes over a `Uint16Array(1000)`, appends it to the body,
+  removes it, and keeps it in `detached`.
+- **simple-09** of https://github.com/justinmichaud/leak-tests: each tick posts a
+  1 KB `ArrayBuffer` to a busy worker.
 
-The holders: `myGlobal` and `myGlobal.arr` (simple-01, 02, 04); `globObj` and
-its array (03); `globObj`, `globObj.e`, its C++ `MessageEvent` and the array in
-its data (05); the scope that holds `x` (06); `base`'s wrapper, its C++ element
-and its C++ document (07); `strings` (08); the worker's wrapper and its C++
-object (09). Nothing is matched by a JS name, which the dump does not have, so
-obfuscated names change nothing.
+The test records what each leaks (each `Uint16Array` and its storage, each
+copied message and its bytes) and what holds it (`detached`; the worker's
+wrapper and its C++ object), as integers. A walk finds a leak when, in its dumps:
+- every leaked object (and its storage, where it has a node of its own) is a
+  node, each holder is on a path from `<root>` to every one of them, and the
+  retained size of each grew by at least half of what leaked;
+- grouped by retained path (the classes on a node's path of dominators from
+  `<root>`), the last holder's entry is charged with at least half of what
+  leaked between the dumps and with nothing the other demo leaked, and grew
+  more than any entry that neither holds it nor is held by it grew by noise:
+  the growth no demo's leak owns. A leak owns what a node retains when that
+  node, or one that dominates it, dominates that leak's objects and no other's.
+  The allocator's blocks, what no path reaches, and a block's
+  `MarkedBlock::Handle` with what it alone holds (the `WeakBlock`s of its weak
+  set) are in no entry: they grow with whatever the heap holds. Without that,
+  the `WeakBlock`s holding detached-subtree's `Weak`s outgrow simple-09's worker.
 
-The same checks run on JSC's own GCDebugging heap snapshots of the same heap,
-taken with each dump, which the collector's visitor builds and Web Inspector
-reads. mya's dumps find all nine leaks. JSC's find 01 to 04 and 06, whose leaks
-only JS objects hold, and miss 05, 07, 08 and 09: a C++ holder (the
-`MessageEvent`, the element and its document, the worker) or a C++ leak (a
-frame's document, a copied message) is in no node. Each rule of the dump is
-needed: without the handle rule all but 04 fail; with `Weak`s retaining, all but
-04 and 08; with raw pointers retaining, or raw pointers before `Weak`s, 08; and
-without the `Deque` reader, 09, all but its first message missed. With 16 ticks
-between the dumps rather than 64, simple-09 leaks 17 KB, and in a full run an
-18 KB allocation the walk misses, new between the dumps, outgrew it. In a full
-run, one dump in three also has a new 8 MB allocation that the walk misses,
-held by other memory, which no path reaches. The timers run long enough for a
-compiler to watch a function, which makes its `InferredValue` fat: the
-`InferredValue` reader matched the class nested in it, until it matched only
-the template's instances.
+mya's dumps find both: `detached`'s entry is charged with all 3.4 MB that
+leaked, and only what holds it (its timer, the timer's function and scope)
+grew more, and the worker's entry is charged with all
+of its 67 KB. JSC's own snapshots find neither. In detached-subtree, each
+child's wrapper is a root of its own: JSC's snapshot has no edge from a removed
+element to its C++ children, nor from a child to its wrapper, so no path from
+`detached` reaches what leaked. In simple-09, the copied messages are in no node.
+
+It needed two rules of the dump. A traced slot in C++ memory is weak: the
+timer's DFG code refers to `detached`, and read as strong that made `<root>`
+its dominator; the test asserts that each demo's timer function dominates its
+holders, which fails without the rule. And the collector's opaque roots
+(`Collector::m_opaqueRoots`, the only `ConcurrentPtrHashSet`) keep nothing
+alive. Until the next collection the set still points at each removed tree's
+root, and read as strong it made `<root>` the dominator of every removed `div`,
+so `detached` was charged with nothing. Every edge of mya's dumps names what
+held it (`HeapDump::Edge::label`: the member, the class or the root), and
+`fromJSON` reads JSC's edge names. With `JSC_TOOLS_LEAK_REPORT` set, the test
+writes the demos, the four dumps and its verdicts.
+`corpse/tests/leak-report/generate` makes of them a page that computes every
+verdict again in JS, and checks that each is the C++ test's.
 
 **Measured: SP3 in MiniBrowser.** One iteration of a subtest
 (`index.html?suites=<subtest>&startAutomatically&iterationCount=1`, served
