@@ -42,9 +42,12 @@
 #include "LibJSCToolsTestUtilities.h"
 #include "TypeinfoTest.h"
 
+#include <algorithm>
 #include <bmalloc/bmalloc.h>
+#include <memory>
 #include <stdlib.h>
 #include <string.h>
+#include <string>
 #include <string_view>
 #include <wtf/StdLibExtras.h>
 #include <wtf/text/StringToIntegerConversion.h>
@@ -78,6 +81,31 @@ bool parseUint64(std::string_view text, uint64_t& out)
         return false;
     out = *parsed;
     return true;
+}
+
+// Targets run in other working directories, where a relative entry names other libraries.
+void makeLibraryPathAbsolute()
+{
+#if OS(DARWIN)
+    static constexpr const char* variable = "DYLD_FRAMEWORK_PATH";
+#else
+    static constexpr const char* variable = "LD_LIBRARY_PATH";
+#endif
+    const char* value = getenv(variable);
+    if (!value)
+        return;
+    std::string_view entries { value };
+    std::string absolute;
+    for (size_t start = 0; start <= entries.size();) {
+        size_t end = std::min(entries.find(':', start), entries.size());
+        std::string entry { entries.substr(start, end - start) };
+        std::unique_ptr<char, decltype(&free)> resolved { entry.empty() ? nullptr : realpath(entry.c_str(), nullptr), &free };
+        if (start)
+            absolute += ':';
+        absolute += resolved ? std::string { resolved.get() } : entry;
+        start = end + 1;
+    }
+    RELEASE_ASSERT(!setenv(variable, absolute.c_str(), 1));
 }
 
 } // anonymous namespace
@@ -126,6 +154,7 @@ int main(int argc, char** argv)
     }
 
     bmalloc::api::disableScavenger();
+    makeLibraryPathAbsolute();
 
     dataLogLn("Starting libJavaScriptCoreTools tests");
 

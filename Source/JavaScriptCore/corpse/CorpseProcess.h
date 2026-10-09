@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2026 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -30,6 +31,10 @@
 #if ENABLE(LIB_JSC_TOOLS)
 
 #include <sys/types.h>
+#if !OS(DARWIN)
+#include <optional>
+#include <string>
+#endif
 #include <wtf/Assertions.h>
 #include <wtf/Ref.h>
 #include <wtf/RefCounted.h>
@@ -75,6 +80,11 @@ private:
     pid_t m_pid;
     TaskHandle m_taskPort { invalidTaskHandle };
 };
+
+#if !OS(DARWIN)
+// The contents of /proc/<pid>/<path>, or nullopt if it cannot be read.
+std::optional<std::string> readProcFile(pid_t, const char* path);
+#endif
 
 } // namespace Corpse
 } // namespace JSC

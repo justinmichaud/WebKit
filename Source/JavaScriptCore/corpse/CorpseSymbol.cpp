@@ -82,7 +82,6 @@ namespace {
 // system reaches about 2,800 images.
 constexpr size_t maxLoadCommandsSize = 128 * KB; // About 17× the measured maximum.
 constexpr size_t maxExportsTrieSize = 16 * MB; // About 8× the measured maximum.
-constexpr uint32_t maxImageCount = 16 * 1024; // About 6× the measured maximum.
 
 // A lookup that finds nothing will read every image's load commands and exports
 // trie, which measured 101 MB for the ~2,800 image process above and 0.4 MB for
@@ -277,52 +276,20 @@ Address Symbol::lookUpName(Snapshot& snapshot)
     auto doLookUp = [&] () -> Address {
         std::string name = "_" + m_name; // Use Mach-O symbol name for look up.
 
-        mach_port_t task = snapshot.corpsePort();
         Memory& memory = snapshot.memory();
 
         // dyld publishes the list of loaded images; search each one in turn.
-        task_dyld_info_data_t dyldInfo;
-        mach_msg_type_number_t count = TASK_DYLD_INFO_COUNT;
-        if (task_info(task, TASK_DYLD_INFO, reinterpret_cast<task_info_t>(&dyldInfo), &count) != KERN_SUCCESS)
-            return { };
-        CORPSE_DIAGNOSTIC_DO(m_diagnostics.readDyldInfo = true);
-
-        Address allImageInfosAddress { dyldInfo.all_image_info_addr };
-        CORPSE_DIAGNOSTIC_DO(m_diagnostics.allImageInfosAddress = allImageInfosAddress);
-        if (!allImageInfosAddress)
-            return { };
-
-        auto allImages = memory.ptr<dyld_all_image_infos>(allImageInfosAddress);
+        auto allImages = dyldAllImageInfos(snapshot);
         if (!allImages)
             return { };
-        CORPSE_DIAGNOSTIC_DO(m_diagnostics.readAllImageInfos = true);
-        CORPSE_DIAGNOSTIC_DO(m_diagnostics.version = allImages->version);
+        auto images = dyldImageInfos(snapshot, allImages);
+        if (!images)
+            return { };
+        CORPSE_DIAGNOSTIC_DO(m_diagnostics.images = images.size());
+        if (!hasReadBudget(images.size() * sizeof(dyld_image_info)))
+            return { };
 
-        Address rawArrayAddress { allImages->infoArray };
-        Address arrayAddress = rawArrayAddress.stripped();
-        uint32_t imageCount = allImages->infoArrayCount;
-        CORPSE_DIAGNOSTIC_DO(m_diagnostics.rawImageArrayAddress = rawArrayAddress);
-        CORPSE_DIAGNOSTIC_DO(m_diagnostics.imageArrayAddress = arrayAddress);
-        CORPSE_DIAGNOSTIC_DO(m_diagnostics.images = imageCount);
-        if (!arrayAddress || !imageCount)
-            return { };
-        // Each image below costs a Mach round-trip and two buffer reads, so an
-        // implausible count is a lot of work to be talked into doing.
-        if (imageCount > maxImageCount) {
-            CORPSE_DIAGNOSTIC_DO(m_diagnostics.implausibleImageCount = true);
-            return { };
-        }
-
-        size_t imageArrayBytes = static_cast<size_t>(imageCount) * sizeof(dyld_image_info);
-        if (!hasReadBudget(imageArrayBytes))
-            return { };
-        auto images = memory.span<dyld_image_info>(arrayAddress, imageCount);
-        if (!images) {
-            CORPSE_DIAGNOSTIC_DO(m_diagnostics.unreadableInfo = imageCount);
-            return { };
-        }
-
-        for (uint32_t i = 0; i < imageCount; ++i) {
+        for (uint32_t i = 0; i < images.size(); ++i) {
             auto imageAddress = Address(images[i].imageLoadAddress).stripped();
             auto symbolAddress = resolveInImage(memory, imageAddress, name);
             if (symbolAddress)
@@ -351,43 +318,8 @@ void Symbol::reportFailure(const Snapshot& snapshot) const
     Error::report("No symbol '_%s' in pid %d", m_name.c_str(),
         static_cast<int>(snapshot.process()->pid()));
 
-    if (!d.readDyldInfo) {
-        Error::report("  could not read dyld information (task_info TASK_DYLD_INFO failed)");
-        return;
-    }
-    if (!d.allImageInfosAddress) {
-        Error::report("  dyld reports no image list (all_image_info_addr is 0)");
-        return;
-    }
-    if (!d.readAllImageInfos) {
-        Error::report("  could not read dyld_all_image_infos at 0x%llx",
-            d.allImageInfosAddress.toMachVMAddress());
-        return;
-    }
-
-    // A sane version says the struct read probably landed on real data, which is what
-    // makes the image count and array address below worth printing.
-    Error::report("  dyld_all_image_infos v%u at 0x%llx lists %u images at 0x%llx",
-        d.version, d.allImageInfosAddress.toMachVMAddress(),
-        d.images, d.imageArrayAddress.toMachVMAddress());
-    if (d.rawImageArrayAddress != d.imageArrayAddress) {
-        Error::report("  that address was ptrauth-signed as 0x%llx; the signature was stripped",
-            d.rawImageArrayAddress.toMachVMAddress());
-    }
-    if (!d.imageArrayAddress || !d.images) {
-        Error::report("  that list is empty, so there was nothing to search");
-        return;
-    }
-    if (d.implausibleImageCount) {
-        Error::report("  that count is too large to be a real image list, so the struct read"
-            " was not dyld_all_image_infos and was not searched");
-        return;
-    }
-
     Error::report("  read %u of %u image headers (%u in the shared cache), walked %u exports tries",
         d.examined, d.images, d.inSharedCache, d.searched);
-    if (d.unreadableInfo)
-        Error::report("  %u image list entries were unreadable", d.unreadableInfo);
     if (d.unreadableHeader)
         Error::report("  %u image headers were unreadable or not 64-bit Mach-O", d.unreadableHeader);
     if (d.implausibleCommandsSize)

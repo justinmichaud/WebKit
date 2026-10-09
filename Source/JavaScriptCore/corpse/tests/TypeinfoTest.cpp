@@ -97,25 +97,9 @@ DerivesNarrowBounds::~DerivesNarrowBounds() = default;
 namespace {
 
 using JSC::Corpse::Address;
-using JSC::Corpse::Memory;
 using JSC::Corpse::Snapshot;
 
 constexpr const char* targetString = "typeinfo-target";
-
-UTF8CString readCString(Memory& memory, Address address)
-{
-    constexpr size_t maxLength = 256;
-    Vector<char> characters;
-    for (size_t offset = 0; offset < maxLength; ++offset) {
-        auto character = memory.ptr<char>(address + offset);
-        if (!character)
-            return { };
-        if (!*character)
-            return UTF8CString::fromUTF8(characters.span());
-        characters.append(*character);
-    }
-    return { };
-}
 
 struct ScopedDebugger {
     ScopedDebugger()
@@ -451,8 +435,8 @@ void analyze(Snapshot& snapshot, Address object)
     TEST_ASSERT(pointer, "the target object's m_string is readable at the offset the debug info gives");
     if (!pointer)
         return;
-    CString value = readCString(snapshot.memory(), Address { *pointer }.stripped());
-    TEST_ASSERT(!value.isNull() && std::string_view { value.legacyCStringPointer() } == targetString,
+    auto value = snapshot.memory().cString(Address { *pointer }.stripped(), 256);
+    TEST_ASSERT(value && std::string_view { value->legacyCStringPointer() } == targetString,
         "the corpse holds the target's string at the offset the debug info gives");
 }
 
