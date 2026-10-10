@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="334" height="570" viewBox="0 0 334 570" font-family="ui-sans-serif,-apple-system,Segoe UI,Roboto,sans-serif">
+<rect width="334" height="570" fill="#ffffff"/>
+<text x="24" y="30" font-size="20" font-weight="700" fill="#0f172a">Test heap</text>
+<text x="24" y="52" font-size="13" fill="#475569">6 cells · total 5.1 KB · 2 cells in cycles (shown as 0 retained)</text>
+<path d="M155.0,132.0 C155.0,155.0 155.0,155.0 155.0,178.0" fill="none" stroke="#cbd5e1" stroke-width="1.5"/>
+<path d="M155.0,230.0 C155.0,253.0 155.0,253.0 155.0,276.0" fill="none" stroke="#cbd5e1" stroke-width="1.5"/>
+<path d="M155.0,328.0 C155.0,351.0 155.0,351.0 155.0,374.0" fill="none" stroke="#cbd5e1" stroke-width="1.5"/>
+<path d="M155.0,426.0 C155.0,449.0 155.0,449.0 155.0,472.0" fill="none" stroke="#cbd5e1" stroke-width="1.5"/>
+<rect x="40.0" y="80.0" width="230" height="52" rx="7" fill="#f8fafc" stroke="#334155" stroke-width="2"/>
+<text x="50.0" y="101.0" font-size="13" font-weight="600" fill="#334155">&lt;root&gt;</text>
+<text x="50.0" y="118.0" font-size="12" fill="#475569">retained 5.1 KB</text>
+<text x="260.0" y="118.0" font-size="10.5" fill="#94a3b8" text-anchor="end">self 0 B</text>
+<rect x="40.0" y="178.0" width="230" height="52" rx="7" fill="#eff6ff" stroke="#1d4ed8" stroke-width="2"/>
+<text x="50.0" y="199.0" font-size="13" font-weight="600" fill="#1d4ed8">VM</text>
+<text x="50.0" y="216.0" font-size="12" fill="#475569">retained 5.1 KB</text>
+<text x="260.0" y="216.0" font-size="10.5" fill="#94a3b8" text-anchor="end">self 100 B</text>
+<rect x="40.0" y="276.0" width="230" height="52" rx="7" fill="#eff6ff" stroke="#1d4ed8" stroke-width="2"/>
+<text x="50.0" y="297.0" font-size="13" font-weight="600" fill="#1d4ed8">JSGlobalObject</text>
+<text x="50.0" y="314.0" font-size="12" fill="#475569">retained 5.0 KB</text>
+<text x="260.0" y="314.0" font-size="10.5" fill="#94a3b8" text-anchor="end">self 50 B</text>
+<rect x="40.0" y="374.0" width="230" height="52" rx="7" fill="#fff1f3" stroke="#be123c" stroke-width="2"/>
+<text x="50.0" y="395.0" font-size="13" font-weight="600" fill="#be123c">MessageQueue</text>
+<text x="50.0" y="412.0" font-size="12" fill="#475569">retained 4.9 KB</text>
+<text x="260.0" y="412.0" font-size="10.5" fill="#94a3b8" text-anchor="end">self 32 B</text>
+<rect x="40.0" y="472.0" width="230" height="52" rx="7" fill="#fff1f3" stroke="#be123c" stroke-width="2"/>
+<text x="50.0" y="493.0" font-size="13" font-weight="600" fill="#be123c">SerializedArrayBuffer</text>
+<text x="50.0" y="510.0" font-size="12" fill="#475569">retained 4.9 KB</text>
+<text x="260.0" y="510.0" font-size="10.5" fill="#94a3b8" text-anchor="end">self 4.9 KB</text>
+</svg>

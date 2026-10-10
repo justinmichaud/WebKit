@@ -1112,7 +1112,9 @@ void writeReport(const Walk& mya, const Walk& jsc, const Vector<std::array<Strin
     TEST_ASSERT(file, makeString("the report is written to "_s, String::fromUTF8(path)));
     if (!file)
         return;
+    IGNORE_CLANG_WARNINGS_BEGIN("unsafe-buffer-usage-in-libc-call")
     fwrite(json.data(), 1, json.length(), file);
+    IGNORE_CLANG_WARNINGS_END
     fclose(file);
     dataLogLn("    wrote the report's data, ", json.length(), " bytes, to ", path);
 }

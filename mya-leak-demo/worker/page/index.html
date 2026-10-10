@@ -1,0 +1,23 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>mya leak sample</title></head>
+<body>
+<h1>mya leak sample</h1>
+<pre id="log">starting...</pre>
+<script>
+// The sample from the task: post an ArrayBuffer to a worker every 100ms.
+// The ArrayBuffer is structured-cloned (not transferred), so each message's
+// bytes are serialized into a C++ SerializedScriptValue that sits in the
+// message channel's C++ queue until the worker drains it. A worker that drains
+// slowly lets that C++ queue grow -- memory a per-VM JS heap dump cannot see.
+const worker = new Worker("worker.js");
+let count = 0;
+setInterval(() => {
+  const largeArray = new ArrayBuffer(1000);
+  worker.postMessage({ id: count++, data: largeArray });
+  if (count % 10 === 0)
+    document.getElementById("log").textContent = "posted " + count + " messages";
+}, 100);
+</script>
+</body>
+</html>

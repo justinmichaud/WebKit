@@ -1,0 +1,96 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1100" height="786" viewBox="0 0 1100 786" font-family="ui-sans-serif,-apple-system,Segoe UI,Roboto,sans-serif">
+<rect width="2138" height="786" fill="#ffffff"/>
+<text x="24" y="42" font-size="23" font-weight="800" fill="#0f172a">Where is the leak?  Detached DOM subtree + event-listener leak, same process, two dumps</text>
+<text x="24" y="70" font-size="14" fill="#475569">Sample: every 100 ms a div of 20 spans (each a click listener closing over Uint16Array(1000)) is added to the page, removed, and kept in a `detached` array.</text>
+<text x="24" y="92" font-size="14" fill="#475569">Each node shows its exact dominator-tree retained size and type; tree is topological top-to-bottom; cycle members marked (↺) with their true retained size.</text>
+<rect x="24" y="112" width="16" height="16" rx="3" fill="#fff1f3" stroke="#be123c" stroke-width="2"/>
+<text x="46" y="125" font-size="12.5" fill="#334155">worker / message queue / leak family</text>
+<rect x="337.6" y="112" width="16" height="16" rx="3" fill="#fff7ed" stroke="#b45309" stroke-width="2"/>
+<text x="359.6" y="125" font-size="12.5" fill="#334155">cycle member</text>
+<rect x="480.8" y="112" width="16" height="16" rx="3" fill="#f8fafc" stroke="#334155" stroke-width="2"/>
+<text x="502.8" y="125" font-size="12.5" fill="#334155">other JS / C++</text>
+<rect x="638.2" y="112" width="16" height="16" rx="3" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="2"/>
+<text x="660.2" y="125" font-size="12.5" fill="#334155">rest of heap (collapsed)</text>
+<rect x="24" y="156" width="890" height="600" rx="12" fill="#ffffff" stroke="#1d4ed8" stroke-width="1.5"/>
+<text x="48" y="186" font-size="18" font-weight="700" fill="#1d4ed8">Normal JSC heap dump</text>
+<text x="48" y="206" font-size="12.5" fill="#64748b">main-VM GC snapshot · Web Inspector format</text>
+<rect x="970" y="156" width="1144" height="600" rx="12" fill="#ffffff" stroke="#be123c" stroke-width="1.5"/>
+<text x="994" y="186" font-size="18" font-weight="700" fill="#be123c">mya heap walk</text>
+<text x="994" y="206" font-size="12.5" fill="#64748b">whole WebContent process, incl. C++ off the heap</text>
+<path d="M417.0,280.0 C417.0,303.0 163.0,303.0 163.0,326.0" fill="none" stroke="#cbd5e1" stroke-width="1.5"/>
+<path d="M163.0,378.0 C163.0,401.0 163.0,401.0 163.0,424.0" fill="none" stroke="#e2e8f0" stroke-width="1.5" stroke-dasharray="4 3"/>
+<path d="M417.0,280.0 C417.0,303.0 417.0,303.0 417.0,326.0" fill="none" stroke="#cbd5e1" stroke-width="1.5"/>
+<path d="M417.0,378.0 C417.0,401.0 417.0,401.0 417.0,424.0" fill="none" stroke="#cbd5e1" stroke-width="1.5"/>
+<path d="M417.0,476.0 C417.0,499.0 417.0,499.0 417.0,522.0" fill="none" stroke="#cbd5e1" stroke-width="1.5"/>
+<path d="M417.0,280.0 C417.0,303.0 671.0,303.0 671.0,326.0" fill="none" stroke="#e2e8f0" stroke-width="1.5" stroke-dasharray="4 3"/>
+<rect x="302.0" y="228.0" width="230" height="52" rx="7" fill="#f8fafc" stroke="#334155" stroke-width="2"/>
+<text x="312.0" y="249.0" font-size="13" font-weight="600" fill="#334155">&lt;root&gt;</text>
+<text x="312.0" y="266.0" font-size="12" fill="#475569">retained 4.5 MB</text>
+<text x="522.0" y="266.0" font-size="10.5" fill="#94a3b8" text-anchor="end">self 0 B</text>
+<rect x="48.0" y="326.0" width="230" height="52" rx="7" fill="#fff7ed" stroke="#b45309" stroke-width="3.5"/>
+<text x="58.0" y="347.0" font-size="13" font-weight="600" fill="#b45309">Array</text>
+<text x="58.0" y="364.0" font-size="12" fill="#475569">↺ cycle · retained 4.9 KB</text>
+<text x="268.0" y="364.0" font-size="10.5" fill="#94a3b8" text-anchor="end">self 16 B</text>
+<text x="163.0" y="320.0" font-size="11" font-style="italic" fill="#64748b" text-anchor="middle">105 div wrappers — dead end</text>
+<rect x="48.0" y="424.0" width="230" height="52" rx="7" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5" stroke-dasharray="4 3"/>
+<text x="58.0" y="445.0" font-size="12.5" font-weight="600" fill="#64748b">+105 div wrappers (dead end)</text>
+<text x="58.0" y="462.0" font-size="12" fill="#64748b">retained 4.9 KB</text>
+<rect x="302.0" y="326.0" width="230" height="52" rx="7" fill="#f8fafc" stroke="#334155" stroke-width="3.5"/>
+<text x="312.0" y="347.0" font-size="13" font-weight="600" fill="#334155">Function</text>
+<text x="312.0" y="364.0" font-size="12" fill="#475569">retained 2.1 KB</text>
+<text x="522.0" y="364.0" font-size="10.5" fill="#94a3b8" text-anchor="end">self 32 B</text>
+<text x="417.0" y="320.0" font-size="11" font-style="italic" fill="#64748b" text-anchor="middle">1 of 2122 scattered listener roots</text>
+<rect x="302.0" y="424.0" width="230" height="52" rx="7" fill="#f8fafc" stroke="#334155" stroke-width="3.5"/>
+<text x="312.0" y="445.0" font-size="13" font-weight="600" fill="#334155">JSLexicalEnvironment</text>
+<text x="312.0" y="462.0" font-size="12" fill="#475569">retained 2.0 KB</text>
+<text x="522.0" y="462.0" font-size="10.5" fill="#94a3b8" text-anchor="end">self 48 B</text>
+<rect x="302.0" y="522.0" width="230" height="52" rx="7" fill="#f8fafc" stroke="#334155" stroke-width="3.5"/>
+<text x="312.0" y="543.0" font-size="13" font-weight="600" fill="#334155">Uint16Array</text>
+<text x="312.0" y="560.0" font-size="12" fill="#475569">retained 2.0 KB</text>
+<text x="522.0" y="560.0" font-size="10.5" fill="#94a3b8" text-anchor="end">self 2.0 KB</text>
+<rect x="556.0" y="326.0" width="230" height="52" rx="7" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5" stroke-dasharray="4 3"/>
+<text x="566.0" y="347.0" font-size="12.5" font-weight="600" fill="#64748b">rest of heap: +4721 subtrees</text>
+<text x="566.0" y="364.0" font-size="12" fill="#64748b">retained 4.5 MB</text>
+<path d="M1490.0,280.0 C1490.0,303.0 1109.0,303.0 1109.0,326.0" fill="none" stroke="#cbd5e1" stroke-width="1.5"/>
+<path d="M1109.0,378.0 C1109.0,401.0 1109.0,401.0 1109.0,424.0" fill="none" stroke="#e2e8f0" stroke-width="1.5" stroke-dasharray="4 3"/>
+<path d="M1490.0,280.0 C1490.0,303.0 1490.0,303.0 1490.0,326.0" fill="none" stroke="#cbd5e1" stroke-width="1.5"/>
+<path d="M1490.0,378.0 C1490.0,401.0 1363.0,401.0 1363.0,424.0" fill="none" stroke="#cbd5e1" stroke-width="1.5"/>
+<path d="M1363.0,476.0 C1363.0,499.0 1363.0,499.0 1363.0,522.0" fill="none" stroke="#e2e8f0" stroke-width="1.5" stroke-dasharray="4 3"/>
+<path d="M1490.0,378.0 C1490.0,401.0 1617.0,401.0 1617.0,424.0" fill="none" stroke="#e2e8f0" stroke-width="1.5" stroke-dasharray="4 3"/>
+<path d="M1490.0,280.0 C1490.0,303.0 1871.0,303.0 1871.0,326.0" fill="none" stroke="#e2e8f0" stroke-width="1.5" stroke-dasharray="4 3"/>
+<rect x="1375.0" y="228.0" width="230" height="52" rx="7" fill="#f8fafc" stroke="#334155" stroke-width="2"/>
+<text x="1385.0" y="249.0" font-size="13" font-weight="600" fill="#334155">&lt;root&gt;</text>
+<text x="1385.0" y="266.0" font-size="12" fill="#475569">retained 10.9 MB</text>
+<text x="1595.0" y="266.0" font-size="10.5" fill="#94a3b8" text-anchor="end">self 0 B</text>
+<rect x="994.0" y="326.0" width="230" height="52" rx="7" fill="#fff7ed" stroke="#b45309" stroke-width="3.5"/>
+<text x="1004.0" y="347.0" font-size="13" font-weight="600" fill="#b45309">JSArray</text>
+<text x="1004.0" y="364.0" font-size="12" fill="#475569">↺ cycle · retained 922.2 KB</text>
+<text x="1214.0" y="364.0" font-size="10.5" fill="#94a3b8" text-anchor="end">self 16 B</text>
+<text x="1109.0" y="320.0" font-size="11" font-style="italic" fill="#64748b" text-anchor="middle">119 div wrappers</text>
+<rect x="994.0" y="424.0" width="230" height="52" rx="7" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5" stroke-dasharray="4 3"/>
+<text x="1004.0" y="445.0" font-size="12.5" font-weight="600" fill="#64748b">+119 div wrappers (dead end)</text>
+<text x="1004.0" y="462.0" font-size="12" fill="#64748b">retained 922.1 KB</text>
+<rect x="1375.0" y="326.0" width="230" height="52" rx="7" fill="#fff7ed" stroke="#b45309" stroke-width="3.5"/>
+<text x="1385.0" y="347.0" font-size="13" font-weight="600" fill="#b45309">HTMLDivElement</text>
+<text x="1385.0" y="364.0" font-size="12" fill="#475569">↺ cycle · retained 65.5 KB</text>
+<text x="1595.0" y="364.0" font-size="10.5" fill="#94a3b8" text-anchor="end">self 160 B</text>
+<text x="1490.0" y="320.0" font-size="11" font-style="italic" fill="#64748b" text-anchor="middle">1 of 105 detached subtrees (6.6 MB total)</text>
+<rect x="1248.0" y="424.0" width="230" height="52" rx="7" fill="#fff7ed" stroke="#b45309" stroke-width="3.5"/>
+<text x="1258.0" y="445.0" font-size="13" font-weight="600" fill="#b45309">HTMLSpanElement</text>
+<text x="1258.0" y="462.0" font-size="12" fill="#475569">↺ cycle · retained 3.3 KB</text>
+<text x="1468.0" y="462.0" font-size="10.5" fill="#94a3b8" text-anchor="end">self 160 B</text>
+<text x="1363.0" y="418.0" font-size="11" font-style="italic" fill="#64748b" text-anchor="middle">1 of 20 spans</text>
+<rect x="1248.0" y="522.0" width="230" height="52" rx="7" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5" stroke-dasharray="4 3"/>
+<text x="1258.0" y="543.0" font-size="12.5" font-weight="600" fill="#64748b">+2 (listener + Uint16Array)</text>
+<text x="1258.0" y="560.0" font-size="12" fill="#64748b">retained 3.1 KB</text>
+<rect x="1502.0" y="424.0" width="230" height="52" rx="7" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5" stroke-dasharray="4 3"/>
+<text x="1512.0" y="445.0" font-size="12.5" font-weight="600" fill="#64748b">+19 more spans</text>
+<text x="1512.0" y="462.0" font-size="12" fill="#64748b">retained 62.0 KB</text>
+<rect x="1756.0" y="326.0" width="230" height="52" rx="7" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5" stroke-dasharray="4 3"/>
+<text x="1766.0" y="347.0" font-size="12.5" font-weight="600" fill="#64748b">rest of heap: +8529 subtrees</text>
+<text x="1766.0" y="364.0" font-size="12" fill="#64748b">retained 10.0 MB</text>
+<rect x="40" y="712" width="858" height="34" rx="8" fill="#eff6ff"/>
+<text x="48" y="734" font-size="13" font-weight="600" fill="#1e3a8a">Leak NOT attributable: 4.3 MB is split across 2122 listener roots; detached retains 4.9 KB, its div wrappers have no edge to the spans.</text>
+<rect x="986" y="712" width="1112" height="34" rx="8" fill="#fff1f3"/>
+<text x="994" y="734" font-size="13" font-weight="600" fill="#9f1239">Leak found: the detached DOM subtrees are reconstructed — div → 20 spans → listener → Uint16Array, 6.6 MB in all.</text>
+</svg>

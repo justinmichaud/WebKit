@@ -1,0 +1,32 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>detached-subtree leak</title></head>
+<body>
+<h1>detached event-listener leak</h1>
+<pre id="log">starting...</pre>
+<script>
+// design.md "detached-subtree": each tick builds a div with 20 spans, each span
+// has a click listener that closes over a Uint16Array(1000) (2000 bytes). The
+// div is appended to the document then removed, but kept alive in `detached`.
+// The spans, their listeners and the captured typed arrays stay alive through
+// the detached DOM subtree -- a C++ parent/child graph a per-VM JS snapshot has
+// no edges for, so the snapshot cannot trace the leak back to `detached`.
+const detached = [];
+let ticks = 0;
+setInterval(() => {
+  const div = document.createElement("div");
+  for (let i = 0; i < 20; i++) {
+    const span = document.createElement("span");
+    const data = new Uint16Array(1000);
+    span.addEventListener("click", () => { data[0] = data[0] + 1; });
+    div.appendChild(span);
+  }
+  document.body.appendChild(div);
+  document.body.removeChild(div);
+  detached.push(div);
+  if (++ticks % 5 === 0)
+    document.getElementById("log").textContent = "leaked " + ticks + " detached subtrees";
+}, 100);
+</script>
+</body>
+</html>

@@ -1,0 +1,27 @@
+{
+  "version": 3,
+  "type": "GCDebugging",
+  "nodes": [
+    0,0,0,0,0,"0x0","0x0",
+    1,100,1,0,0,"0x1","0x0",
+    2,50,2,0,0,"0x2","0x0",
+    3,32,3,0,0,"0x3","0x0",
+    4,5000,4,0,0,"0x4","0x0",
+    5,10,5,0,0,"0x5","0x0",
+    6,10,6,0,0,"0x6","0x0"
+  ],
+  "nodeClassNames": ["<root>","VM","JSGlobalObject","MessageQueue","SerializedArrayBuffer","CycleA","CycleB"],
+  "edges": [
+    0,1,0,0,
+    1,2,1,0,
+    2,3,1,0,
+    3,4,2,0,
+    2,5,1,0,
+    5,6,1,0,
+    6,5,1,0
+  ],
+  "edgeTypes": ["Internal","Property","Index","Variable"],
+  "edgeNames": ["globalObject","queue","buffer"],
+  "roots": [1,0,0],
+  "labels": [""]
+}

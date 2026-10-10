@@ -1,0 +1,182 @@
+mya: The class of the destructor at 0x7005d15ab0 is incomplete in its debug info
+mya:   while measuring the reach of the walk of the heap at 0x13f434000: vtable slots that are not a destructor 618, closures of unnamed types whose call operator was not found 3
+mya:   while running the command 'heapdump /private/tmp/claude-501/-Users-justinmichaud-Development-WebKit/63df3949-e0d2-48fe-a790-fe767a45c3ee/scratchpad/mya.json'
+mya: The class of the destructor at 0x7005d7d9d8 is incomplete in its debug info
+mya:   while measuring the reach of the walk of the heap at 0x13f434000: vtable slots that are not a destructor 619, closures of unnamed types whose call operator was not found 3
+mya:   while running the command 'heapdump /private/tmp/claude-501/-Users-justinmichaud-Development-WebKit/63df3949-e0d2-48fe-a790-fe767a45c3ee/scratchpad/mya.json'
+mya: The class of the destructor at 0x7005d15ab0 is incomplete in its debug info
+mya:   while measuring the reach of the walk of the heap at 0x13f434000: vtable slots that are not a destructor 618, closures of unnamed types whose call operator was not found 3
+mya:   while running the command 'heap'
+mya: The class of the destructor at 0x7005d7d9d8 is incomplete in its debug info
+mya:   while measuring the reach of the walk of the heap at 0x13f434000: vtable slots that are not a destructor 619, closures of unnamed types whose call operator was not found 3
+mya:   while running the command 'heap'
+Attached to 82631
+Captured Snapshot #1 of 82631
+Wrote 32771 nodes and 60212 edges, 5827616 bytes in all, to /private/tmp/claude-501/-Users-justinmichaud-Development-WebKit/63df3949-e0d2-48fe-a790-fe767a45c3ee/scratchpad/mya.json
+  198832 bytes of live cells, 4622880 of other allocations the walk reached, 1005904 of allocations it missed; 121138 references read
+  of which 5500736 bytes are in libpas's dirty or compressed pages, and 326880 bytes in pages outside the footprint
+  those pages also hold 3673344 bytes of free payload, 607168 of metadata and 98304 libpas records nothing in; `memory` accounts for the rest of the footprint
+The heap of the VM at 0x13f434000, unverified: the target was not at mya's safe point
+  3429 live cells, 198832 bytes, in 29337 libpas allocations of 5827616 bytes
+  reached: 82.74% (4821712 bytes)
+  typed:   70.52% (3840951 bytes, with 381120 free in MarkedBlocks)
+  3350 JS cells read as their class, 8672 bytes beyond their class; 24472 global variables, 8873 untyped data symbols
+  time: 2 ms to open the debug info, 1 ms to walk the cells, 4 ms to enumerate libpas, 1689 ms to reach, type and explain; 1695 ms in all
+  not followed: 579 pointers to declarations
+  not followed: 23077 pointers to types without a size
+  not followed: 1683 polymorphic pointees without a dynamic type
+  not followed: 0 JS cells without a class
+  not followed: 78 encoded pointers to types not reached
+  not followed: 0 pointers to types that do not fit their allocation
+  missed: 85584 bytes held by a reached allocation
+  missed: 0 bytes held by static data
+  missed: 22608 bytes held by other memory
+  missed: 897584 bytes held by other misses
+  missed: 128 bytes held by nothing
+  miss: 8704 bytes at 0x13f064400, 8704 with what only it holds, held by other memory: 0x118051D00 in anonymous memory
+  miss: 8704 bytes at 0x13fce6600, 8704 with what only it holds, held by a reached allocation: offset 4184 of the 4608-byte allocation at 0x13FD80000, in no value the walk read; it read nothing at its start, reached by WebCore::ThreadGlobalData::m_currentState
+  miss: 8704 bytes at 0x13fcf9800, 8704 with what only it holds, held by a reached allocation: offset 152 of the 192-byte allocation at 0x1184803C0, in no value the walk read; it read nothing at its start, reached by WTF::BasicRawSentinelNode<JSC::PreciseAllocation, WTF::RawPtrTraits<JSC::PreciseAllocation> >::m_prev
+  miss: 2560 bytes at 0x13fda8200, 2560 with what only it holds, held by a reached allocation: offset 0 of the 160-byte allocation at 0x1180102C0, in no value the walk read; it read nothing at its start, reached by a thread's stack
+  miss: 32 bytes at 0x1182f4600, 2464 with what only it holds, held by a reached allocation: the field WTF::RefPtr<WebCore::SerializedScriptValue, WTF::RawPtrTraits<WebCore::SerializedScriptValue>, WTF::DefaultRefDerefTraits<WebCore::SerializedScriptValue> >::m_ptr, which the walk does not follow, at offset 24 of a 'WTF::Detail::CallableWrapper<(unnamed class), void, WebCore::ScriptExecutionContext &>' at 0x118338880
+  miss: 32 bytes at 0x118018400, 2464 with what only it holds, held by a reached allocation: the field WTF::RefPtr<WebCore::SerializedScriptValue, WTF::RawPtrTraits<WebCore::SerializedScriptValue>, WTF::DefaultRefDerefTraits<WebCore::SerializedScriptValue> >::m_ptr, which the walk does not follow, at offset 24 of a 'WTF::Detail::CallableWrapper<(unnamed class), void, WebCore::ScriptExecutionContext &>' at 0x11832C4C0
+  miss: 32 bytes at 0x1182f4740, 2464 with what only it holds, held by a reached allocation: the field WTF::RefPtr<WebCore::SerializedScriptValue, WTF::RawPtrTraits<WebCore::SerializedScriptValue>, WTF::DefaultRefDerefTraits<WebCore::SerializedScriptValue> >::m_ptr, which the walk does not follow, at offset 24 of a 'WTF::Detail::CallableWrapper<(unnamed class), void, WebCore::ScriptExecutionContext &>' at 0x118338A00
+  miss: 32 bytes at 0x1182f4700, 2464 with what only it holds, held by a reached allocation: the field WTF::RefPtr<WebCore::SerializedScriptValue, WTF::RawPtrTraits<WebCore::SerializedScriptValue>, WTF::DefaultRefDerefTraits<WebCore::SerializedScriptValue> >::m_ptr, which the walk does not follow, at offset 24 of a 'WTF::Detail::CallableWrapper<(unnamed class), void, WebCore::ScriptExecutionContext &>' at 0x1183388C0
+  miss: 32 bytes at 0x11801ba40, 2464 with what only it holds, held by a reached allocation: the field WTF::RefPtr<WebCore::SerializedScriptValue, WTF::RawPtrTraits<WebCore::SerializedScriptValue>, WTF::DefaultRefDerefTraits<WebCore::SerializedScriptValue> >::m_ptr, which the walk does not follow, at offset 24 of a 'WTF::Detail::CallableWrapper<(unnamed class), void, WebCore::ScriptExecutionContext &>' at 0x1183382C0
+  miss: 32 bytes at 0x11801b960, 2464 with what only it holds, held by a reached allocation: the field WTF::RefPtr<WebCore::SerializedScriptValue, WTF::RawPtrTraits<WebCore::SerializedScriptValue>, WTF::DefaultRefDerefTraits<WebCore::SerializedScriptValue> >::m_ptr, which the walk does not follow, at offset 24 of a 'WTF::Detail::CallableWrapper<(unnamed class), void, WebCore::ScriptExecutionContext &>' at 0x118338280
+  miss: 32 bytes at 0x11801ba80, 2464 with what only it holds, held by a reached allocation: the field WTF::RefPtr<WebCore::SerializedScriptValue, WTF::RawPtrTraits<WebCore::SerializedScriptValue>, WTF::DefaultRefDerefTraits<WebCore::SerializedScriptValue> >::m_ptr, which the walk does not follow, at offset 24 of a 'WTF::Detail::CallableWrapper<(unnamed class), void, WebCore::ScriptExecutionContext &>' at 0x118338240
+  miss: 32 bytes at 0x11801b920, 2464 with what only it holds, held by a reached allocation: the field WTF::RefPtr<WebCore::SerializedScriptValue, WTF::RawPtrTraits<WebCore::SerializedScriptValue>, WTF::DefaultRefDerefTraits<WebCore::SerializedScriptValue> >::m_ptr, which the walk does not follow, at offset 24 of a 'WTF::Detail::CallableWrapper<(unnamed class), void, WebCore::ScriptExecutionContext &>' at 0x1183381C0
+  miss: 32 bytes at 0x11801bac0, 2464 with what only it holds, held by a reached allocation: the field WTF::RefPtr<WebCore::SerializedScriptValue, WTF::RawPtrTraits<WebCore::SerializedScriptValue>, WTF::DefaultRefDerefTraits<WebCore::SerializedScriptValue> >::m_ptr, which the walk does not follow, at offset 24 of a 'WTF::Detail::CallableWrapper<(unnamed class), void, WebCore::ScriptExecutionContext &>' at 0x11832FC80
+  miss: 32 bytes at 0x11801bb00, 2464 with what only it holds, held by a reached allocation: the field WTF::RefPtr<WebCore::SerializedScriptValue, WTF::RawPtrTraits<WebCore::SerializedScriptValue>, WTF::DefaultRefDerefTraits<WebCore::SerializedScriptValue> >::m_ptr, which the walk does not follow, at offset 24 of a 'WTF::Detail::CallableWrapper<(unnamed class), void, WebCore::ScriptExecutionContext &>' at 0x1183385C0
+  miss: 32 bytes at 0x11801b8c0, 2464 with what only it holds, held by a reached allocation: the field WTF::RefPtr<WebCore::SerializedScriptValue, WTF::RawPtrTraits<WebCore::SerializedScriptValue>, WTF::DefaultRefDerefTraits<WebCore::SerializedScriptValue> >::m_ptr, which the walk does not follow, at offset 24 of a 'WTF::Detail::CallableWrapper<(unnamed class), void, WebCore::ScriptExecutionContext &>' at 0x11832FD00
+  miss: 32 bytes at 0x11801b8a0, 2464 with what only it holds, held by a reached allocation: the field WTF::RefPtr<WebCore::SerializedScriptValue, WTF::RawPtrTraits<WebCore::SerializedScriptValue>, WTF::DefaultRefDerefTraits<WebCore::SerializedScriptValue> >::m_ptr, which the walk does not follow, at offset 24 of a 'WTF::Detail::CallableWrapper<(unnamed class), void, WebCore::ScriptExecutionContext &>' at 0x11832FDC0
+  miss: 32 bytes at 0x11801bb40, 2464 with what only it holds, held by a reached allocation: the field WTF::RefPtr<WebCore::SerializedScriptValue, WTF::RawPtrTraits<WebCore::SerializedScriptValue>, WTF::DefaultRefDerefTraits<WebCore::SerializedScriptValue> >::m_ptr, which the walk does not follow, at offset 24 of a 'WTF::Detail::CallableWrapper<(unnamed class), void, WebCore::ScriptExecutionContext &>' at 0x1183383C0
+  miss: 32 bytes at 0x11801b860, 2464 with what only it holds, held by a reached allocation: the field WTF::RefPtr<WebCore::SerializedScriptValue, WTF::RawPtrTraits<WebCore::SerializedScriptValue>, WTF::DefaultRefDerefTraits<WebCore::SerializedScriptValue> >::m_ptr, which the walk does not follow, at offset 24 of a 'WTF::Detail::CallableWrapper<(unnamed class), void, WebCore::ScriptExecutionContext &>' at 0x11832FD80
+  miss: 32 bytes at 0x11801bb60, 2464 with what only it holds, held by a reached allocation: the field WTF::RefPtr<WebCore::SerializedScriptValue, WTF::RawPtrTraits<WebCore::SerializedScriptValue>, WTF::DefaultRefDerefTraits<WebCore::SerializedScriptValue> >::m_ptr, which the walk does not follow, at offset 24 of a 'WTF::Detail::CallableWrapper<(unnamed class), void, WebCore::ScriptExecutionContext &>' at 0x118338300
+  miss: 32 bytes at 0x11801bbc0, 2464 with what only it holds, held by a reached allocation: the field WTF::RefPtr<WebCore::SerializedScriptValue, WTF::RawPtrTraits<WebCore::SerializedScriptValue>, WTF::DefaultRefDerefTraits<WebCore::SerializedScriptValue> >::m_ptr, which the walk does not follow, at offset 24 of a 'WTF::Detail::CallableWrapper<(unnamed class), void, WebCore::ScriptExecutionContext &>' at 0x118338680
+  miss: 32 bytes at 0x11801b7e0, 2464 with what only it holds, held by a reached allocation: the field WTF::RefPtr<WebCore::SerializedScriptValue, WTF::RawPtrTraits<WebCore::SerializedScriptValue>, WTF::DefaultRefDerefTraits<WebCore::SerializedScriptValue> >::m_ptr, which the walk does not follow, at offset 24 of a 'WTF::Detail::CallableWrapper<(unnamed class), void, WebCore::ScriptExecutionContext &>' at 0x11832FBC0
+  miss: 32 bytes at 0x11801bc00, 2464 with what only it holds, held by a reached allocation: the field WTF::RefPtr<WebCore::SerializedScriptValue, WTF::RawPtrTraits<WebCore::SerializedScriptValue>, WTF::DefaultRefDerefTraits<WebCore::SerializedScriptValue> >::m_ptr, which the walk does not follow, at offset 24 of a 'WTF::Detail::CallableWrapper<(unnamed class), void, WebCore::ScriptExecutionContext &>' at 0x118338640
+  miss: 32 bytes at 0x11801b7a0, 2464 with what only it holds, held by a reached allocation: the field WTF::RefPtr<WebCore::SerializedScriptValue, WTF::RawPtrTraits<WebCore::SerializedScriptValue>, WTF::DefaultRefDerefTraits<WebCore::SerializedScriptValue> >::m_ptr, which the walk does not follow, at offset 24 of a 'WTF::Detail::CallableWrapper<(unnamed class), void, WebCore::ScriptExecutionContext &>' at 0x11832FD40
+  miss: 32 bytes at 0x11801b780, 2464 with what only it holds, held by a reached allocation: the field WTF::RefPtr<WebCore::SerializedScriptValue, WTF::RawPtrTraits<WebCore::SerializedScriptValue>, WTF::DefaultRefDerefTraits<WebCore::SerializedScriptValue> >::m_ptr, which the walk does not follow, at offset 24 of a 'WTF::Detail::CallableWrapper<(unnamed class), void, WebCore::ScriptExecutionContext &>' at 0x11832FCC0
+  miss: 32 bytes at 0x11801bc20, 2464 with what only it holds, held by a reached allocation: the field WTF::RefPtr<WebCore::SerializedScriptValue, WTF::RawPtrTraits<WebCore::SerializedScriptValue>, WTF::DefaultRefDerefTraits<WebCore::SerializedScriptValue> >::m_ptr, which the walk does not follow, at offset 24 of a 'WTF::Detail::CallableWrapper<(unnamed class), void, WebCore::ScriptExecutionContext &>' at 0x118338380
+  missed by holder: 897584 bytes in 1501 allocations, held by other misses: the missed #-byte allocation at 0x?; such as the missed 352-byte allocation at 0x1185780C0
+  missed by holder: 35664 bytes in 546 allocations, held by a reached allocation: offset # of a 'char' at 0x?, in no field of it; such as offset 1856 of a 'char' at 0x13FD24000, in no field of it
+  missed by holder: 22608 bytes in 37 allocations, held by other memory: 0x? in anonymous memory; such as 0x118051D00 in anonymous memory
+  missed by holder: 11968 bytes in 374 allocations, held by a reached allocation: the field WTF::RefPtr<WebCore::SerializedScriptValue, WTF::RawPtrTraits<WebCore::SerializedScriptValue>, WTF::DefaultRefDerefTraits<WebCore::SerializedScriptValue> >::m_ptr, which the walk does not follow, at offset # of a 'WTF::Detail::CallableWrapper<(unnamed class), void, WebCore::ScriptExecutionContext &>' at 0x?; such as the field WTF::RefPtr<WebCore::SerializedScriptValue, WTF::RawPtrTraits<WebCore::SerializedScriptValue>, WTF::DefaultRefDerefTraits<WebCore::SerializedScriptValue> >::m_ptr, which the walk does not follow, at offset 24 of a 'WTF::Detail::CallableWrapper<(unnamed class), void, WebCore::ScriptExecutionContext &>' at 0x118338880
+  missed by holder: 11936 bytes in 373 allocations, held by a reached allocation: the field WTF::RefPtr<WebCore::WorkerUserGestureForwarder, WTF::RawPtrTraits<WebCore::WorkerUserGestureForwarder>, WTF::DefaultRefDerefTraits<WebCore::WorkerUserGestureForwarder> >::m_ptr, which the walk does not follow, at offset # of a 'WTF::Detail::CallableWrapper<(unnamed class), void, WebCore::ScriptExecutionContext &>' at 0x?; such as the field WTF::RefPtr<WebCore::WorkerUserGestureForwarder, WTF::RawPtrTraits<WebCore::WorkerUserGestureForwarder>, WTF::DefaultRefDerefTraits<WebCore::WorkerUserGestureForwarder> >::m_ptr, which the walk does not follow, at offset 48 of a 'WTF::Detail::CallableWrapper<(unnamed class), void, WebCore::ScriptExecutionContext &>' at 0x11832F600
+  missed by holder: 10800 bytes in 23 allocations, held by a reached allocation: offset # of the #-byte allocation at 0x?, in no value the walk read; it read nothing at its start, reached by WTF::BasicRawSentinelNode<JSC::PreciseAllocation, WTF::RawPtrTraits<JSC::PreciseAllocation> >::m_prev; such as offset 152 of the 192-byte allocation at 0x1184803C0, in no value the walk read; it read nothing at its start, reached by WTF::BasicRawSentinelNode<JSC::PreciseAllocation, WTF::RawPtrTraits<JSC::PreciseAllocation> >::m_prev
+  missed by holder: 8928 bytes in 6 allocations, held by a reached allocation: offset # of the #-byte allocation at 0x?, in no value the walk read; it read nothing at its start, reached by WebCore::ThreadGlobalData::m_currentState; such as offset 4184 of the 4608-byte allocation at 0x13FD80000, in no value the walk read; it read nothing at its start, reached by WebCore::ThreadGlobalData::m_currentState
+  missed by holder: 2880 bytes in 3 allocations, held by a reached allocation: offset # of the #-byte allocation at 0x?, in no value the walk read; it read nothing at its start, reached by a thread's stack; such as offset 0 of the 160-byte allocation at 0x1180102C0, in no value the walk read; it read nothing at its start, reached by a thread's stack
+  missed by holder: 2048 bytes in 1 allocations, held by a reached allocation: the field WTF::WeakPtr<WebCore::Document, WebCore::WeakPtrImplWithEventTargetData, WTF::RawPtrTraits<WebCore::WeakPtrImplWithEventTargetData> >::m_shouldEnableAssertions, which the walk does not follow, at offset # of a 'WTF::Detail::CallableWrapper<(unnamed class), void>' at 0x?; such as the field WTF::WeakPtr<WebCore::Document, WebCore::WeakPtrImplWithEventTargetData, WTF::RawPtrTraits<WebCore::WeakPtrImplWithEventTargetData> >::m_shouldEnableAssertions, which the walk does not follow, at offset 16 of a 'WTF::Detail::CallableWrapper<(unnamed class), void>' at 0x1182F5A20
+  missed by holder: 320 bytes in 7 allocations, held by a reached allocation: offset # of the #-byte allocation at 0x?, in no value the walk read; it read nothing at its start, reached by a 'JSC::JSFunction'; such as offset 144 of the 256-byte allocation at 0x118494900, in no value the walk read; it read nothing at its start, reached by a 'JSC::JSFunction'
+  missed by holder: 288 bytes in 6 allocations, held by a reached allocation: offset # of the #-byte allocation at 0x?, in no value the walk read; it read nothing at its start, reached by a 'JSC::JSValue'; such as offset 144 of the 256-byte allocation at 0x118494800, in no value the walk read; it read nothing at its start, reached by a 'JSC::JSValue'
+  missed by holder: 272 bytes in 3 allocations, held by a reached allocation: offset # of the #-byte allocation at 0x?, in no value the walk read; it read nothing at its start, reached by WTF::BasicRawSentinelNode<JSC::PreciseAllocation, WTF::RawPtrTraits<JSC::PreciseAllocation> >::m_next; such as offset 192 of the 256-byte allocation at 0x118495400, in no value the walk read; it read nothing at its start, reached by WTF::BasicRawSentinelNode<JSC::PreciseAllocation, WTF::RawPtrTraits<JSC::PreciseAllocation> >::m_next
+  missed by holder: 240 bytes in 2 allocations, held by a reached allocation: the field JSC::FreeCell::scrambledBits, which the walk does not follow, at offset # of a 'JSC::FreeCell' at 0x?; such as the field JSC::FreeCell::scrambledBits, which the walk does not follow, at offset 15 of a 'JSC::FreeCell' at 0x13FD24131
+  missed by holder: 128 bytes in 4 allocations, held by nothing: nothing; such as nothing
+  missed by holder: 96 bytes in 3 allocations, held by a reached allocation: offset # of the #-byte allocation at 0x?, in no value the walk read; it read 'JSC::BlockDirectoryBits::Segment' at its start, reached by a 'WTF::Vector<JSC::BlockDirectoryBits::Segment, #, WTF::CrashOnOverflow, #, WTF::FastMalloc>'; such as offset 40 of the 80-byte allocation at 0x11802BF60, in no value the walk read; it read 'JSC::BlockDirectoryBits::Segment' at its start, reached by a 'WTF::Vector<JSC::BlockDirectoryBits::Segment, 0, WTF::CrashOnOverflow, 2, WTF::FastMalloc>'
+  untyped bytes: 96105 in allocations with 'WTF::StringImpl' at the start
+  untyped bytes: 69408 in allocations with 'WebCore::Layout::TextBreakingPositionCache::Entry::FontCascadeWidths' at the start
+  untyped bytes: 50259 in allocations with 'JSC::MarkedBlock' at the start
+  untyped bytes: 19894 in allocations with 'WTF::StringImpl' at the start
+  untyped bytes: 17840 in allocations with 'JSC::JSONCache' at the start
+  untyped bytes: 17120 in allocations with nothing at the start, reached by a global variable
+  untyped bytes: 16384 in allocations with 'JSC::GCArraySegment<const JSC::JSCell *>' at the start
+  untyped bytes: 16366 in allocations with 'JSC::MarkedBlock' at the start
+  untyped bytes: 16359 in allocations with 'JSC::JSValue' at the start
+  untyped bytes: 13568 in allocations with 'std::__1::pair<JSC::MarkedBlock::Handle *, JSC::MarkedBlock *>' at the start
+  untyped bytes: 13248 in allocations with nothing at the start, reached by a 'WTF::CodePtr<26129, WTF::FunctionAttributes::None>'
+  untyped bytes: 10608 in allocations with 'WebCore::TextShapingResultAndDisplayList' at the start
+  untyped bytes: 10590 in allocations with 'WTF::Lock' at the start
+  untyped bytes: 9120 in allocations with 'WebCore::Style::RuleData' at the start
+  untyped bytes: 8840 in allocations with 'WebCore::CSS::ColorMix::Component' at the start
+  untyped bytes: 8624 in allocations with nothing at the start, reached by a 'WTF::CodePtr<357, WTF::FunctionAttributes::None>'
+  untyped bytes: 8220 in allocations with 'unsigned int' at the start
+  untyped bytes: 8192 in allocations with nothing at the start, reached by a 'WTF::HashTable<void *, WTF::KeyValuePair<void *, void *>, WTF::KeyValuePairKeyExtractor<WTF::KeyValuePair<void *, void *> >, WTF::DefaultHash<void *>, WTF::HashMap<void *, void *, WTF::DefaultHash<void *>, WTF::HashTraits<void *>, WTF::HashTraits<void *>, WTF::HashTableTraits, WTF::ShouldValidateKey::No, WTF::FastMalloc>::KeyValuePairTraits, WTF::HashTraits<void *>, WTF::FastMalloc>'
+  untyped bytes: 8192 in allocations with nothing at the start, reached by a 'WTF::HashTable<WTF::Packed<WTF::StringImpl *>, WTF::Packed<WTF::StringImpl *>, WTF::IdentityExtractor, WTF::DefaultHash<WTF::Packed<WTF::StringImpl *> >, WTF::HashTraits<WTF::Packed<WTF::StringImpl *> >, WTF::HashTraits<WTF::Packed<WTF::StringImpl *> >, WTF::FastMalloc>'
+  untyped bytes: 7760 in allocations with 'WebCore::CSSCounterStyleDescriptors::Symbol' at the start
+  untyped bytes: 7424 in allocations with nothing at the start, reached by a 'WTF::CodePtr<26432, WTF::FunctionAttributes::None>'
+  untyped bytes: 6128 in allocations with nothing at the start, reached by a 'WTF::CodePtr<16397, WTF::FunctionAttributes::None>'
+  untyped bytes: 5888 in allocations with nothing at the start, reached by WTF::BasicRawSentinelNode<JSC::PreciseAllocation, WTF::RawPtrTraits<JSC::PreciseAllocation> >::m_prev
+  untyped bytes: 5672 in allocations with 'WebCore::StyleRuleBase' at the start
+  untyped bytes: 5640 in allocations with 'WTF::Lock' at the start
+  beyond class: 3368 bytes of 'JSC::DOMAttributeGetterSetter' cells
+  beyond class: 2632 bytes of 'JSC::CustomGetterSetter' cells
+  beyond class: 1600 bytes of 'JSC::FunctionExecutable' cells
+  beyond class: 632 bytes of 'JSC::PropertyTable' cells
+  beyond class: 216 bytes of 'JSC::GetterSetter' cells
+  beyond class: 88 bytes of 'JSC::JSSentinel' cells
+  beyond class: 24 bytes of 'JSC::JSCallee' cells
+  beyond class: 16 bytes of 'JSC::JSBigInt' cells
+  beyond class: 16 bytes of 'JSC::FunctionCodeBlock' cells
+  beyond class: 8 bytes of 'JSC::StringPrototype' cells
+  beyond class: 8 bytes of 'JSC::UnlinkedProgramCodeBlock' cells
+  beyond class: 8 bytes of 'JSC::UnlinkedFunctionCodeBlock' cells
+  beyond class: 8 bytes of 'JSC::JSPropertyNameEnumerator' cells
+  beyond class: 8 bytes of 'JSC::NumberPrototype' cells
+  beyond class: 8 bytes of 'WebCore::JSHTMLPreElement' cells
+  beyond class: 8 bytes of 'WebCore::JSHTMLDocument' cells
+  beyond class: 8 bytes of 'WebCore::JSDOMWindowProperties' cells
+  beyond class: 8 bytes of 'JSC::ProgramExecutable' cells
+  beyond class: 8 bytes of 'JSC::BooleanPrototype' cells
+  untyped: 16366 of 16384 bytes at 0x13fd34000, read as JSC::MarkedBlock, reached by std::__1::pair<JSC::MarkedBlock::Handle *, JSC::MarkedBlock *>::second
+  untyped: 16359 of 16384 bytes at 0x13fd10000, read as JSC::JSValue, reached by JSC::StrongSet::m_bumpEnd
+  untyped: 16286 of 16384 bytes at 0x13fd00000, read as JSC::MarkedBlock, reached by JSC::WriteBarrierBase<JSC::JSSentinel, WTF::RawPtrTraits<JSC::JSSentinel> >::m_cell
+  untyped: 15358 of 16384 bytes at 0x710100c000, read as JSC::MarkedBlock, reached by a 'JSC::LazyProperty<JSC::JSGlobalObject, JSC::Structure>'
+  untyped: 10327 of 16384 bytes at 0x7101008000, read as JSC::MarkedBlock, reached by a 'JSC::StructureID'
+  untyped: 8920 of 49376 bytes at 0x13ae44000, read as JSC::JSONCache, reached by std::__1::unique_ptr<JSC::JSONCache, std::__1::default_delete<JSC::JSONCache> >::(anonymous struct)::__ptr_
+  untyped: 8920 of 49376 bytes at 0x13af2c000, read as JSC::JSONCache, reached by std::__1::unique_ptr<JSC::JSONCache, std::__1::default_delete<JSC::JSONCache> >::(anonymous struct)::__ptr_
+  untyped: 5376 of 5376 bytes at 0x140e81900, read as nothing at its start, reached by a 'WTF::CodePtr<26432, WTF::FunctionAttributes::None>'
+  untyped: 4352 of 4352 bytes at 0x140e80800, read as nothing at its start, reached by a 'WTF::CodePtr<357, WTF::FunctionAttributes::None>'
+  untyped: 4096 of 102400 bytes at 0x13f477000, read as nothing at its start, reached by a 'WTF::HashTable<WTF::Packed<WTF::StringImpl *>, WTF::Packed<WTF::StringImpl *>, WTF::IdentityExtractor, WTF::DefaultHash<WTF::Packed<WTF::StringImpl *> >, WTF::HashTraits<WTF::Packed<WTF::StringImpl *> >, WTF::HashTraits<WTF::Packed<WTF::StringImpl *> >, WTF::FastMalloc>'
+  untyped: 4096 of 53248 bytes at 0x13f46a000, read as nothing at its start, reached by a 'WTF::HashTable<WTF::Packed<WTF::StringImpl *>, WTF::Packed<WTF::StringImpl *>, WTF::IdentityExtractor, WTF::DefaultHash<WTF::Packed<WTF::StringImpl *> >, WTF::HashTraits<WTF::Packed<WTF::StringImpl *> >, WTF::HashTraits<WTF::Packed<WTF::StringImpl *> >, WTF::FastMalloc>'
+  untyped: 4096 of 69632 bytes at 0x13f423000, read as nothing at its start, reached by a 'WTF::HashTable<void *, WTF::KeyValuePair<void *, void *>, WTF::KeyValuePairKeyExtractor<WTF::KeyValuePair<void *, void *> >, WTF::DefaultHash<void *>, WTF::HashMap<void *, void *, WTF::DefaultHash<void *>, WTF::HashTraits<void *>, WTF::HashTraits<void *>, WTF::HashTableTraits, WTF::ShouldValidateKey::No, WTF::FastMalloc>::KeyValuePairTraits, WTF::HashTraits<void *>, WTF::FastMalloc>'
+  untyped: 4096 of 69632 bytes at 0x13f412000, read as nothing at its start, reached by a 'WTF::HashTable<void *, WTF::KeyValuePair<void *, void *>, WTF::KeyValuePairKeyExtractor<WTF::KeyValuePair<void *, void *> >, Wwarning: trying to determine the size of type @interface WebLowPowerModeObserver : NSObject{
+    BOOL _isLowPowerModeEnabled;
+    WTF::CheckedPtr<WebCore::LowPowerModeNotifier> _notifier;
+}
+@property(nonatomic, assign, readwrite, getter = notifier, setter = setNotifier:) WTF::CheckedPtr<WebCore::LowPowerModeNotifier> notifier;
+@property(nonatomic, readonly, getter = isLowPowerModeEnabled, setter = <null selector>) BOOL isLowPowerModeEnabled;
+@end
+without a valid ExecutionContext. this is not reliable. please file a bug against LLDB.
+backtrace:
+Stack dump without symbol names (ensure you have llvm-symbolizer in your PATH or set the environment var `LLVM_SYMBOLIZER_PATH` to point to it):
+0  liblldb.21.1.8.dylib 0x000000011ea29000 llvm::sys::PrintStackTrace(llvm::raw_ostream&, int) + 56
+1  liblldb.21.1.8.dylib 0x000000011e9a3964 lldb_private::TypeSystemClang::GetBitSize(void*, lldb_private::ExecutionContextScope*) + 1112
+2  liblldb.21.1.8.dylib 0x000000011e4a2f54 lldb_private::CompilerType::GetBitSize(lldb_private::ExecutionContextScope*) const + 188
+3  liblldb.21.1.8.dylib 0x000000011e318630 lldb::SBType::GetByteSize() + 332
+4  mya                  0x00000001004eec74 JSC::Corpse::SnapshotDebugInfo::definitionInItsImage(JSC::Corpse::TargetType const&) + 552
+5  mya                  0x000000010049e1a0 JSC::Corpse::ReachWalk::followPointer(JSC::Corpse::Address, JSC::Corpse::TargetType const&) + 204
+6  mya                  0x000000010049df80 JSC::Corpse::ReachWalk::walkPlan(JSC::Corpse::Address, WTF::Vector<JSC::Corpse::ReachWalk::Slot, 0ul, WTF::CrashOnOverflow, 16ul, WTF::FastMalloc> const&, JSC::Corpse::TargetType const*) + 528
+7  mya                  0x00000001004fa118 JSC::Corpse::ReachWalk::walkInPlace(JSC::Corpse::Address, JSC::Corpse::TargetType const&, JSC::Corpse::TargetType const*, JSC::Corpse::TargetType::Field const*) (.cold.3) + 136
+8  mya                  0x000000010049d33c JSC::Corpse::ReachWalk::walkInPlace(JSC::Corpse::Address, JSC::Corpse::TargetType const&, JSC::Corpse::TargetType const*, JSC::Corpse::TargetType::Field const*) + 120
+9  mya                  0x000000010049aeec JSC::Corpse::ReachWalk::run() + 756
+10 mya                  0x00000001004b0258 JSC::Corpse::HeapWalk::reach(WTF::Vector<JSC::Corpse::HeapWalk::Allocation, 0ul, WTF::CrashOnOverflow, 16ul, WTF::FastMalloc> const&, WTF::Vector<JSC::Corpse::HeapWalk::Allocation, 0ul, WTF::CrashOnOverflow, 16ul, WTF::FastMalloc> const&, WTF::Vector<JSC::Corpse::HeapWalk::Allocation, 0ul, WTF::CrashOnOverflow, 16ul, WTF::FastMalloc> const&, unsigned long, WTF::Vector<JSC::Corpse::HeapWalk::Reference, 0ul, WTF::CrashOnOverflow, 16ul, WTF::FastMalloc>*) const + 212
+11 mya                  0x00000001004698bc Mya::Shell::handleHeapDump(Mya::Lexer) + 524
+12 mya                  0x0000000100467024 Mya::Shell::handleLine(char const*) + 1316
+13 mya                  0x00000001004597c4 Mya::Shell::runInteractive() + 80
+14 mya                  0x000000010045898c Mya::Shell::run(int, char**) + 152
+15 mya                  0x00000001004588a8 main + 72
+16 dyld                 0x000000019d4b3e80 start + 6688
+
+TF::DefaultHash<void *>, WTF::HashMap<void *, void *, WTF::DefaultHash<void *>, WTF::HashTraits<void *>, WTF::HashTraits<void *>, WTF::HashTableTraits, WTF::ShouldValidateKey::No, WTF::FastMalloc>::KeyValuePairTraits, WTF::HashTraits<void *>, WTF::FastMalloc>'
+  untyped: 2656 of 16384 bytes at 0x13f1ec000, read as JSC::MarkedBlock, reached by the VM
+  untyped: 2568 of 16384 bytes at 0x13f1dc000, read as JSC::MarkedBlock, reached by the VM
+  untyped: 2544 of 8704 bytes at 0x13f071000, read as unsigned int, reached by a 'JSC::PropertyTable'
+  untyped: 2544 of 8704 bytes at 0x13f07ba00, read as unsigned int, reached by a 'JSC::PropertyTable'
+  untyped: 2544 of 8704 bytes at 0x13f068800, read as unsigned int, reached by a 'JSC::PropertyTable'
+  untyped: 2048 of 2048 bytes at 0x140e80000, read as nothing at its start, reached by a 'WTF::CodePtr<26432, WTF::FunctionAttributes::None>'
+  untyped: 1936 of 2048 bytes at 0x13f000800, read as WebCore::CSS::FilterValue, reached by a 'WTF::Vector<WebCore::CSS::FilterValue, 0, WTF::CrashOnOverflow, 16, WTF::FastMalloc>'
+  untyped: 1928 of 2048 bytes at 0x13fdc0000, read as WebCore::Layout::TextBreakingPositionCache::Entry::FontCascadeWidths, reached by a 'WTF::Vector<WebCore::Layout::TextBreakingPositionCache::Entry::FontCascadeWidths, 0, WTF::CrashOnOverflow, 16, WTF::FastMalloc>'
+  untyped: 1928 of 2048 bytes at 0x13fe68000, read as WebCore::Layout::TextBreakingPositionCache::Entry::FontCascadeWidths, reached by a 'WTF::Vector<WebCore::Layout::TextBreakingPositionCache::Entry::FontCascadeWidths, 0, WTF::CrashOnOverflow, 16, WTF::FastMalloc>'
+  untyped: 1928 of 2048 bytes at 0x13fdcb800, read as WebCore::Layout::TextBreakingPositionCache::Entry::FontCascadeWidths, reached by a 'WTF::Vector<WebCore::Layout::TextBreakingPositionCache::Entry::FontCascadeWidths, 0, WTF::CrashOnOverflow, 16, WTF::FastMalloc>'
+  untyped: 1928 of 2048 bytes at 0x13fdd1000, read as WebCore::Layout::TextBreakingPositionCache::Entry::FontCascadeWidths, reached by a 'WTF::Vector<WebCore::Layout::TextBreakingPositionCache::Entry::FontCascadeWidths, 0, WTF::CrashOnOverflow, 16, WTF::FastMalloc>'
+  untyped: 1928 of 2048 bytes at 0x13fec4000, read as WebCore::Layout::TextBreakingPositionCache::Entry::FontCascadeWidths, reached by a 'WTF::Vector<WebCore::Layout::TextBreakingPositionCache::Entry::FontCascadeWidths, 0, WTF::CrashOnOverflow, 16, WTF::FastMalloc>'
+  0 values read as a type bigger than their allocation
+  0 arrays declared past the readable memory they start in, left unread
+  6 unions whose live member no reader picks, left unread
+  unread union: 16 of 'JSC::FTL::SlowPathCallKey::(anonymous union)' in JSC::FTL::SlowPathCallKey::
+  unread union: 11 of 'JSC::OpResolveScope::Metadata::(anonymous union)' in JSC::OpResolveScope::Metadata::
+  unread union: 9 of 'JSC::OpGetFromScope::Metadata::(anonymous union)' in JSC::OpGetFromScope::Metadata::
+  unread union: 3 of 'JSC::GetByIdModeMetadata' in JSC::OpGetById::Metadata::m_modeMetadata
+  unread union: 3 of 'JSC::OpPutToScope::Metadata::(anonymous union)' in JSC::OpPutToScope::Metadata::
+  unread union: 1 of 'YYSTYPE' in a value of its own, in a 'YYSTYPE'
+

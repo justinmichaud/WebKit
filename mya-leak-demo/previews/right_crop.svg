@@ -1,0 +1,72 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="684" viewBox="900 300 760 384" font-family="ui-sans-serif,-apple-system,Segoe UI,Roboto,sans-serif">
+<rect width="1630" height="684" fill="#ffffff"/>
+<text x="24" y="42" font-size="24" font-weight="800" fill="#0f172a">Where is the leak? A Worker postMessage leak, same process, two dumps</text>
+<text x="24" y="70" font-size="14" fill="#475569">Sample: every 100 ms the page posts a 1 KB ArrayBuffer to a worker that never drains its queue. The copies pile up in C++, not in either JS heap.</text>
+<text x="24" y="92" font-size="14" fill="#475569">Each node shows its exact dominator-tree retained size and type; the tree is topological top-to-bottom; cycle members are marked (↺) and keep their true retained size.</text>
+<rect x="24" y="112" width="16" height="16" rx="3" fill="#fff1f3" stroke="#be123c" stroke-width="2"/>
+<text x="46" y="125" font-size="12.5" fill="#334155">worker / message queue</text>
+<rect x="242.4" y="112" width="16" height="16" rx="3" fill="#fff7ed" stroke="#b45309" stroke-width="2"/>
+<text x="264.4" y="125" font-size="12.5" fill="#334155">cycle member</text>
+<rect x="388.8" y="112" width="16" height="16" rx="3" fill="#f8fafc" stroke="#334155" stroke-width="2"/>
+<text x="410.8" y="125" font-size="12.5" fill="#334155">other JS / C++</text>
+<rect x="549.6" y="112" width="16" height="16" rx="3" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="2"/>
+<text x="571.6" y="125" font-size="12.5" fill="#334155">rest of heap (collapsed)</text>
+<rect x="24" y="156" width="890" height="496" rx="12" fill="#ffffff" stroke="#1d4ed8" stroke-width="1.5"/>
+<text x="48" y="186" font-size="18" font-weight="700" fill="#1d4ed8">Normal JSC heap dump</text>
+<text x="48" y="206" font-size="12.5" fill="#64748b">main-VM GC snapshot · Web Inspector format</text>
+<rect x="970" y="156" width="636" height="496" rx="12" fill="#ffffff" stroke="#be123c" stroke-width="1.5"/>
+<text x="994" y="186" font-size="18" font-weight="700" fill="#be123c">mya heap walk</text>
+<text x="994" y="206" font-size="12.5" fill="#64748b">whole WebContent process, incl. C++ off the heap</text>
+<path d="M417.0,272.0 C417.0,295.0 163.0,295.0 163.0,318.0" fill="none" stroke="#cbd5e1" stroke-width="1.5"/>
+<path d="M163.0,370.0 C163.0,393.0 163.0,393.0 163.0,416.0" fill="none" stroke="#e2e8f0" stroke-width="1.5" stroke-dasharray="4 3"/>
+<path d="M417.0,272.0 C417.0,295.0 417.0,295.0 417.0,318.0" fill="none" stroke="#cbd5e1" stroke-width="1.5"/>
+<path d="M417.0,370.0 C417.0,393.0 417.0,393.0 417.0,416.0" fill="none" stroke="#e2e8f0" stroke-width="1.5" stroke-dasharray="4 3"/>
+<path d="M417.0,272.0 C417.0,295.0 671.0,295.0 671.0,318.0" fill="none" stroke="#e2e8f0" stroke-width="1.5" stroke-dasharray="4 3"/>
+<rect x="302.0" y="220.0" width="230" height="52" rx="7" fill="#f8fafc" stroke="#334155" stroke-width="2"/>
+<text x="312.0" y="241.0" font-size="13" font-weight="600" fill="#334155">&lt;root&gt;</text>
+<text x="312.0" y="258.0" font-size="12" fill="#475569">retained 173.7 KB</text>
+<text x="522.0" y="258.0" font-size="10.5" fill="#94a3b8" text-anchor="end">self 0 B</text>
+<rect x="48.0" y="318.0" width="230" height="52" rx="7" fill="#fff7ed" stroke="#b45309" stroke-width="3.5"/>
+<text x="58.0" y="339.0" font-size="13" font-weight="600" fill="#b45309">Window [http://127.0.0.1:8099/i…</text>
+<text x="58.0" y="356.0" font-size="12" fill="#475569">↺ cycle · retained 112.2 KB</text>
+<text x="268.0" y="356.0" font-size="10.5" fill="#94a3b8" text-anchor="end">self 4.5 KB</text>
+<rect x="48.0" y="416.0" width="230" height="52" rx="7" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5" stroke-dasharray="4 3"/>
+<text x="58.0" y="437.0" font-size="12.5" font-weight="600" fill="#64748b">+630 smaller subtrees</text>
+<text x="58.0" y="454.0" font-size="12" fill="#64748b">retained 107.7 KB</text>
+<rect x="302.0" y="318.0" width="230" height="52" rx="7" fill="#fff7ed" stroke="#b45309" stroke-width="3.5"/>
+<text x="312.0" y="339.0" font-size="13" font-weight="600" fill="#b45309">Worker</text>
+<text x="312.0" y="356.0" font-size="12" fill="#475569">↺ cycle · retained 605 B</text>
+<text x="522.0" y="356.0" font-size="10.5" fill="#94a3b8" text-anchor="end">self 23 B</text>
+<rect x="302.0" y="416.0" width="230" height="52" rx="7" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5" stroke-dasharray="4 3"/>
+<text x="312.0" y="437.0" font-size="12.5" font-weight="600" fill="#64748b">+7 smaller subtrees</text>
+<text x="312.0" y="454.0" font-size="12" fill="#64748b">retained 582 B</text>
+<rect x="556.0" y="318.0" width="230" height="52" rx="7" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5" stroke-dasharray="4 3"/>
+<text x="566.0" y="339.0" font-size="12.5" font-weight="600" fill="#64748b">rest of heap: +482 subtrees</text>
+<text x="566.0" y="356.0" font-size="12" fill="#64748b">retained 60.9 KB</text>
+<path d="M1236.0,272.0 C1236.0,295.0 1109.0,295.0 1109.0,318.0" fill="none" stroke="#cbd5e1" stroke-width="1.5"/>
+<path d="M1109.0,370.0 C1109.0,393.0 1109.0,393.0 1109.0,416.0" fill="none" stroke="#cbd5e1" stroke-width="1.5"/>
+<path d="M1109.0,468.0 C1109.0,491.0 1109.0,491.0 1109.0,514.0" fill="none" stroke="#e2e8f0" stroke-width="1.5" stroke-dasharray="4 3"/>
+<path d="M1236.0,272.0 C1236.0,295.0 1363.0,295.0 1363.0,318.0" fill="none" stroke="#e2e8f0" stroke-width="1.5" stroke-dasharray="4 3"/>
+<rect x="1121.0" y="220.0" width="230" height="52" rx="7" fill="#f8fafc" stroke="#334155" stroke-width="2"/>
+<text x="1131.0" y="241.0" font-size="13" font-weight="600" fill="#334155">&lt;root&gt;</text>
+<text x="1131.0" y="258.0" font-size="12" fill="#475569">retained 5.6 MB</text>
+<text x="1341.0" y="258.0" font-size="10.5" fill="#94a3b8" text-anchor="end">self 0 B</text>
+<rect x="994.0" y="318.0" width="230" height="52" rx="7" fill="#fff1f3" stroke="#be123c" stroke-width="3.5"/>
+<text x="1004.0" y="339.0" font-size="13" font-weight="600" fill="#be123c">WorkerDedicatedRunLoop</text>
+<text x="1004.0" y="356.0" font-size="12" fill="#475569">retained 39.8 KB</text>
+<text x="1214.0" y="356.0" font-size="10.5" fill="#94a3b8" text-anchor="end">self 96 B</text>
+<rect x="994.0" y="416.0" width="230" height="52" rx="7" fill="#fff1f3" stroke="#be123c" stroke-width="3.5"/>
+<text x="1004.0" y="437.0" font-size="13" font-weight="600" fill="#be123c">Deque&lt;unique_ptr&lt;...Task&gt;&gt;</text>
+<text x="1004.0" y="454.0" font-size="12" fill="#475569">retained 39.7 KB</text>
+<text x="1214.0" y="454.0" font-size="10.5" fill="#94a3b8" text-anchor="end">self 4.5 KB</text>
+<rect x="994.0" y="514.0" width="230" height="52" rx="7" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5" stroke-dasharray="4 3"/>
+<text x="1004.0" y="535.0" font-size="12.5" font-weight="600" fill="#64748b">+376 more (the queued Tasks)</text>
+<text x="1004.0" y="552.0" font-size="12" fill="#64748b">retained 35.2 KB</text>
+<rect x="1248.0" y="318.0" width="230" height="52" rx="7" fill="#f1f5f9" stroke="#cbd5e1" stroke-width="1.5" stroke-dasharray="4 3"/>
+<text x="1258.0" y="339.0" font-size="12.5" font-weight="600" fill="#64748b">rest of heap: +14199 subtrees</text>
+<text x="1258.0" y="356.0" font-size="12" fill="#64748b">retained 5.5 MB</text>
+<rect x="40" y="608" width="858" height="34" rx="8" fill="#eff6ff"/>
+<text x="48" y="630" font-size="13.5" font-weight="600" fill="#1e3a8a">Leak NOT found: Worker retains 605 B; no message-queue node exists at all.</text>
+<rect x="986" y="608" width="604" height="34" rx="8" fill="#fff1f3"/>
+<text x="994" y="630" font-size="13.5" font-weight="600" fill="#9f1239">Leak found: WorkerDedicatedRunLoop holds a Deque of 376 undrained Tasks (39.8 KB).</text>
+</svg>

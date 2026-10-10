@@ -905,7 +905,10 @@ private:
         HeapWalk::HeapDump dump = heap.heapDump(*allocations, reach, references);
         CString json = dump.json().utf8();
         FILE* file = fopen(path.c_str(), "w");
-        if (!file || fwrite(json.data(), 1, json.length(), file) != json.length()) {
+        IGNORE_CLANG_WARNINGS_BEGIN("unsafe-buffer-usage-in-libc-call")
+        size_t written = file ? fwrite(json.data(), 1, json.length(), file) : 0;
+        IGNORE_CLANG_WARNINGS_END
+        if (!file || written != json.length()) {
             SAFE_FPRINTF(stderr, "mya: Could not write %s: %s\n", String::fromUTF8(path.c_str()).utf8(), safeStrerror(errno));
             if (file)
                 fclose(file);
