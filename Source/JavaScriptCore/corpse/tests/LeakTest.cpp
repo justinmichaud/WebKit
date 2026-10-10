@@ -67,6 +67,7 @@
 #include <limits>
 #include <tuple>
 #include <unistd.h>
+#include <wtf/CheckedPtr.h>
 #include <wtf/Deque.h>
 #include <wtf/Function.h>
 #include <wtf/HexNumber.h>
@@ -131,14 +132,17 @@ private:
     Vector<JSC::Weak<JSC::JSObject>> listeners WTF_GUARDED_BY_LOCK(listenersLock);
 };
 
-// WebCore's Node: a tree, whose root is its nodes' opaque root.
-class TestNode : public TestWrappable {
+// WebCore's Node: a tree, whose root is its nodes' opaque root. A node owns its children,
+// and points to its parent with a CheckedPtr, which does not own it.
+class TestNode : public TestWrappable, public CanMakeCheckedPtr<TestNode> {
+    WTF_DEPRECATED_MAKE_FAST_ALLOCATED(TestNode);
+    WTF_OVERRIDE_DELETE_FOR_CHECKED_PTR(TestNode);
 public:
     void* opaqueRoot() final
     {
         TestNode* node = this;
         while (node->parent)
-            node = node->parent;
+            node = node->parent.get();
         return node;
     }
 
@@ -157,7 +161,7 @@ public:
         parent = nullptr;
     }
 
-    TestNode* parent { nullptr };
+    CheckedPtr<TestNode> parent;
     Vector<Ref<TestNode>> children;
 };
 
@@ -594,8 +598,8 @@ Snapshots takeSnapshots()
     return { takeSnapshot(getpid()), WTF::move(jsc) };
 }
 
-// The dump of a snapshot as `mya heapdump` makes it, from the VM.
-std::optional<HeapWalk::HeapDump> dumpOf(Snapshot& snapshot)
+// The dump of a snapshot as `mya heapdump --collector` makes it, from the VM, with JSC's snapshot of the same heap.
+std::optional<HeapWalk::HeapDump> dumpOf(Snapshot& snapshot, const HeapWalk::HeapDump& collector)
 {
     Dl_info javaScriptCore { };
     if (!dladdr(reinterpret_cast<const void*>(static_cast<void(*)()>(&JSC::initialize)), &javaScriptCore))
@@ -603,7 +607,7 @@ std::optional<HeapWalk::HeapDump> dumpOf(Snapshot& snapshot)
     HeapWalk heap(snapshot, Address { browser->vm }, Address { javaScriptCore.dli_fbase });
     if (!heap.isValid())
         return std::nullopt;
-    return heap.heapDump();
+    return heap.heapDump(&collector);
 }
 
 // A heap graph, and what Web Inspector computes from it.
@@ -1142,10 +1146,10 @@ void testLeaks()
     if (!first.mya || !second.mya)
         return;
 
-    auto myaBefore = dumpOf(*first.mya);
-    auto myaAfter = dumpOf(*second.mya);
     auto jscBefore = HeapWalk::HeapDump::fromJSON(String::fromUTF8(first.jsc.c_str()));
     auto jscAfter = HeapWalk::HeapDump::fromJSON(String::fromUTF8(second.jsc.c_str()));
+    auto myaBefore = jscBefore ? dumpOf(*first.mya, *jscBefore) : std::nullopt;
+    auto myaAfter = jscAfter ? dumpOf(*second.mya, *jscAfter) : std::nullopt;
     TEST_ASSERT(myaBefore && myaAfter && jscBefore && jscAfter, "both snapshots are dumped, by mya and by JSC");
     if (!myaBefore || !myaAfter || !jscBefore || !jscAfter)
         return;
@@ -1162,6 +1166,28 @@ void testLeaks()
     for (auto& edge : mya.after.dump.edges)
         unlabeled += edge.from && edge.label.isEmpty();
     TEST_ASSERT_EQ(unlabeled, 0u, "mya: every edge but <root>'s own names what held it"_s);
+    // A node owns its children through Refs and not its parent, which its CheckedPtr points to,
+    // and the collector's set of opaque roots holds nothing.
+    using EdgeKind = HeapWalk::HeapDump::EdgeKind;
+    unsigned parentEdges = 0;
+    unsigned strongParentEdges = 0;
+    unsigned childEdges = 0;
+    unsigned weakChildEdges = 0;
+    unsigned opaqueRootEdges = 0;
+    for (auto& edge : mya.after.dump.edges) {
+        if (edge.label.contains("WTF::CheckedPtr<JSCToolsTest::(anonymous namespace)::TestNode"_s)) {
+            ++parentEdges;
+            strongParentEdges += edge.kind == EdgeKind::Strong;
+        }
+        if (edge.label.contains("WTF::Ref<JSCToolsTest::(anonymous namespace)::TestNode"_s)) {
+            ++childEdges;
+            weakChildEdges += edge.kind != EdgeKind::Strong;
+        }
+        opaqueRootEdges += mya.after.dump.nodes[edge.from].className.startsWith("WTF::ConcurrentPtrHashSet::"_s);
+    }
+    TEST_ASSERT(parentEdges && !strongParentEdges, makeString("mya: a node's CheckedPtr to its parent is weak ("_s, strongParentEdges, " of "_s, parentEdges, " are strong)"_s));
+    TEST_ASSERT(childEdges && !weakChildEdges, makeString("mya: a node's Refs to its children are strong ("_s, weakChildEdges, " of "_s, childEdges, " are not)"_s));
+    TEST_ASSERT_EQ(opaqueRootEdges, 0u, "mya: the collector's opaque roots hold nothing"_s);
     // JSC's edges name properties, variables and indices, which only the report reads.
     TEST_ASSERT(std::ranges::any_of(jsc.after.dump.edges, [](auto& edge) { return !edge.label.isEmpty(); }), "JSC's heap snapshot: its edges' names are read"_s);
 

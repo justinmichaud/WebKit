@@ -1,0 +1,2 @@
+Starting MiniBrowser with DYLD_FRAMEWORK_PATH set to point to built WebKit in /Users/justinmichaud/Development/WebKit/WebKitBuild/Debug.
+Dumped GC heap to /var/folders/bp/96yyd7zn7d396sr2kx2rz8l00000gn/T/com.apple.WebKit.WebContent+org.webkit.MiniBrowser/GCHeapumzSHM

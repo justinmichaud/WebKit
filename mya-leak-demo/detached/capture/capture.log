@@ -1,0 +1,7 @@
+16:01:49 launching MiniBrowser on http://127.0.0.1:8100/index.html?capture=detached-1791669709
+16:01:51 WebContent pid 32996; page loaded; running for 90s
+16:03:21 JSC dump: notifyutil -p com.apple.WebKit.dumpGCHeap
+16:03:24 JSC dump:   911891 bytes from /var/folders/bp/96yyd7zn7d396sr2kx2rz8l00000gn/T/com.apple.WebKit.WebContent+org.webkit.MiniBrowser/GCHeapwuiIPy
+16:03:24 mya: snapshot --pid 32996; heapdump --collector jsc.json
+16:03:49 mya: Wrote 43379 nodes and 105921 edges, 10317776 bytes in all, to /Users/justinmichaud/Development/WebKit/mya-leak-demo/detached/capture/mya.json
+16:03:49 mya: 2243 strong edges between cells come from the collector's snapshot, each a reference a cell marks through its C++ storage

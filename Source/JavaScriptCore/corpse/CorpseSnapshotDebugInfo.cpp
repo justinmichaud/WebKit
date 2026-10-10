@@ -608,11 +608,11 @@ const TargetType* SnapshotDebugInfo::closureOfCallableWrapper(Snapshot& snapshot
             return Closure { true, nullptr };
         }
 
-        // The candidate's symbol must have exactly its name, from the demangler that spelled the vtable's.
+        // The closure type is the type of `this` in any of its member functions. A candidate's symbol
+        // must have exactly its name, from the demangler that spelled the vtable's.
         lldb::SBModule module = moduleAt(vtable);
-        for (std::string_view qualifiers : { " const", "" }) {
-            std::string candidate = std::string { closureName } + "::operator()" + parameters + std::string { qualifiers };
-            // The symbol table, not the debug info's index, which finds a function by its base name, operator().
+        auto classOfThisIn = [&](const std::string& candidate) -> const TargetType* {
+            // The symbol table, not the debug info's index, which finds a function by its base name, such as operator().
             lldb::SBSymbolContextList found = module.FindSymbols(candidate.c_str(), lldb::eSymbolTypeCode);
             for (uint32_t index = 0; index < found.GetSize(); ++index) {
                 lldb::SBSymbol symbol = found.GetContextAtIndex(index).GetSymbol();
@@ -624,10 +624,23 @@ const TargetType* SnapshotDebugInfo::closureOfCallableWrapper(Snapshot& snapshot
                 lldb::SBValue self = arguments.IsValid() ? arguments.GetFirstValueByName("this") : lldb::SBValue { };
                 lldb::SBType pointee = self.IsValid() ? self.GetType().GetPointeeType().GetUnqualifiedType() : lldb::SBType { };
                 if (pointee.IsValid() && pointee.IsTypeComplete() && pointee.GetByteSize())
-                    return Closure { true, &type(pointee) };
+                    return &type(pointee);
             }
+            return nullptr;
+        };
+        // A generic lambda's operator() is a template, whose symbol also names its template arguments,
+        // but its destructor and move constructor, which a closure has when a capture does, never do.
+        std::string closure { closureName };
+        std::string unqualified { lastScope };
+        for (const std::string& candidate : {
+            closure + "::operator()" + parameters + " const",
+            closure + "::operator()" + parameters,
+            closure + "::~" + unqualified + "()",
+            closure + "::" + unqualified + "(" + unqualified + "&&)" }) {
+            if (auto* found = classOfThisIn(candidate))
+                return Closure { true, found };
         }
-        Diagnostics::count(DiagnosticCounter::ClosuresWithoutCallOperator);
+        Diagnostics::count(DiagnosticCounter::ClosuresWithoutMemberFunction);
         return Closure { true, nullptr };
     }).iterator->value;
     isUnnamed = closure.isUnnamed;

@@ -1,0 +1,1001 @@
+[
+ {
+  "snapshot": "detached/capture/jsc.json",
+  "nodes": 10904,
+  "bytes": 4465246,
+  "cyclic": 0,
+  "unreachedBytes": 0,
+  "tree": {
+   "key": "<root>",
+   "count": 1,
+   "folded": 0,
+   "retained": 4465246,
+   "held": 4465246,
+   "self": 0,
+   "cyclic": 0,
+   "unreached": 0,
+   "link": "",
+   "holders": [],
+   "children": [
+    {
+     "key": "Function",
+     "count": 1982,
+     "folded": 19,
+     "retained": 4176491,
+     "held": 4176491,
+     "self": 64191,
+     "cyclic": 0,
+     "unreached": 0,
+     "link": "",
+     "holders": [
+      "<root> (x1962)",
+      "HTMLSpanElement (x1960)",
+      "Structure (x47)",
+      "19 more holders"
+     ],
+     "children": [
+      {
+       "key": "JSLexicalEnvironment",
+       "count": 1960,
+       "folded": 0,
+       "retained": 4108160,
+       "held": 4108160,
+       "self": 94080,
+       "cyclic": 0,
+       "unreached": 0,
+       "link": "",
+       "holders": [],
+       "children": [
+        {
+         "key": "Uint16Array",
+         "count": 1960,
+         "folded": 0,
+         "retained": 4014080,
+         "held": 4014080,
+         "self": 4014080,
+         "cyclic": 0,
+         "unreached": 0,
+         "link": "data",
+         "holders": [],
+         "children": [],
+         "other": null,
+         "_x": 0,
+         "_y": 376
+        }
+       ],
+       "other": null,
+       "_x": 0.0,
+       "_y": 268
+      }
+     ],
+     "other": [
+      5,
+      4140,
+      ""
+     ],
+     "_ox": 268,
+     "_oy": 268,
+     "_x": 134.0,
+     "_y": 108
+    },
+    {
+     "key": "HTMLSpanElement",
+     "count": 1961,
+     "folded": 0,
+     "retained": 94321,
+     "held": 94321,
+     "self": 94098,
+     "cyclic": 0,
+     "unreached": 0,
+     "link": "",
+     "holders": [
+      "<root> (x1960)",
+      "Structure",
+      "FunctionCodeBlock"
+     ],
+     "children": [],
+     "other": [
+      3,
+      223,
+      ""
+     ],
+     "_ox": 536,
+     "_oy": 268,
+     "_x": 536.0,
+     "_y": 108
+    },
+    {
+     "key": "Window",
+     "count": 2,
+     "folded": 0,
+     "retained": 92041,
+     "held": 92041,
+     "self": 4617,
+     "cyclic": 0,
+     "unreached": 0,
+     "link": "",
+     "holders": [
+      "Function (x552)",
+      "Structure (x193)",
+      "FunctionCodeBlock (x3)",
+      "3 more holders"
+     ],
+     "children": [],
+     "other": [
+      36,
+      87424,
+      ""
+     ],
+     "_ox": 804,
+     "_oy": 268,
+     "_x": 804.0,
+     "_y": 108
+    }
+   ],
+   "other": [
+    32,
+    102393,
+    ""
+   ],
+   "_ox": 1072,
+   "_oy": 108,
+   "_x": 603.0,
+   "_y": 0
+  },
+  "topRetainers": [
+   {
+    "id": 439,
+    "class": "Window",
+    "retained": 91505,
+    "self": 4600,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 1027,
+    "class": "Document",
+    "retained": 15654,
+    "self": 254,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 10896,
+    "class": "FunctionCodeBlock",
+    "retained": 13888,
+    "self": 13888,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 668,
+    "class": "Element",
+    "retained": 11971,
+    "self": 170,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 2791,
+    "class": "FunctionCodeBlock",
+    "retained": 9024,
+    "self": 9024,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 450,
+    "class": "HTMLElement",
+    "retained": 7758,
+    "self": 163,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 2831,
+    "class": "Array",
+    "retained": 5228,
+    "self": 66,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 2130,
+    "class": "Prototype",
+    "retained": 4726,
+    "self": 54,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 659,
+    "class": "Array",
+    "retained": 4720,
+    "self": 16,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 2484,
+    "class": "String",
+    "retained": 4490,
+    "self": 74,
+    "dominator": 439,
+    "dominatorClass": "Window"
+   },
+   {
+    "id": 2660,
+    "class": "Iterator",
+    "retained": 2851,
+    "self": 35,
+    "dominator": 439,
+    "dominatorClass": "Window"
+   },
+   {
+    "id": 748,
+    "class": "Node",
+    "retained": 2469,
+    "self": 65,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 4934,
+    "class": "Function",
+    "retained": 2128,
+    "self": 32,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 4940,
+    "class": "Function",
+    "retained": 2128,
+    "self": 32,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 4988,
+    "class": "Function",
+    "retained": 2128,
+    "self": 32,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 4994,
+    "class": "Function",
+    "retained": 2128,
+    "self": 32,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 5043,
+    "class": "Function",
+    "retained": 2128,
+    "self": 32,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 5204,
+    "class": "Function",
+    "retained": 2128,
+    "self": 32,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 5243,
+    "class": "Function",
+    "retained": 2128,
+    "self": 32,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 4055,
+    "class": "Function",
+    "retained": 2128,
+    "self": 32,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 7423,
+    "class": "Function",
+    "retained": 2128,
+    "self": 32,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 7428,
+    "class": "Function",
+    "retained": 2128,
+    "self": 32,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 7470,
+    "class": "Function",
+    "retained": 2128,
+    "self": 32,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 7476,
+    "class": "Function",
+    "retained": 2128,
+    "self": 32,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 7757,
+    "class": "Function",
+    "retained": 2128,
+    "self": 32,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 7761,
+    "class": "Function",
+    "retained": 2128,
+    "self": 32,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 7920,
+    "class": "Function",
+    "retained": 2128,
+    "self": 32,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 7924,
+    "class": "Function",
+    "retained": 2128,
+    "self": 32,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 6560,
+    "class": "Function",
+    "retained": 2128,
+    "self": 32,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 6566,
+    "class": "Function",
+    "retained": 2128,
+    "self": 32,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   }
+  ]
+ },
+ {
+  "snapshot": "detached/capture/mya.json",
+  "nodes": 43378,
+  "bytes": 10317776,
+  "cyclic": 1182,
+  "unreachedBytes": 40816,
+  "tree": {
+   "key": "<root>",
+   "count": 1,
+   "folded": 0,
+   "retained": 3077872,
+   "held": 10317776,
+   "self": 0,
+   "cyclic": 0,
+   "unreached": 0,
+   "link": "",
+   "holders": [],
+   "children": [
+    {
+     "key": "JSC::JSArray",
+     "count": 1,
+     "folded": 0,
+     "retained": 0,
+     "held": 6761312,
+     "self": 16,
+     "cyclic": 1,
+     "unreached": 0,
+     "link": "",
+     "holders": [
+      "FunctionCodeBlock: WriteBarrierBase<JSCell, RawPtrTraits<JSCell> >::m_cell (the collector marks it)",
+      "JSGlobalLexicalEnvironment: detached (the collector marks it)"
+     ],
+     "children": [
+      {
+       "key": "WebCore::JSHTMLDivElement",
+       "count": 101,
+       "folded": 0,
+       "retained": 0,
+       "held": 6745792,
+       "self": 4848,
+       "cyclic": 101,
+       "unreached": 0,
+       "link": "JSC::JSValue",
+       "holders": [],
+       "children": [
+        {
+         "key": "WebCore::HTMLDivElement",
+         "count": 101,
+         "folded": 0,
+         "retained": 6740944,
+         "held": 6740944,
+         "self": 16160,
+         "cyclic": 0,
+         "unreached": 0,
+         "link": "WTF::Ref<WebCore::EventTarget, WTF::RawPtrTraits<WebCore::EventTarget>, WTF::DefaultRefDerefTraits<WebCore::EventTarget> >::m_ptr",
+         "holders": [],
+         "children": [
+          {
+           "key": "WebCore::HTMLSpanElement",
+           "count": 202,
+           "folded": 1809,
+           "retained": 6724784,
+           "held": 6724784,
+           "self": 321760,
+           "cyclic": 0,
+           "unreached": 0,
+           "link": "WTF::CheckedPtr<WebCore::Node, WTF::RawPtrTraits<WebCore::Node> >::m_ptr (weak)",
+           "holders": [],
+           "children": [
+            {
+             "key": "JSC::JSArrowFunction",
+             "count": 1951,
+             "folded": 0,
+             "retained": 5462800,
+             "held": 5462800,
+             "self": 62432,
+             "cyclic": 0,
+             "unreached": 0,
+             "link": "",
+             "holders": [
+              "JSHTMLSpanElement: Weak<JSObject>::m_impl (the collector marks it) (x1951)",
+              "JSEventListener: Weak<JSObject>::m_impl (weak) (x1951)"
+             ],
+             "children": [
+              {
+               "key": "JSC::JSLexicalEnvironment",
+               "count": 1951,
+               "folded": 0,
+               "retained": 5400368,
+               "held": 5400368,
+               "self": 93648,
+               "cyclic": 0,
+               "unreached": 0,
+               "link": "JSC::WriteBarrierBase<JSC::JSScope, WTF::RawPtrTraits<JSC::JSScope> >::m_cell",
+               "holders": [],
+               "children": [
+                {
+                 "key": "JSC::JSGenericTypedArrayView<JSC::Uint16Adaptor>",
+                 "count": 1951,
+                 "folded": 0,
+                 "retained": 5306720,
+                 "held": 5306720,
+                 "self": 93648,
+                 "cyclic": 0,
+                 "unreached": 0,
+                 "link": "JSC::JSValue",
+                 "holders": [],
+                 "children": [
+                  {
+                   "key": "(auxiliary cell)",
+                   "count": 1951,
+                   "folded": 0,
+                   "retained": 5213072,
+                   "held": 5213072,
+                   "self": 5213072,
+                   "cyclic": 0,
+                   "unreached": 0,
+                   "link": "WTF::CagedPtr<Gigacage::Kind::Primitive, void, WTF::RawPtrTraits<void> >::m_ptr",
+                   "holders": [],
+                   "children": [],
+                   "other": null,
+                   "_x": 0,
+                   "_y": 981
+                  }
+                 ],
+                 "other": null,
+                 "_x": 0.0,
+                 "_y": 873
+                }
+               ],
+               "other": null,
+               "_x": 0.0,
+               "_y": 765
+              }
+             ],
+             "other": null,
+             "_x": 0.0,
+             "_y": 631
+            },
+            {
+             "key": "WebCore::WeakPtrImplWithEventTargetData",
+             "count": 2011,
+             "folded": 0,
+             "retained": 843696,
+             "held": 843696,
+             "self": 160880,
+             "cyclic": 0,
+             "unreached": 0,
+             "link": "WTF::CompactPointerTuple<WebCore::WeakPtrImplWithEventTargetData *, unsigned short>",
+             "holders": [],
+             "children": [
+              {
+               "key": "std::__1::pair<WTF::AtomString, WTF::Vector<WTF::Ref<WebCore::RegisteredEventListener, WTF::RawPtrTraits<WebCore::RegisteredEventListener>, WTF::DefaultRefDerefTraits<WebCore::RegisteredEventListener> >, 1, WTF::CrashOnOverflow, 2, WTF::FastMalloc> >",
+               "count": 2011,
+               "folded": 0,
+               "retained": 682816,
+               "held": 682816,
+               "self": 257408,
+               "cyclic": 0,
+               "unreached": 0,
+               "link": "WTF::Vector<std::__1::pair<WTF::AtomString, WTF::Vector<WTF::Ref<WebCore::RegisteredEventListener, WTF::RawPtrTraits<WebCore::RegisteredEventListener>, WTF::DefaultRefDerefTraits<WebCore::RegisteredEventListener> >, 1, WTF::CrashOnOverflow, 2, WTF::FastMalloc> >, 0, WTF::CrashOnOverflow, 4, WTF::FastMalloc>",
+               "holders": [],
+               "children": [
+                {
+                 "key": "WebCore::RegisteredEventListener",
+                 "count": 2011,
+                 "folded": 0,
+                 "retained": 425408,
+                 "held": 425408,
+                 "self": 64352,
+                 "cyclic": 0,
+                 "unreached": 0,
+                 "link": "WTF::Ref<WebCore::RegisteredEventListener, WTF::RawPtrTraits<WebCore::RegisteredEventListener>, WTF::DefaultRefDerefTraits<WebCore::RegisteredEventListener> >::m_ptr",
+                 "holders": [],
+                 "children": [
+                  {
+                   "key": "WebCore::JSEventListener",
+                   "count": 2011,
+                   "folded": 0,
+                   "retained": 361056,
+                   "held": 361056,
+                   "self": 193056,
+                   "cyclic": 0,
+                   "unreached": 0,
+                   "link": "WTF::Ref<WebCore::EventListener, WTF::RawPtrTraits<WebCore::EventListener>, WTF::DefaultRefDerefTraits<WebCore::EventListener> >::m_ptr",
+                   "holders": [],
+                   "children": [],
+                   "other": [
+                    1,
+                    168000,
+                    ""
+                   ],
+                   "_ox": 268,
+                   "_oy": 1089,
+                   "_x": 268.0,
+                   "_y": 981
+                  }
+                 ],
+                 "other": null,
+                 "_x": 268.0,
+                 "_y": 873
+                }
+               ],
+               "other": null,
+               "_x": 268.0,
+               "_y": 765
+              }
+             ],
+             "other": null,
+             "_x": 268.0,
+             "_y": 631
+            }
+           ],
+           "other": [
+            1,
+            96528,
+            ""
+           ],
+           "_ox": 536,
+           "_oy": 631,
+           "_x": 268.0,
+           "_y": 523
+          }
+         ],
+         "other": null,
+         "_x": 268.0,
+         "_y": 415
+        }
+       ],
+       "other": null,
+       "_x": 268.0,
+       "_y": 255
+      }
+     ],
+     "other": [
+      1,
+      15504,
+      ""
+     ],
+     "_ox": 804,
+     "_oy": 255,
+     "_x": 536.0,
+     "_y": 108
+    },
+    {
+     "key": "JSC::VM",
+     "count": 1,
+     "folded": 0,
+     "retained": 1351328,
+     "held": 1351328,
+     "self": 110592,
+     "cyclic": 0,
+     "unreached": 0,
+     "link": "",
+     "holders": [
+      "<the VM>: <the VM>",
+      "<a global variable>: <a global variable>",
+      "<WebConfig::g_config>: DoublyLinkedList<VMThreadContext>::m_head, DoublyLinkedList<VMThreadContext>::m_tail"
+     ],
+     "children": [
+      {
+       "key": "JSC::MarkedBlock less its cells",
+       "count": 47,
+       "folded": 0,
+       "retained": 345664,
+       "held": 345664,
+       "self": 345664,
+       "cyclic": 0,
+       "unreached": 0,
+       "link": "JSC::FreeList::m_intervalStart, JSC::FreeList::m_nextInterval (weak) (2 of 47)",
+       "holders": [
+        "(untyped): <the VM> (weak) (x47)",
+        "pair<MarkedBlock::Handle *, MarkedBlock\u2026: pair<MarkedBlock::Handle *, MarkedBlock *>::second (weak) (x46)",
+        "VM: FreeList::m_intervalStart, FreeList::m_nextInterval (weak) (x2)",
+        "2 more holders"
+       ],
+       "children": [],
+       "other": null,
+       "_x": 1072,
+       "_y": 255
+      }
+     ],
+     "other": [
+      66,
+      895072,
+      ""
+     ],
+     "_ox": 1340,
+     "_oy": 255,
+     "_x": 1206.0,
+     "_y": 108
+    },
+    {
+     "key": "<WebConfig::g_config>",
+     "count": 1,
+     "folded": 0,
+     "retained": 529040,
+     "held": 529040,
+     "self": 0,
+     "cyclic": 0,
+     "unreached": 0,
+     "link": "",
+     "holders": [],
+     "children": [
+      {
+       "key": "(untyped)",
+       "count": 121,
+       "folded": 1,
+       "retained": 365312,
+       "held": 365312,
+       "self": 188384,
+       "cyclic": 0,
+       "unreached": 0,
+       "link": "WTF::CodePtr<26129, WTF::FunctionAttributes::None> (63 of 121)",
+       "holders": [],
+       "children": [],
+       "other": [
+        15,
+        176928,
+        ""
+       ],
+       "_ox": 1608,
+       "_oy": 415,
+       "_x": 1608.0,
+       "_y": 255
+      }
+     ],
+     "other": [
+      61,
+      163728,
+      ""
+     ],
+     "_ox": 1876,
+     "_oy": 255,
+     "_x": 1742.0,
+     "_y": 108
+    },
+    {
+     "key": "<a global variable>",
+     "count": 1,
+     "folded": 0,
+     "retained": 292608,
+     "held": 292608,
+     "self": 0,
+     "cyclic": 0,
+     "unreached": 0,
+     "link": "",
+     "holders": [],
+     "children": [],
+     "other": [
+      14,
+      292608,
+      ""
+     ],
+     "_ox": 2144,
+     "_oy": 255,
+     "_x": 2144.0,
+     "_y": 108
+    }
+   ],
+   "other": [
+    150,
+    904896,
+    ""
+   ],
+   "_ox": 2412,
+   "_oy": 108,
+   "_x": 1474.0,
+   "_y": 0
+  },
+  "topRetainers": [
+   {
+    "id": 42730,
+    "class": "JSC::VM",
+    "retained": 1351328,
+    "self": 110592,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 43377,
+    "class": "<WebConfig::g_config>",
+    "retained": 529040,
+    "self": 0,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 43376,
+    "class": "<a global variable>",
+    "retained": 292608,
+    "self": 0,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 42441,
+    "class": "JSC::MegamorphicCache",
+    "retained": 141024,
+    "self": 141024,
+    "dominator": 42730,
+    "dominatorClass": "JSC::VM"
+   },
+   {
+    "id": 14547,
+    "class": "WTF::Thread",
+    "retained": 139072,
+    "self": 192,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 42731,
+    "class": "(untyped)",
+    "retained": 102400,
+    "self": 102400,
+    "dominator": 14547,
+    "dominatorClass": "WTF::Thread"
+   },
+   {
+    "id": 15826,
+    "class": "WebCore::FontCascadeFonts",
+    "retained": 99040,
+    "self": 352,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 42517,
+    "class": "(untyped)",
+    "retained": 95232,
+    "self": 9216,
+    "dominator": 15826,
+    "dominatorClass": "WebCore::FontCascadeFonts"
+   },
+   {
+    "id": 21137,
+    "class": "JSC::Collector",
+    "retained": 84208,
+    "self": 384,
+    "dominator": 42730,
+    "dominatorClass": "JSC::VM"
+   },
+   {
+    "id": 42728,
+    "class": "(untyped)",
+    "retained": 69632,
+    "self": 69632,
+    "dominator": 43377,
+    "dominatorClass": "<WebConfig::g_config>"
+   },
+   {
+    "id": 42729,
+    "class": "(untyped)",
+    "retained": 69632,
+    "self": 69632,
+    "dominator": 43377,
+    "dominatorClass": "<WebConfig::g_config>"
+   },
+   {
+    "id": 32119,
+    "class": "WebCore::HTMLDivElement",
+    "retained": 67040,
+    "self": 160,
+    "dominator": 8039,
+    "dominatorClass": "WebCore::JSHTMLDivElement"
+   },
+   {
+    "id": 32123,
+    "class": "WebCore::HTMLDivElement",
+    "retained": 67040,
+    "self": 160,
+    "dominator": 13206,
+    "dominatorClass": "WebCore::JSHTMLDivElement"
+   },
+   {
+    "id": 32144,
+    "class": "WebCore::HTMLDivElement",
+    "retained": 67040,
+    "self": 160,
+    "dominator": 13224,
+    "dominatorClass": "WebCore::JSHTMLDivElement"
+   },
+   {
+    "id": 32165,
+    "class": "WebCore::HTMLDivElement",
+    "retained": 67040,
+    "self": 160,
+    "dominator": 13225,
+    "dominatorClass": "WebCore::JSHTMLDivElement"
+   },
+   {
+    "id": 32186,
+    "class": "WebCore::HTMLDivElement",
+    "retained": 67040,
+    "self": 160,
+    "dominator": 13226,
+    "dominatorClass": "WebCore::JSHTMLDivElement"
+   },
+   {
+    "id": 32207,
+    "class": "WebCore::HTMLDivElement",
+    "retained": 67040,
+    "self": 160,
+    "dominator": 13227,
+    "dominatorClass": "WebCore::JSHTMLDivElement"
+   },
+   {
+    "id": 36250,
+    "class": "WebCore::HTMLDivElement",
+    "retained": 67040,
+    "self": 160,
+    "dominator": 13229,
+    "dominatorClass": "WebCore::JSHTMLDivElement"
+   },
+   {
+    "id": 36271,
+    "class": "WebCore::HTMLDivElement",
+    "retained": 67040,
+    "self": 160,
+    "dominator": 13230,
+    "dominatorClass": "WebCore::JSHTMLDivElement"
+   },
+   {
+    "id": 36292,
+    "class": "WebCore::HTMLDivElement",
+    "retained": 67040,
+    "self": 160,
+    "dominator": 13231,
+    "dominatorClass": "WebCore::JSHTMLDivElement"
+   },
+   {
+    "id": 36313,
+    "class": "WebCore::HTMLDivElement",
+    "retained": 67040,
+    "self": 160,
+    "dominator": 8038,
+    "dominatorClass": "WebCore::JSHTMLDivElement"
+   },
+   {
+    "id": 37363,
+    "class": "WebCore::HTMLDivElement",
+    "retained": 67040,
+    "self": 160,
+    "dominator": 8040,
+    "dominatorClass": "WebCore::JSHTMLDivElement"
+   },
+   {
+    "id": 37384,
+    "class": "WebCore::HTMLDivElement",
+    "retained": 67040,
+    "self": 160,
+    "dominator": 8041,
+    "dominatorClass": "WebCore::JSHTMLDivElement"
+   },
+   {
+    "id": 37405,
+    "class": "WebCore::HTMLDivElement",
+    "retained": 67040,
+    "self": 160,
+    "dominator": 8042,
+    "dominatorClass": "WebCore::JSHTMLDivElement"
+   },
+   {
+    "id": 37426,
+    "class": "WebCore::HTMLDivElement",
+    "retained": 67040,
+    "self": 160,
+    "dominator": 8043,
+    "dominatorClass": "WebCore::JSHTMLDivElement"
+   },
+   {
+    "id": 37447,
+    "class": "WebCore::HTMLDivElement",
+    "retained": 67040,
+    "self": 160,
+    "dominator": 8044,
+    "dominatorClass": "WebCore::JSHTMLDivElement"
+   },
+   {
+    "id": 37484,
+    "class": "WebCore::HTMLDivElement",
+    "retained": 67040,
+    "self": 160,
+    "dominator": 8045,
+    "dominatorClass": "WebCore::JSHTMLDivElement"
+   },
+   {
+    "id": 37505,
+    "class": "WebCore::HTMLDivElement",
+    "retained": 67040,
+    "self": 160,
+    "dominator": 8046,
+    "dominatorClass": "WebCore::JSHTMLDivElement"
+   },
+   {
+    "id": 37526,
+    "class": "WebCore::HTMLDivElement",
+    "retained": 67040,
+    "self": 160,
+    "dominator": 8047,
+    "dominatorClass": "WebCore::JSHTMLDivElement"
+   },
+   {
+    "id": 37547,
+    "class": "WebCore::HTMLDivElement",
+    "retained": 67040,
+    "self": 160,
+    "dominator": 8048,
+    "dominatorClass": "WebCore::JSHTMLDivElement"
+   }
+  ]
+ }
+]

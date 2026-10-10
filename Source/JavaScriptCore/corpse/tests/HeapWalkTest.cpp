@@ -215,8 +215,9 @@ enum class Planted : uint8_t {
     SystemMallocObject, // A polymorphic object in system malloc's memory, which libpas does not enumerate.
     AtomicPointer, // A std::atomic<T*>, which libc++ keeps as a C11 _Atomic(T*).
     SpanElement, // The last element of a std::span, past its first.
+    GenericClosure, // A capture of a generic lambda's closure, whose operator() is a template.
 };
-constexpr size_t numberOfPlanted = static_cast<size_t>(Planted::SpanElement) + 1;
+constexpr size_t numberOfPlanted = static_cast<size_t>(Planted::GenericClosure) + 1;
 // The walk reads objects in system malloc's memory where it knows that memory by its VM tag.
 #if OS(DARWIN)
 constexpr bool readsSystemMallocObjects = true;
@@ -243,6 +244,7 @@ constexpr std::array<ASCIILiteral, numberOfPlanted> plantedNames {
     "a polymorphic object in system malloc's memory"_s,
     "a std::atomic<T*>"_s,
     "the last element of a std::span"_s,
+    "a capture of a generic lambda's closure"_s,
 };
 // The planted objects that are ReachableObjects, which the walk reads whole as their class.
 constexpr bool isPlantedObject(Planted planted)
@@ -326,6 +328,14 @@ Function<void()> closureOfTemplate(T* captured)
     };
 }
 
+// A closure that owns what it captures, so that it has a destructor of its own.
+Function<void(int)> genericClosure(std::unique_ptr<CapturedHolder> holder)
+{
+    return [holder = WTF::move(holder)](auto) {
+        RELEASE_ASSERT(holder);
+    };
+}
+
 struct SystemMallocHolder : ReachableObjectHolder {
     virtual ~SystemMallocHolder() = default;
 };
@@ -367,6 +377,7 @@ public:
     Function<void()> secondClosure;
     Function<void()> closureOfTemplate;
     Function<void()> closureOfAnotherInstance;
+    Function<void(int)> genericClosure;
     SystemMallocHolder* systemMallocHolder { nullptr };
     std::atomic<ReachableObject*> atomic { nullptr };
     std::span<ReachableObject*> span;
@@ -556,6 +567,9 @@ Address createFixture()
     myaRoots.span[0] = new ReachableObject;
     myaRoots.span[1] = new ReachableObject;
     myaRoots.span[2] = plant(Planted::SpanElement);
+    auto genericCapturedHolder = makeUnique<CapturedHolder>();
+    genericCapturedHolder->held = plant(Planted::GenericClosure);
+    myaRoots.genericClosure = genericClosure(WTF::move(genericCapturedHolder));
     myaRoots.closureOfTemplate = closureOfTemplate(plant(Planted::ClosureOfTemplate));
     auto* instanceCapturedHolder = new CapturedHolder;
     instanceCapturedHolder->held = plant(Planted::ClosureOfAnotherInstance);
@@ -1570,6 +1584,46 @@ void testHeapDump()
     if (verbose)
         dataLogLn("    the dump has ", dump.nodes.size(), " nodes and ", dump.edges.size(), " edges; JSC's snapshot ", jsc->cells.size(), " cells and ", jsc->edges.size(), " edges between them");
     TEST_ASSERT_EQ(missingEdges, 0u, "the dump has a path, through C++ objects alone, for every edge between cells JSC's heap snapshot has");
+
+    // Given JSC's snapshot as the collector's, each of those is a strong path: a cell that marks a
+    // cell through its C++ storage has a strong edge of its own to it.
+    auto collector = HeapWalk::HeapDump::fromJSON(jscJSON);
+    TEST_ASSERT(collector, "JSC's heap snapshot is read as a heap dump");
+    if (!collector)
+        return;
+    HeapWalk::HeapDump marked = heap.heapDump(*allocations, reach, references, &*collector);
+    TEST_ASSERT(marked.referencesTheCollectorMarks, "the collector's snapshot adds strong edges for what cells mark through their C++ storage");
+    Vector<Vector<uint32_t>> strongOutgoing(marked.nodes.size());
+    for (auto& edge : marked.edges) {
+        if (edge.kind == HeapWalk::HeapDump::EdgeKind::Strong)
+            strongOutgoing[edge.from].append(edge.to);
+    }
+    auto strongPathExists = [&](uint32_t start, uint32_t target) {
+        HashSet<uint32_t> visited;
+        Vector<uint32_t> worklist { start };
+        while (!worklist.isEmpty()) {
+            for (uint32_t to : strongOutgoing[worklist.takeLast()]) {
+                if (to == target)
+                    return true;
+                if (marked.nodes[to].kind == HeapWalk::HeapDump::Kind::Allocation && visited.add(to + 1).isNewEntry)
+                    worklist.append(to);
+            }
+        }
+        return false;
+    };
+    HashMap<String, unsigned> weakByClasses;
+    unsigned weakEdges = 0;
+    for (auto [from, to] : jsc->edges) {
+        auto fromNode = cellNodes.find(from);
+        auto toNode = cellNodes.find(to);
+        if (fromNode == cellNodes.end() || toNode == cellNodes.end() || strongPathExists(fromNode->value, toNode->value))
+            continue;
+        ++weakEdges;
+        ++weakByClasses.add(makeString(marked.nodes[fromNode->value].className, " -> "_s, marked.nodes[toNode->value].className), 0).iterator->value;
+    }
+    for (auto& [classes, count] : weakByClasses)
+        dataLogLn("    the dump has no strong path for ", count, " of JSC's edges ", classes);
+    TEST_ASSERT_EQ(weakEdges, 0u, "given the collector's snapshot, the dump has a strong path through C++ objects alone for every edge between cells JSC's heap snapshot has");
 
 #if OS(DARWIN)
     analyzeBeforeAndAfter(createFixtureBeforeAndAfter, analyzeDiff);

@@ -297,6 +297,9 @@ public:
         const char* root;
         const TargetType* holder { nullptr }; // The class whose member held it, if the walk knows it.
         const TargetType::Field* field { nullptr }; // That member, if the walk knows it.
+        // Whether what held it owns what it holds: an owning smart pointer, such as a RefPtr or
+        // a unique_ptr, or a container's storage. A raw pointer or a CheckedPtr does not.
+        bool owns { false };
     };
     Reach reach(const Vector<Allocation>&, const Vector<Allocation>& excluded, const Vector<Allocation>& notReferrers, size_t listCount, Vector<Reference>* references = nullptr) const;
 
@@ -313,10 +316,10 @@ public:
             Kind kind;
             bool isBlock { false }; // A MarkedBlock or a precise allocation, less its cells.
         };
-        // What keeps the node a reference reaches alive, as JSC's collector has it.
+        // What keeps the node a reference reaches alive, as JSC's collector and C++ ownership have it.
         enum class EdgeKind : uint8_t {
-            Untraced, // A raw C++ pointer to a JS cell, which the collector never marks through.
-            Weak, // A Weak, which keeps nothing alive.
+            Untraced, // A raw C++ pointer to a JS cell, which the collector never marks through, or a stack's word to a C++ object.
+            Weak, // A Weak, or a C++ pointer to a C++ object that does not own it, which keeps nothing alive.
             Strong, // Anything else.
         };
         struct Edge {
@@ -332,6 +335,8 @@ public:
         };
         Vector<Node> nodes; // The first is JSC's <root>.
         Vector<Edge> edges; // Each pair of nodes once, by the first. json() writes those that retain.
+        size_t referencesTheCollectorMarks { 0 }; // Strong edges between cells that a collector's snapshot added.
+        // Each edge is named by its label, and by its kind if it is not strong; each JS cell is labeled "JS cell".
         String json() const;
         // A GCDebugging heap snapshot, version 3, as json() writes it and as JSC's own
         // HeapSnapshotBuilder does, of a heap the collector's own visitor walked: a node
@@ -366,11 +371,16 @@ public:
         Vector<Range> m_cellRanges;
         Vector<Range> m_allocationRanges;
     };
-    HeapDump heapDump(const Vector<Allocation>&, const Reach&, const Vector<Reference>&) const;
+    // Memory does not show which of the traced slots in a cell's C++ storage the cell visits, so a
+    // reference from a C++ object to a cell is weak. `collector`, JSC's own heap snapshot of the same
+    // heap as fromJSON reads it, shows the references its collector marked through: where a cell that
+    // owns the C++ object, through owning references alone, has an edge to the cell in it, that cell
+    // has a strong edge of its own to the cell, named as the collector names it, or else by the slot.
+    HeapDump heapDump(const Vector<Allocation>&, const Reach&, const Vector<Reference>&, const HeapDump* collector = nullptr) const;
     // The dump of every libpas allocation, as `mya heapdump` writes it: the walk's reach
     // over libpasAllocations(), with nothing excluded. Nullopt, having reported why, if
     // libpas's allocations cannot be read.
-    std::optional<HeapDump> heapDump() const;
+    std::optional<HeapDump> heapDump(const HeapDump* collector = nullptr) const;
 
 private:
     friend class ReachWalk;

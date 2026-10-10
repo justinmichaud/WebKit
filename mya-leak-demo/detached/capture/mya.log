@@ -1,0 +1,42 @@
+mya: The class of the destructor at 0x7005d15ab0 is incomplete in its debug info
+mya:   while measuring the reach of the walk of the heap at 0x140434000: vtable slots that are not a destructor 10
+mya:   while running the command 'heapdump /Users/justinmichaud/Development/WebKit/mya-leak-demo/detached/capture/mya.json --collector /Users/justinmichaud/Development/WebKit/mya-leak-demo/detached/capture/jsc.json'
+mya: The class of the destructor at 0x7005d7d9d8 is incomplete in its debug info
+mya:   while measuring the reach of the walk of the heap at 0x140434000: vtable slots that are not a destructor 11
+mya:   while running the command 'heapdump /Users/justinmichaud/Development/WebKit/mya-leak-demo/detached/capture/mya.json --collector /Users/justinmichaud/Development/WebKit/mya-leak-demo/detached/capture/jsc.json'
+warning: trying to determine the size of type @interface WebLowPowerModeObserver : NSObject{
+    BOOL _isLowPowerModeEnabled;
+    WTF::CheckedPtr<WebCore::LowPowerModeNotifier> _notifier;
+}
+@property(nonatomic, assign, readwrite, getter = notifier, setter = setNotifier:) WTF::CheckedPtr<WebCore::LowPowerModeNotifier> notifier;
+@property(nonatomic, readonly, getter = isLowPowerModeEnabled, setter = <null selector>) BOOL isLowPowerModeEnabled;
+@end
+without a valid ExecutionContext. this is not reliable. please file a bug against LLDB.
+backtrace:
+Stack dump without symbol names (ensure you have llvm-symbolizer in your PATH or set the environment var `LLVM_SYMBOLIZER_PATH` to point to it):
+0  liblldb.21.1.8.dylib 0x0000000122e1d000 llvm::sys::PrintStackTrace(llvm::raw_ostream&, int) + 56
+1  liblldb.21.1.8.dylib 0x0000000122d97964 lldb_private::TypeSystemClang::GetBitSize(void*, lldb_private::ExecutionContextScope*) + 1112
+2  liblldb.21.1.8.dylib 0x0000000122896f54 lldb_private::CompilerType::GetBitSize(lldb_private::ExecutionContextScope*) const + 188
+3  liblldb.21.1.8.dylib 0x000000012270c630 lldb::SBType::GetByteSize() + 332
+4  mya                  0x0000000104a20370 JSC::Corpse::SnapshotDebugInfo::definitionInItsImage(JSC::Corpse::TargetType const&) + 552
+5  mya                  0x00000001049cbc50 JSC::Corpse::ReachWalk::followPointer(JSC::Corpse::Address, JSC::Corpse::TargetType const&) + 204
+6  mya                  0x00000001049cba1c JSC::Corpse::ReachWalk::walkPlan(JSC::Corpse::Address, WTF::Vector<JSC::Corpse::ReachWalk::Slot, 0ul, WTF::CrashOnOverflow, 16ul, WTF::FastMalloc> const&, JSC::Corpse::TargetType const*) + 564
+7  mya                  0x0000000104a2b814 JSC::Corpse::ReachWalk::walkInPlace(JSC::Corpse::Address, JSC::Corpse::TargetType const&, JSC::Corpse::TargetType const*, JSC::Corpse::TargetType::Field const*) (.cold.3) + 136
+8  mya                  0x00000001049cada0 JSC::Corpse::ReachWalk::walkInPlace(JSC::Corpse::Address, JSC::Corpse::TargetType const&, JSC::Corpse::TargetType const*, JSC::Corpse::TargetType::Field const*) + 120
+9  mya                  0x00000001049c88bc JSC::Corpse::ReachWalk::run() + 768
+10 mya                  0x00000001049deec8 JSC::Corpse::HeapWalk::reach(WTF::Vector<JSC::Corpse::HeapWalk::Allocation, 0ul, WTF::CrashOnOverflow, 16ul, WTF::FastMalloc> const&, WTF::Vector<JSC::Corpse::HeapWalk::Allocation, 0ul, WTF::CrashOnOverflow, 16ul, WTF::FastMalloc> const&, WTF::Vector<JSC::Corpse::HeapWalk::Allocation, 0ul, WTF::CrashOnOverflow, 16ul, WTF::FastMalloc> const&, unsigned long, WTF::Vector<JSC::Corpse::HeapWalk::Reference, 0ul, WTF::CrashOnOverflow, 16ul, WTF::FastMalloc>*) const + 212
+11 mya                  0x0000000104995ad8 Mya::Shell::handleHeapDump(Mya::Lexer) + 1032
+12 mya                  0x0000000104993044 Mya::Shell::handleLine(char const*) + 1316
+13 mya                  0x00000001049857c4 Mya::Shell::runInteractive() + 80
+14 mya                  0x000000010498498c Mya::Shell::run(int, char**) + 152
+15 mya                  0x00000001049848a8 main + 72
+16 dyld                 0x000000019d4b3e80 start + 6688
+
+Attached to 32996
+Captured Snapshot #1 of 32996
+Wrote 43379 nodes and 105921 edges, 10317776 bytes in all, to /Users/justinmichaud/Development/WebKit/mya-leak-demo/detached/capture/mya.json
+  5949616 bytes of live cells, 4349504 of other allocations the walk reached, 18656 of allocations it missed; 169177 references read
+  2243 strong edges between cells come from the collector's snapshot, each a reference a cell marks through its C++ storage
+  of which 4158448 bytes are in libpas's dirty or compressed pages, and 6159328 bytes in pages outside the footprint
+  those pages also hold 2941984 bytes of free payload, 534512 of metadata and 49152 libpas records nothing in; `memory` accounts for the rest of the footprint
+

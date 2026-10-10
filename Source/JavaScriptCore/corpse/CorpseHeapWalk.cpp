@@ -771,8 +771,12 @@ private:
     void recordReference(Address to)
     {
         Address from = m_referrer ? m_referrer : m_contextSlot ? m_contextSlot : m_contextObject.first;
-        m_references->append({ from, to, m_rootKind, m_contextClass, m_contextField });
+        m_references->append({ from, to, m_rootKind, m_contextClass, m_contextField, ownsWhatItHolds() });
     }
+    // Whether what holds the reference being read owns its target: an owning smart pointer
+    // around the pointer member, or a reader of a container's storage. A reader of an
+    // encoded pointer owns as the member it is part of does.
+    bool ownsWhatItHolds();
     // The cells the JSValues from `start`, `bytes` long, hold, as references of `owner`, or,
     // without one, each of its own slot.
     void referenceJSValues(Address owner, Address start, uint64_t bytes);
@@ -781,6 +785,7 @@ private:
     Vector<HeapWalk::Allocation> m_weakHandleSlots;
     Vector<HeapWalk::Reference>* m_references { nullptr };
     Address m_referrer; // What holds the references being read, when it is not the slot or value being read.
+    const TargetType* m_contextOwningPointer { nullptr }; // The owning smart pointer of the slot being read, if any.
     String reachedBy(size_t allocationIndex) const;
     std::optional<uint32_t> lexicalEnvironmentScopeSize(Address, const TargetType& environmentClass);
     std::optional<std::pair<uint64_t, uint64_t>> m_scopeOffsets; // Of the SymbolTable in an environment, and of its maxScopeOffset.
@@ -824,11 +829,13 @@ private:
         const TargetType* type; // The pointee, or the value a reader, the array walk or a union's holder reads.
         const TargetType* owner; // The class whose field it is, which an overrun names.
         const TargetType::Field* field;
+        const TargetType* owningPointer; // The owning smart pointer the slot is part of, if any.
     };
     using Plan = Vector<Slot>;
     const Plan& planFor(const TargetType&, IsComplete, Except);
-    void buildPlan(Plan&, const TargetType&, uint64_t offset, IsComplete, Except, unsigned depth);
-    void addToPlan(Plan&, const TargetType&, uint64_t offset, const TargetType& owner, const TargetType::Field*, unsigned depth);
+    // `owningPointer` is the owning smart pointer that `type` is, or is part of, if any.
+    void buildPlan(Plan&, const TargetType&, uint64_t offset, IsComplete, Except, unsigned depth, const TargetType* owningPointer);
+    void addToPlan(Plan&, const TargetType&, uint64_t offset, const TargetType& owner, const TargetType::Field*, unsigned depth, const TargetType* owningPointer);
     // Union slots whose owner is `unionsReadBy` or one of its bases are left to the caller.
     void walkPlan(Address, const Plan&, const TargetType* unionsReadBy = nullptr);
     // Whether any member of a union holds something the walk follows.
@@ -1426,6 +1433,7 @@ void ReachWalk::walkCell(const HeapWalk::Cell& cell)
 
 void ReachWalk::walk(const TargetValue& value)
 {
+    m_contextOwningPointer = nullptr;
     walkInPlace(value.address(), value.type(), nullptr, nullptr);
 }
 
@@ -1433,6 +1441,7 @@ void ReachWalk::walkClass(const TargetValue& value)
 {
     m_contextClass = &value.type();
     m_contextField = nullptr;
+    m_contextOwningPointer = nullptr;
     if (walkByName(value))
         return;
     walkMembers(value, IsComplete::Yes);
@@ -1499,6 +1508,7 @@ void ReachWalk::walkMembers(const TargetValue& value, IsComplete isComplete, Exc
     SetForScope contextObject { m_contextObject, std::pair<Address, const TargetType*> { value.address(), &value.type() } };
     SetForScope contextClass { m_contextClass };
     SetForScope contextField { m_contextField };
+    SetForScope contextOwningPointer { m_contextOwningPointer };
     walkPlan(value.address(), planFor(value.type(), isComplete, except), readsOwnUnions == ReadsOwnUnions::Yes ? &value.type() : nullptr);
 }
 
@@ -1535,6 +1545,29 @@ static const TargetType::Field* untypedPointerOfUnion(const TargetType& type, co
     return result;
 }
 
+// The smart pointers that own what they point to. Every other pointer member, raw or a
+// CheckedPtr, does not: WebKit holds what a class owns in a smart pointer.
+static bool isOwningPointer(const TargetType& type)
+{
+    auto name = type.name();
+    std::string_view view { name.legacyCStringPointer() };
+    constexpr std::array<std::string_view, 13> owningPointers {
+        "WTF::Ref<", "WTF::RefPtr<", "WTF::UniqueRef<", "WTF::RetainPtr<", "WTF::OSObjectPtr<", "WTF::MallocPtr<", "WTF::CagedUniquePtr<",
+        "WTF::CompactUniquePtrTuple<", "WTF::CompactRefPtrTuple<", "std::__1::unique_ptr<", "std::unique_ptr<", "std::__1::shared_ptr<", "std::shared_ptr<",
+    };
+    return std::ranges::any_of(owningPointers, [&](std::string_view prefix) { return view.starts_with(prefix); });
+}
+
+// The owning smart pointer a member of class `type` is part of, inside `enclosing`'s: its own,
+// or, for a class of the standard library, such as the storage of a libstdc++ unique_ptr, the one it is in.
+static const TargetType* owningPointerOfMember(const TargetType& type, const TargetType* enclosing)
+{
+    if (isOwningPointer(type))
+        return &type;
+    auto name = type.name();
+    return std::string_view { name.legacyCStringPointer() }.starts_with("std::") ? enclosing : nullptr;
+}
+
 // The members of a class, flattened once per class into the values that may
 // lead somewhere: pointers, values a reader reads, and arrays of either.
 // Members that are integers, or classes of integers, lead nowhere.
@@ -1545,11 +1578,11 @@ auto ReachWalk::planFor(const TargetType& type, IsComplete isComplete, Except ex
     if (auto* plan = plans.get(key))
         return *plan;
     auto plan = makeUnique<Plan>();
-    buildPlan(*plan, type, 0, isComplete, except, 0);
+    buildPlan(*plan, type, 0, isComplete, except, 0, owningPointerOfMember(type, nullptr));
     return *plans.add(key, WTF::move(plan)).iterator->value;
 }
 
-void ReachWalk::buildPlan(Plan& plan, const TargetType& type, uint64_t offset, IsComplete isComplete, Except except, unsigned depth)
+void ReachWalk::buildPlan(Plan& plan, const TargetType& type, uint64_t offset, IsComplete isComplete, Except except, unsigned depth, const TargetType* owningPointer)
 {
     auto* klass = std::get_if<TargetType::Class>(&type.layout());
     // A class nests its members a few deep; a cycle would be a liblldb bug.
@@ -1558,9 +1591,9 @@ void ReachWalk::buildPlan(Plan& plan, const TargetType& type, uint64_t offset, I
     // Reading every member of a union follows pointers that are not pointers.
     if (klass->isUnion) {
         if (auto* pointer = untypedPointerOfUnion(type, [&](const TargetType& member) { return leadsNowhere(member); }))
-            plan.append({ offset, Slot::Kind::Pointer, &std::get<TargetType::Pointer>(pointer->type.layout()).pointee, &type, pointer });
+            plan.append({ offset, Slot::Kind::Pointer, &std::get<TargetType::Pointer>(pointer->type.layout()).pointee, &type, pointer, owningPointer });
         else if (unionLeadsSomewhere(type))
-            plan.append({ offset, Slot::Kind::Union, &type, &type, nullptr });
+            plan.append({ offset, Slot::Kind::Union, &type, &type, nullptr, owningPointer });
         return;
     }
     for (const TargetType::Field& field : klass->properFields) {
@@ -1568,13 +1601,15 @@ void ReachWalk::buildPlan(Plan& plan, const TargetType& type, uint64_t offset, I
         std::string_view name { field.name.legacyCStringPointer() };
         if (field.bitSize || !field.type.byteSize() || std::ranges::any_of(except, [&](const char* excepted) { return name == excepted; }))
             continue;
-        addToPlan(plan, field.type, offset + field.offset, type, &field, depth);
+        addToPlan(plan, field.type, offset + field.offset, type, &field, depth, owningPointer);
     }
+    // A base of an owning smart pointer, such as CagedUniquePtr's CagedPtr, is part of it.
     auto addBase = [&](const TargetType::Base& base) {
+        const TargetType* baseOwningPointer = isOwningPointer(base.type) ? &base.type : owningPointer;
         if (readerFor(base.type) != Reader::None)
-            plan.append({ offset + base.offset, Slot::Kind::Reader, &base.type, &base.type, nullptr });
+            plan.append({ offset + base.offset, Slot::Kind::Reader, &base.type, &base.type, nullptr, baseOwningPointer });
         else
-            buildPlan(plan, base.type, offset + base.offset, IsComplete::No, { }, depth + 1);
+            buildPlan(plan, base.type, offset + base.offset, IsComplete::No, { }, depth + 1, baseOwningPointer);
     };
     for (const TargetType::Base& base : klass->bases)
         addBase(base);
@@ -1585,29 +1620,29 @@ void ReachWalk::buildPlan(Plan& plan, const TargetType& type, uint64_t offset, I
     }
 }
 
-void ReachWalk::addToPlan(Plan& plan, const TargetType& type, uint64_t offset, const TargetType& owner, const TargetType::Field* field, unsigned depth)
+void ReachWalk::addToPlan(Plan& plan, const TargetType& type, uint64_t offset, const TargetType& owner, const TargetType::Field* field, unsigned depth, const TargetType* owningPointer)
 {
     const TargetType::Layout& layout = type.layout();
     if (auto* klass = std::get_if<TargetType::Class>(&layout)) {
         if (readerFor(type) != Reader::None)
-            plan.append({ offset, Slot::Kind::Reader, &type, &owner, field });
+            plan.append({ offset, Slot::Kind::Reader, &type, &owner, field, owningPointer });
         else if (klass->isUnion) {
             if (auto* pointer = untypedPointerOfUnion(type, [&](const TargetType& member) { return leadsNowhere(member); }))
-                plan.append({ offset, Slot::Kind::Pointer, &std::get<TargetType::Pointer>(pointer->type.layout()).pointee, &type, pointer });
+                plan.append({ offset, Slot::Kind::Pointer, &std::get<TargetType::Pointer>(pointer->type.layout()).pointee, &type, pointer, owningPointer });
             else if (unionLeadsSomewhere(type))
-                plan.append({ offset, Slot::Kind::Union, &type, &owner, field });
+                plan.append({ offset, Slot::Kind::Union, &type, &owner, field, owningPointer });
         } else
-            buildPlan(plan, type, offset, IsComplete::Yes, { }, depth + 1);
+            buildPlan(plan, type, offset, IsComplete::Yes, { }, depth + 1, owningPointerOfMember(type, owningPointer));
         return;
     }
     if (auto* pointer = std::get_if<TargetType::Pointer>(&layout)) {
-        plan.append({ offset, Slot::Kind::Pointer, &pointer->pointee, &owner, field });
+        plan.append({ offset, Slot::Kind::Pointer, &pointer->pointee, &owner, field, owningPointer });
         return;
     }
     if (auto* array = std::get_if<TargetType::Array>(&layout)) {
         if (!array->count || !array->element.byteSize() || std::holds_alternative<TargetType::Integer>(array->element.layout()) || std::holds_alternative<TargetType::Other>(array->element.layout()))
             return;
-        plan.append({ offset, Slot::Kind::Array, &type, &owner, field });
+        plan.append({ offset, Slot::Kind::Array, &type, &owner, field, owningPointer });
     }
 }
 
@@ -1656,17 +1691,21 @@ void ReachWalk::walkPlan(Address address, const Plan& plan, const TargetType* un
                 break;
             m_contextClass = slot.owner;
             m_contextField = slot.field;
+            m_contextOwningPointer = slot.owningPointer;
             m_contextSlot = slotAddress;
             followPointer(Address { word }.stripped(), *slot.type);
             m_contextSlot = { };
             break;
         }
-        case Slot::Kind::Reader:
+        case Slot::Kind::Reader: {
             m_contextClass = slot.type;
             m_contextField = nullptr;
+            SetForScope contextOwningPointer { m_contextOwningPointer, slot.owningPointer };
             walkByName(TargetValue::at(m_snapshot, slotAddress, *slot.type));
             break;
+        }
         case Slot::Kind::Array:
+            m_contextOwningPointer = slot.owningPointer;
             walkInPlace(slotAddress, *slot.type, slot.owner, slot.field);
             break;
         case Slot::Kind::Union:
@@ -1805,6 +1844,34 @@ void ReachWalk::follow(Address address, const TargetType& type)
         return;
     }
     enqueue(TargetValue::at(m_snapshot, address, type), IsObject::Yes);
+}
+
+bool ReachWalk::ownsWhatItHolds()
+{
+    // A pointer member, even one of a class a reader reads, owns only as part of an owning smart pointer.
+    if (m_contextSlot)
+        return m_contextOwningPointer;
+    if (m_contextClass) {
+        switch (readerFor(*m_contextClass)) {
+        case Reader::None:
+        case Reader::Optional:
+        case Reader::Variant:
+        case Reader::Atomic:
+        case Reader::CompactPointer:
+        case Reader::PackedPointer:
+        case Reader::CompactPointerTuple:
+            break;
+        // A JSValue holds a JS cell, so one that lands in a C++ object is a stale word.
+        case Reader::JSValue:
+        case Reader::WeakPointer:
+        case Reader::Span:
+        case Reader::CodePointer:
+            return false;
+        default:
+            return true;
+        }
+    }
+    return m_contextOwningPointer;
 }
 
 // Readers for the classes the debug info cannot describe, picked once per type
@@ -4061,7 +4128,7 @@ auto HeapWalk::libpasPages(const LibpasRecords& records) const -> std::optional<
 }
 #endif
 
-auto HeapWalk::heapDump(const Vector<Allocation>& allocations, const Reach& reach, const Vector<Reference>& references) const -> HeapDump
+auto HeapWalk::heapDump(const Vector<Allocation>& allocations, const Reach& reach, const Vector<Reference>& references, const HeapDump* collector) const -> HeapDump
 {
     HeapDump dump;
     if (!isValid())
@@ -4126,9 +4193,14 @@ auto HeapWalk::heapDump(const Vector<Allocation>& allocations, const Reach& reac
     // - A handle's cell is a reference of whatever holds the handle, not of the block
     //   its slot is in, which holds the handles of every owner. A slot nothing reached
     //   holds its cell itself: a Strong is a root of its own.
-    // - A Weak keeps nothing alive, nor does an opaque root: the collector's set of them,
-    //   the only ConcurrentPtrHashSet, records what marking found, such as a removed DOM
-    //   tree's root, which what holds the tree keeps alive.
+    // - A Weak keeps nothing alive. An opaque root is no reference at all: the collector's set
+    //   of them, the only ConcurrentPtrHashSet, records what its last marking found, such as a
+    //   removed DOM tree's root, which what holds the tree keeps alive.
+    // - A C++ object keeps what it points to alive only through an owning smart pointer or a
+    //   container's storage. A raw pointer or a CheckedPtr, such as a DOM node's to its parent,
+    //   is weak. A root holds whatever it points to, but a thread's stack, whose words have no
+    //   type, holds only the JS cells the collector scans it for: a stale word owns no C++ object,
+    //   so its word is untraced, the last way to reach one.
     // - The collector marks a cell only through another cell's visitChildren, a Strong
     //   handle or a stack. A traced slot (a JSValue, a WriteBarrier, a StructureID) in C++
     //   memory keeps its cell alive only if a cell visits it, which memory does not show:
@@ -4188,11 +4260,18 @@ auto HeapWalk::heapDump(const Vector<Allocation>& allocations, const Reach& reac
             return;
         if (outgoing.size() < dump.nodes.size())
             outgoing.resize(dump.nodes.size());
-        if (!strength && dump.nodes[*from].className.startsWith("WTF::ConcurrentPtrHashSet::"_s))
-            strength = Strength::Weak;
+        if (dump.nodes[*from].className.startsWith("WTF::ConcurrentPtrHashSet::"_s))
+            return;
+        // A handle holds a JS cell, so a handle slot whose word lands in a C++ object is a stale one, such as a free slot.
+        if (strength && !isJSCell(*to))
+            strength = Strength::Untraced;
         if (!strength) {
             bool isStack = reference.root && std::string_view { reference.root } == "a thread's stack";
-            if (!isJSCell(*to) || isJSCell(*from) || isStack)
+            if (!isJSCell(*to) && isStack)
+                strength = Strength::Untraced;
+            else if (!isJSCell(*to))
+                strength = reference.owns || dump.nodes[*from].kind == HeapDump::Kind::Root ? Strength::Strong : Strength::Weak;
+            else if (isJSCell(*from) || isStack)
                 strength = Strength::Strong;
             else
                 strength = isTraced(reference.holder) ? Strength::Weak : Strength::Untraced;
@@ -4230,6 +4309,84 @@ auto HeapWalk::heapDump(const Vector<Allocation>& allocations, const Reach& reac
             continue;
         }
         addEdge(reference, reference.to, std::nullopt);
+    }
+    if (collector) {
+        // The pairs of cells, by address, the collector marked a reference between, with the
+        // collector's name for it: a property's or a variable's, an index, or none.
+        HashMap<std::pair<uint64_t, uint64_t>, String> marked;
+        for (auto& edge : collector->edges) {
+            const HeapDump::Node& from = collector->nodes[edge.from];
+            const HeapDump::Node& to = collector->nodes[edge.to];
+            if (from.kind == HeapDump::Kind::Cell && to.kind == HeapDump::Kind::Cell)
+                marked.add({ from.address.toTargetVMAddress(), to.address.toTargetVMAddress() }, edge.label);
+        }
+        Vector<Vector<uint32_t>> owners(dump.nodes.size());
+        for (uint32_t node = 0; node < dump.nodes.size(); ++node) {
+            for (auto [to, strength] : outgoing[node]) {
+                if (strength == Strength::Strong && dump.nodes[to].kind == HeapDump::Kind::Allocation)
+                    owners[to].append(node);
+            }
+        }
+        // The cells that own a C++ object, through owning references and other C++ objects alone.
+        constexpr size_t maximumOwnersSearched = 256;
+        auto owningCells = [&](uint32_t object) {
+            Vector<uint32_t> cells;
+            HashSet<uint32_t> visited { object + 1 };
+            Vector<uint32_t> worklist { object };
+            while (!worklist.isEmpty() && visited.size() < maximumOwnersSearched) {
+                for (uint32_t owner : owners[worklist.takeLast()]) {
+                    if (!visited.add(owner + 1).isNewEntry)
+                        continue;
+                    if (isJSCell(owner))
+                        cells.append(owner);
+                    else if (dump.nodes[owner].kind == HeapDump::Kind::Allocation)
+                        worklist.append(owner);
+                }
+            }
+            return cells;
+        };
+        // The reference a cell marks through its storage is the cell's own: an edge from the cell that
+        // marks it, named as the collector names it, or else by the slot. The slot stays weak, so another
+        // owner of the storage, such as an unlinked code block sharing a metadata table, does not hold
+        // what only one owner marks.
+        Vector<std::tuple<uint32_t, uint32_t, String>> markedReferences;
+        for (uint32_t node = 0; node < dump.nodes.size(); ++node) {
+            if (dump.nodes[node].kind != HeapDump::Kind::Allocation)
+                continue;
+            std::optional<Vector<uint32_t>> cells;
+            for (auto [to, strength] : outgoing[node]) {
+                if (strength == Strength::Strong || !isJSCell(to))
+                    continue;
+                if (!cells)
+                    cells = owningCells(node);
+                uint64_t target = dump.nodes[to].address.toTargetVMAddress();
+                for (uint32_t cell : *cells) {
+                    auto name = cell != to ? marked.find({ dump.nodes[cell].address.toTargetVMAddress(), target }) : marked.end();
+                    if (name != marked.end())
+                        markedReferences.append({ cell, to, name->value.isEmpty() ? labels.get((static_cast<uint64_t>(node) << 32) | to) : name->value });
+                }
+            }
+        }
+        for (auto& [cell, to, slot] : markedReferences) {
+            uint64_t key = (static_cast<uint64_t>(cell) << 32) | to;
+            if (seen.add(key).isNewEntry) {
+                outgoing[cell].append({ to, Strength::Strong });
+                ++dump.referencesTheCollectorMarks;
+            } else {
+                for (auto& edge : outgoing[cell]) {
+                    if (edge.first == to && edge.second != Strength::Strong) {
+                        edge.second = Strength::Strong;
+                        ++dump.referencesTheCollectorMarks;
+                    }
+                }
+            }
+            String label = makeString(slot, slot.isEmpty() ? ""_s : " "_s, "(the collector marks it)"_s);
+            auto& labelsOfEdge = labels.add(key, String { }).iterator->value;
+            if (labelsOfEdge.isEmpty())
+                labelsOfEdge = WTF::move(label);
+            else if (!labelsOfEdge.split(", "_s).contains(label))
+                labelsOfEdge = makeString(labelsOfEdge, ", "_s, label);
+        }
     }
     // Every strong edge from what <root> reaches; then, while some node is reached by
     // none, the weak edges into the nodes not yet reached, from those reached, or, if there
@@ -4351,14 +4508,14 @@ auto HeapWalk::HeapDump::fromJSON(const String& json) -> std::optional<HeapDump>
     return dump;
 }
 
-auto HeapWalk::heapDump() const -> std::optional<HeapDump>
+auto HeapWalk::heapDump(const HeapDump* collector) const -> std::optional<HeapDump>
 {
     auto allocations = libpasAllocations();
     if (!allocations)
         return std::nullopt;
     Vector<Reference> references;
     Reach reach = this->reach(*allocations, { }, { }, 0, &references);
-    return heapDump(*allocations, reach, references);
+    return heapDump(*allocations, reach, references, collector);
 }
 
 std::optional<uint32_t> HeapWalk::HeapDump::nodeAt(Address address) const
@@ -4475,35 +4632,57 @@ String HeapWalk::HeapDump::json() const
             return static_cast<unsigned>(orderedClassNames.size() - 1);
         }).iterator->value;
     };
+    // The labels: "" first, then "JS cell", then each root's name.
+    Vector<String> labels { ""_s, "JS cell"_s };
+    constexpr unsigned jsCellLabel = 1;
     out.append("{\"version\":3,\"type\":\"GCDebugging\",\"nodes\":["_s);
     for (size_t index = 0; index < nodes.size(); ++index) {
         const Node& node = nodes[index];
         // <nodeId>, <sizeInBytes>, <nodeClassNameIndex>, <flags>, <labelIndex>, <cellAddress>, <wrappedAddress>.
         // Web Inspector finds no path to a root through an internal node (flag 1).
         unsigned flags = node.kind == Kind::Missed || (node.kind == Kind::Allocation && node.isBlock) ? 1 : 0;
-        out.append(index ? ","_s : ""_s, index, ',', node.size, ',', classNameIndex(node.className), ',', flags, ",0,\"0x"_s,
+        out.append(index ? ","_s : ""_s, index, ',', node.size, ',', classNameIndex(node.className), ',', flags, ',', node.kind == Kind::Cell ? jsCellLabel : 0, ",\"0x"_s,
             hex(node.address.toTargetVMAddress(), Lowercase), "\",\"0x0\""_s);
     }
     out.append("],\"nodeClassNames\":["_s);
     for (size_t index = 0; index < orderedClassNames.size(); ++index)
         out.append(index ? ","_s : ""_s, '"', orderedClassNames[index], '"');
     out.append("],\"edges\":["_s);
-    // Those that retain, so that Web Inspector's retained sizes are retention()'s.
+    // Those that retain, so that Web Inspector's retained sizes are retention()'s. A named edge is
+    // a Property, whose <data> is its name's index.
+    HashMap<String, unsigned> edgeNames;
+    Vector<String> orderedEdgeNames;
     bool isFirstEdge = true;
     for (auto& edge : edges) {
         if (!edge.retains)
             continue;
-        out.append(isFirstEdge ? ""_s : ","_s, edge.from, ',', edge.to, ",0,0"_s);
+        String name = edge.label;
+        if (edge.kind != EdgeKind::Strong)
+            name = makeString(name, name.isEmpty() ? ""_s : " "_s, edge.kind == EdgeKind::Weak ? "(weak)"_s : "(untraced)"_s);
+        out.append(isFirstEdge ? ""_s : ","_s, edge.from, ',', edge.to);
+        if (name.isEmpty())
+            out.append(",0,0"_s);
+        else {
+            unsigned nameIndex = edgeNames.ensure(name, [&] {
+                orderedEdgeNames.append(name);
+                return static_cast<unsigned>(orderedEdgeNames.size() - 1);
+            }).iterator->value;
+            out.append(",1,"_s, nameIndex);
+        }
         isFirstEdge = false;
     }
-    out.append("],\"edgeTypes\":[\"Internal\",\"Property\",\"Index\",\"Variable\"],\"edgeNames\":[],\"roots\":["_s);
+    out.append("],\"edgeTypes\":[\"Internal\",\"Property\",\"Index\",\"Variable\"],\"edgeNames\":["_s);
+    for (size_t index = 0; index < orderedEdgeNames.size(); ++index)
+        out.append(index ? ","_s : ""_s, '"', orderedEdgeNames[index], '"');
+    out.append("],\"roots\":["_s);
     // <nodeId>, <rootReasonIndex>, <reachabilityReasonIndex>; each root's reason is its name, a label.
-    Vector<String> labels { ""_s };
+    bool isFirstRoot = true;
     for (size_t index = 1; index < nodes.size(); ++index) {
         if (nodes[index].kind != Kind::Root)
             continue;
-        out.append(labels.size() > 1 ? ","_s : ""_s, index, ',', labels.size(), ",0"_s);
+        out.append(isFirstRoot ? ""_s : ","_s, index, ',', labels.size(), ",0"_s);
         labels.append(nodes[index].className);
+        isFirstRoot = false;
     }
     out.append("],\"labels\":["_s);
     for (size_t index = 0; index < labels.size(); ++index)

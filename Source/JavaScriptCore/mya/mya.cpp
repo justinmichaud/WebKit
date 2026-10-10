@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2026 Apple Inc. All rights reserved.
+ * Copyright (C) 2026 Igalia S.L.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -61,6 +62,7 @@
 #include <wtf/Assertions.h>
 #include <wtf/CheckedArithmetic.h>
 #include <wtf/DoublyLinkedList.h>
+#include <wtf/FileSystem.h>
 #include <wtf/HashMap.h>
 #include <wtf/MonotonicTime.h>
 #include <wtf/Ref.h>
@@ -227,7 +229,9 @@ private:
         fputs("  snapshot (sn, snap) ...   Capture and manage snapshots\n", out);
         fputs("  thread (th) ...           Inspect the threads in a snapshot\n", out);
         fputs("  heap [<vm>]               Walk the JS heap of the VM at <vm>, or of WebCore's main VM\n", out);
-        fputs("  heapdump <file> [<vm>]    Write the heap as a GCDebugging heap snapshot Web Inspector reads\n", out);
+        fputs("  heapdump <file> [--collector <snapshot>] [<vm>]\n", out);
+        fputs("                            Write the heap as a GCDebugging heap snapshot Web Inspector reads; JSC's own\n", out);
+        fputs("                            snapshot of the same heap says which references in C++ storage its collector marks\n", out);
         fputs("  refs <start> <end>        List the words of writable memory that hold an address in [start, end)\n", out);
 #if OS(DARWIN)
         fputs("  memory [<vm>]             Account for the target's footprint by VM tag, and for libpas's pages\n", out);
@@ -876,7 +880,9 @@ private:
     }
 #endif
 
-    // `heapdump <file> [<vm>]`: the walk's heap dump, as a GCDebugging heap snapshot Web Inspector reads.
+    // `heapdump <file> [--collector <snapshot>] [<vm>]`: the walk's heap dump, as a GCDebugging heap
+    // snapshot Web Inspector reads. <snapshot> is JSC's own of the same heap, such as the one
+    // com.apple.WebKit.dumpGCHeap writes, which says which references its collector marks through.
     void handleHeapDump(Lexer lex)
     {
         using JSC::Corpse::HeapWalk;
@@ -885,11 +891,26 @@ private:
             SAFE_FPRINTF(stderr, "No snapshot in use. Capture one with `snapshot`, or select one with `snapshot <n>`.\n");
             return;
         }
+        constexpr const char* usage = "Usage: heapdump <file> [--collector <JSC's heap snapshot>] [<vm address, in hex>]\n";
         if (lex.atEnd()) {
-            fputs("Usage: heapdump <file> [<vm address, in hex>]\n", stderr);
+            fputs(usage, stderr);
             return;
         }
         std::string path { lex.nextToken() };
+        std::optional<HeapWalk::HeapDump> collector;
+        if (lex.consumeToken("--collector")) {
+            if (lex.atEnd()) {
+                fputs(usage, stderr);
+                return;
+            }
+            String collectorPath = String::fromUTF8(std::string { lex.nextToken() }.c_str());
+            auto bytes = FileSystem::readEntireFile(collectorPath);
+            collector = bytes ? HeapWalk::HeapDump::fromJSON(String::fromUTF8(bytes->span())) : std::nullopt;
+            if (!collector) {
+                SAFE_FPRINTF(stderr, "mya: %s is no GCDebugging heap snapshot\n", collectorPath.utf8());
+                return;
+            }
+        }
         Address vm;
         Address javaScriptCore;
         if (!findHeap(*snapshot, lex, vm, javaScriptCore))
@@ -902,7 +923,7 @@ private:
         }
         Vector<HeapWalk::Reference> references;
         HeapWalk::Reach reach = heap.reach(*allocations, { }, { }, 0, &references);
-        HeapWalk::HeapDump dump = heap.heapDump(*allocations, reach, references);
+        HeapWalk::HeapDump dump = heap.heapDump(*allocations, reach, references, collector ? &*collector : nullptr);
         CString json = dump.json().utf8();
         FILE* file = fopen(path.c_str(), "w");
         IGNORE_CLANG_WARNINGS_BEGIN("unsafe-buffer-usage-in-libc-call")
@@ -926,6 +947,8 @@ private:
             static_cast<unsigned long long>(bytesByKind[static_cast<size_t>(HeapWalk::HeapDump::Kind::Cell)]),
             static_cast<unsigned long long>(bytesByKind[static_cast<size_t>(HeapWalk::HeapDump::Kind::Allocation)]),
             static_cast<unsigned long long>(bytesByKind[static_cast<size_t>(HeapWalk::HeapDump::Kind::Missed)]), references.size());
+        if (collector)
+            SAFE_PRINTF("  %zu strong edges between cells come from the collector's snapshot, each a reference a cell marks through its C++ storage\n", dump.referencesTheCollectorMarks);
 #if OS(DARWIN)
         auto records = heap.libpasRecords();
         auto pages = records ? heap.libpasPages(*records) : std::nullopt;

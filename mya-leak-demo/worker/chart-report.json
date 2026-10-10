@@ -1,0 +1,1311 @@
+[
+ {
+  "snapshot": "worker/capture/jsc.json",
+  "nodes": 2862,
+  "bytes": 178194,
+  "cyclic": 0,
+  "unreachedBytes": 0,
+  "tree": {
+   "key": "<root>",
+   "count": 1,
+   "folded": 0,
+   "retained": 178194,
+   "held": 178194,
+   "self": 0,
+   "cyclic": 0,
+   "unreached": 0,
+   "link": "",
+   "holders": [],
+   "children": [
+    {
+     "key": "Window",
+     "count": 2,
+     "folded": 0,
+     "retained": 115410,
+     "held": 115410,
+     "self": 4617,
+     "cyclic": 0,
+     "unreached": 0,
+     "link": "",
+     "holders": [
+      "Function (x522)",
+      "Structure (x195)",
+      "FunctionCodeBlock (x3)",
+      "3 more holders"
+     ],
+     "children": [
+      {
+       "key": "Function",
+       "count": 201,
+       "folded": 14,
+       "retained": 46315,
+       "held": 46315,
+       "self": 7211,
+       "cyclic": 0,
+       "unreached": 0,
+       "link": "",
+       "holders": [],
+       "children": [
+        {
+         "key": "FunctionExecutable",
+         "count": 157,
+         "folded": 0,
+         "retained": 31376,
+         "held": 31376,
+         "self": 20096,
+         "cyclic": 0,
+         "unreached": 0,
+         "link": "",
+         "holders": [],
+         "children": [
+          {
+           "key": "UnlinkedFunctionExecutable",
+           "count": 141,
+           "folded": 0,
+           "retained": 11280,
+           "held": 11280,
+           "self": 11280,
+           "cyclic": 0,
+           "unreached": 0,
+           "link": "",
+           "holders": [],
+           "children": [],
+           "other": null,
+           "_x": 0,
+           "_y": 497
+          }
+         ],
+         "other": null,
+         "_x": 0.0,
+         "_y": 389
+        }
+       ],
+       "other": [
+        5,
+        7728,
+        ""
+       ],
+       "_ox": 268,
+       "_oy": 389,
+       "_x": 134.0,
+       "_y": 268
+      },
+      {
+       "key": "Document",
+       "count": 1,
+       "folded": 0,
+       "retained": 15814,
+       "held": 15814,
+       "self": 254,
+       "cyclic": 0,
+       "unreached": 0,
+       "link": "",
+       "holders": [
+        "Structure (x2)"
+       ],
+       "children": [
+        {
+         "key": "DOMAttributeGetterSetter",
+         "count": 174,
+         "folded": 0,
+         "retained": 8352,
+         "held": 8352,
+         "self": 8352,
+         "cyclic": 0,
+         "unreached": 0,
+         "link": "onloadeddata (1 of 174)",
+         "holders": [],
+         "children": [],
+         "other": null,
+         "_x": 536,
+         "_y": 389
+        },
+        {
+         "key": "Function",
+         "count": 56,
+         "folded": 0,
+         "retained": 6272,
+         "held": 6272,
+         "self": 1792,
+         "cyclic": 0,
+         "unreached": 0,
+         "link": "createElement (1 of 56)",
+         "holders": [],
+         "children": [
+          {
+           "key": "NativeExecutable",
+           "count": 56,
+           "folded": 0,
+           "retained": 4480,
+           "held": 4480,
+           "self": 4480,
+           "cyclic": 0,
+           "unreached": 0,
+           "link": "",
+           "holders": [],
+           "children": [],
+           "other": null,
+           "_x": 804,
+           "_y": 497
+          }
+         ],
+         "other": null,
+         "_x": 804.0,
+         "_y": 389
+        }
+       ],
+       "other": [
+        4,
+        936,
+        ""
+       ],
+       "_ox": 1072,
+       "_oy": 389,
+       "_x": 804.0,
+       "_y": 268
+      },
+      {
+       "key": "Structure",
+       "count": 66,
+       "folded": 2,
+       "retained": 10342,
+       "held": 10342,
+       "self": 7616,
+       "cyclic": 0,
+       "unreached": 0,
+       "link": "",
+       "holders": [],
+       "children": [],
+       "other": [
+        7,
+        2726,
+        ""
+       ],
+       "_ox": 1340,
+       "_oy": 389,
+       "_x": 1340.0,
+       "_y": 268
+      },
+      {
+       "key": "CustomGetterSetter",
+       "count": 311,
+       "folded": 0,
+       "retained": 9952,
+       "held": 9952,
+       "self": 9952,
+       "cyclic": 0,
+       "unreached": 0,
+       "link": "RTCSessionDescription (2 of 311)",
+       "holders": [],
+       "children": [],
+       "other": null,
+       "_x": 1608,
+       "_y": 268
+      }
+     ],
+     "other": [
+      36,
+      28370,
+      ""
+     ],
+     "_ox": 1876,
+     "_oy": 268,
+     "_x": 1005.0,
+     "_y": 108
+    },
+    {
+     "key": "Function",
+     "count": 14,
+     "folded": 14,
+     "retained": 16130,
+     "held": 16130,
+     "self": 1010,
+     "cyclic": 0,
+     "unreached": 0,
+     "link": "",
+     "holders": [
+      "Structure (x49)",
+      "GetterSetter (x26)",
+      "Window (x13)",
+      "10 more holders"
+     ],
+     "children": [
+      {
+       "key": "FunctionExecutable",
+       "count": 4,
+       "folded": 0,
+       "retained": 12960,
+       "held": 12960,
+       "self": 512,
+       "cyclic": 0,
+       "unreached": 0,
+       "link": "",
+       "holders": [],
+       "children": [
+        {
+         "key": "FunctionCodeBlock",
+         "count": 2,
+         "folded": 0,
+         "retained": 11968,
+         "held": 11968,
+         "self": 11968,
+         "cyclic": 0,
+         "unreached": 0,
+         "link": "",
+         "holders": [],
+         "children": [],
+         "other": null,
+         "_x": 2144,
+         "_y": 389
+        }
+       ],
+       "other": [
+        2,
+        480,
+        ""
+       ],
+       "_ox": 2412,
+       "_oy": 389,
+       "_x": 2278.0,
+       "_y": 268
+      }
+     ],
+     "other": [
+      4,
+      2160,
+      ""
+     ],
+     "_ox": 2680,
+     "_oy": 268,
+     "_x": 2479.0,
+     "_y": 108
+    },
+    {
+     "key": "Element",
+     "count": 1,
+     "folded": 0,
+     "retained": 11971,
+     "held": 11971,
+     "self": 170,
+     "cyclic": 0,
+     "unreached": 0,
+     "link": "",
+     "holders": [
+      "Structure (x2)",
+      "FunctionCodeBlock"
+     ],
+     "children": [
+      {
+       "key": "Function",
+       "count": 55,
+       "folded": 0,
+       "retained": 6160,
+       "held": 6160,
+       "self": 1760,
+       "cyclic": 0,
+       "unreached": 0,
+       "link": "hasAttributes (1 of 55)",
+       "holders": [],
+       "children": [
+        {
+         "key": "NativeExecutable",
+         "count": 55,
+         "folded": 0,
+         "retained": 4400,
+         "held": 4400,
+         "self": 4400,
+         "cyclic": 0,
+         "unreached": 0,
+         "link": "",
+         "holders": [],
+         "children": [],
+         "other": null,
+         "_x": 2948,
+         "_y": 389
+        }
+       ],
+       "other": null,
+       "_x": 2948.0,
+       "_y": 268
+      },
+      {
+       "key": "DOMAttributeGetterSetter",
+       "count": 93,
+       "folded": 0,
+       "retained": 4464,
+       "held": 4464,
+       "self": 4464,
+       "cyclic": 0,
+       "unreached": 0,
+       "link": "ariaRowIndex (1 of 93)",
+       "holders": [],
+       "children": [],
+       "other": null,
+       "_x": 3216,
+       "_y": 268
+      }
+     ],
+     "other": [
+      4,
+      1177,
+      ""
+     ],
+     "_ox": 3484,
+     "_oy": 268,
+     "_x": 3216.0,
+     "_y": 108
+    },
+    {
+     "key": "HTMLElement",
+     "count": 1,
+     "folded": 0,
+     "retained": 7758,
+     "held": 7758,
+     "self": 163,
+     "cyclic": 0,
+     "unreached": 0,
+     "link": "",
+     "holders": [
+      "Structure (x2)",
+      "FunctionCodeBlock"
+     ],
+     "children": [
+      {
+       "key": "DOMAttributeGetterSetter",
+       "count": 136,
+       "folded": 0,
+       "retained": 6528,
+       "held": 6528,
+       "self": 6528,
+       "cyclic": 0,
+       "unreached": 0,
+       "link": "onscroll (1 of 136)",
+       "holders": [],
+       "children": [],
+       "other": null,
+       "_x": 3752,
+       "_y": 268
+      }
+     ],
+     "other": [
+      4,
+      1067,
+      ""
+     ],
+     "_ox": 4020,
+     "_oy": 268,
+     "_x": 3886.0,
+     "_y": 108
+    }
+   ],
+   "other": [
+    21,
+    26925,
+    ""
+   ],
+   "_ox": 4288,
+   "_oy": 108,
+   "_x": 2646.5,
+   "_y": 0
+  },
+  "topRetainers": [
+   {
+    "id": 454,
+    "class": "Window",
+    "retained": 114874,
+    "self": 4600,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 503,
+    "class": "Document",
+    "retained": 15814,
+    "self": 254,
+    "dominator": 454,
+    "dominatorClass": "Window"
+   },
+   {
+    "id": 2117,
+    "class": "Function",
+    "retained": 12608,
+    "self": 32,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 2173,
+    "class": "FunctionExecutable",
+    "retained": 12576,
+    "self": 128,
+    "dominator": 2117,
+    "dominatorClass": "Function"
+   },
+   {
+    "id": 1026,
+    "class": "Element",
+    "retained": 11971,
+    "self": 170,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 784,
+    "class": "HTMLElement",
+    "retained": 7758,
+    "self": 163,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 2209,
+    "class": "FunctionCodeBlock",
+    "retained": 6496,
+    "self": 6496,
+    "dominator": 2173,
+    "dominatorClass": "FunctionExecutable"
+   },
+   {
+    "id": 2246,
+    "class": "FunctionCodeBlock",
+    "retained": 5472,
+    "self": 5472,
+    "dominator": 2173,
+    "dominatorClass": "FunctionExecutable"
+   },
+   {
+    "id": 2524,
+    "class": "Array",
+    "retained": 5340,
+    "self": 66,
+    "dominator": 454,
+    "dominatorClass": "Window"
+   },
+   {
+    "id": 2472,
+    "class": "String",
+    "retained": 4490,
+    "self": 74,
+    "dominator": 454,
+    "dominatorClass": "Window"
+   },
+   {
+    "id": 2488,
+    "class": "Iterator",
+    "retained": 2851,
+    "self": 35,
+    "dominator": 454,
+    "dominatorClass": "Window"
+   },
+   {
+    "id": 816,
+    "class": "Node",
+    "retained": 2693,
+    "self": 65,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 1743,
+    "class": "Function",
+    "retained": 1520,
+    "self": 62,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 2487,
+    "class": "Object",
+    "retained": 1340,
+    "self": 28,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 1864,
+    "class": "ArrayBuffer",
+    "retained": 1237,
+    "self": 26,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 2214,
+    "class": "AsyncDisposableStack",
+    "retained": 1165,
+    "self": 25,
+    "dominator": 454,
+    "dominatorClass": "Window"
+   },
+   {
+    "id": 2336,
+    "class": "DisposableStack",
+    "retained": 1160,
+    "self": 25,
+    "dominator": 454,
+    "dominatorClass": "Window"
+   },
+   {
+    "id": 1282,
+    "class": "Object",
+    "retained": 962,
+    "self": 66,
+    "dominator": 1026,
+    "dominatorClass": "Element"
+   },
+   {
+    "id": 1290,
+    "class": "Structure",
+    "retained": 896,
+    "self": 112,
+    "dominator": 1282,
+    "dominatorClass": "Object"
+   },
+   {
+    "id": 1934,
+    "class": "Function",
+    "retained": 890,
+    "self": 56,
+    "dominator": 454,
+    "dominatorClass": "Window"
+   },
+   {
+    "id": 2123,
+    "class": "Function",
+    "retained": 873,
+    "self": 55,
+    "dominator": 454,
+    "dominatorClass": "Window"
+   },
+   {
+    "id": 2810,
+    "class": "ArrayBuffer",
+    "retained": 872,
+    "self": 23,
+    "dominator": 454,
+    "dominatorClass": "Window"
+   },
+   {
+    "id": 2025,
+    "class": "Object",
+    "retained": 868,
+    "self": 36,
+    "dominator": 454,
+    "dominatorClass": "Window"
+   },
+   {
+    "id": 2312,
+    "class": "Function",
+    "retained": 820,
+    "self": 36,
+    "dominator": 454,
+    "dominatorClass": "Window"
+   },
+   {
+    "id": 1304,
+    "class": "Structure",
+    "retained": 784,
+    "self": 112,
+    "dominator": 1290,
+    "dominatorClass": "Structure"
+   },
+   {
+    "id": 2849,
+    "class": "Structure",
+    "retained": 747,
+    "self": 112,
+    "dominator": 454,
+    "dominatorClass": "Window"
+   },
+   {
+    "id": 2322,
+    "class": "Function",
+    "retained": 724,
+    "self": 66,
+    "dominator": 454,
+    "dominatorClass": "Window"
+   },
+   {
+    "id": 2420,
+    "class": "WebAssembly",
+    "retained": 690,
+    "self": 23,
+    "dominator": 454,
+    "dominatorClass": "Window"
+   },
+   {
+    "id": 245,
+    "class": "UnlinkedProgramCodeBlock",
+    "retained": 675,
+    "self": 650,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 1350,
+    "class": "Structure",
+    "retained": 672,
+    "self": 112,
+    "dominator": 1304,
+    "dominatorClass": "Structure"
+   }
+  ]
+ },
+ {
+  "snapshot": "worker/capture/mya.json",
+  "nodes": 33200,
+  "bytes": 6092352,
+  "cyclic": 2143,
+  "unreachedBytes": 89776,
+  "tree": {
+   "key": "<root>",
+   "count": 1,
+   "folded": 0,
+   "retained": 4239648,
+   "held": 6092352,
+   "self": 0,
+   "cyclic": 0,
+   "unreached": 0,
+   "link": "",
+   "holders": [],
+   "children": [
+    {
+     "key": "JSC::VM",
+     "count": 2,
+     "folded": 0,
+     "retained": 1958032,
+     "held": 1958288,
+     "self": 221184,
+     "cyclic": 0,
+     "unreached": 0,
+     "link": "",
+     "holders": [
+      "<a global variable>: <a global variable> (x2)",
+      "<the VM>: <the VM>",
+      "<WebConfig::g_config>: DoublyLinkedList<VMThreadContext>::m_head",
+      "2 more holders"
+     ],
+     "children": [
+      {
+       "key": "JSC::MegamorphicCache",
+       "count": 2,
+       "folded": 0,
+       "retained": 282048,
+       "held": 282048,
+       "self": 282048,
+       "cyclic": 0,
+       "unreached": 0,
+       "link": "WTF::LazyUniqueRef<JSC::VM, JSC::MegamorphicCache>",
+       "holders": [],
+       "children": [],
+       "other": null,
+       "_x": 0,
+       "_y": 268
+      },
+      {
+       "key": "JSC::MarkedBlock less its cells",
+       "count": 24,
+       "folded": 0,
+       "retained": 240992,
+       "held": 240992,
+       "self": 240992,
+       "cyclic": 0,
+       "unreached": 0,
+       "link": "JSC::FreeList::m_nextInterval (weak) (1 of 24)",
+       "holders": [
+        "pair<MarkedBlock::Handle *, MarkedBlock\u2026: pair<MarkedBlock::Handle *, MarkedBlock *>::second (weak) (x24)",
+        "(untyped): <the VM> (weak) (x24)",
+        "LocalAllocator: FreeList::m_intervalStart (weak)",
+        "2 more holders"
+       ],
+       "children": [],
+       "other": null,
+       "_x": 268,
+       "_y": 268
+      },
+      {
+       "key": "JSC::MarkedBlock",
+       "count": 11,
+       "folded": 0,
+       "retained": 184096,
+       "held": 184096,
+       "self": 180224,
+       "cyclic": 0,
+       "unreached": 0,
+       "link": "JSC::FreeList::m_intervalStart, JSC::FreeList::m_nextInterval (weak) (3 of 11)",
+       "holders": [
+        "(untyped): <the VM> (weak) (x12)",
+        "pair<MarkedBlock::Handle *, MarkedBlock\u2026: pair<MarkedBlock::Handle *, MarkedBlock *>::second (weak) (x11)",
+        "LocalAllocator: FreeList::m_intervalStart, FreeList::m_nextInterval (weak) (x7)",
+        "7 more holders"
+       ],
+       "children": [],
+       "other": [
+        5,
+        3872,
+        ""
+       ],
+       "_ox": 536,
+       "_oy": 428,
+       "_x": 536.0,
+       "_y": 268
+      },
+      {
+       "key": "JSC::Collector",
+       "count": 2,
+       "folded": 0,
+       "retained": 163648,
+       "held": 163648,
+       "self": 768,
+       "cyclic": 0,
+       "unreached": 0,
+       "link": "std::__1::unique_ptr<JSC::Collector, std::__1::default_delete<JSC::Collector> >::(anonymous struct)::__ptr_, std::__1::unique_ptr<JSC::Collector, std::__1::default_delete<JSC::Collector> >::(anonymous struct)::__ptr_, std::__1::unique_ptr<JSC::Collector, std::__1::default_delete<JSC::Collector> >::(anonymous struct)::__ptr_, std::__1::unique_ptr<JSC::Collector, std::__1::default_delete<JSC::Collector> >::(anonymous struct)::__ptr_",
+       "holders": [],
+       "children": [],
+       "other": [
+        10,
+        162880,
+        ""
+       ],
+       "_ox": 804,
+       "_oy": 428,
+       "_x": 804.0,
+       "_y": 268
+      }
+     ],
+     "other": [
+      80,
+      866064,
+      ""
+     ],
+     "_ox": 1072,
+     "_oy": 268,
+     "_x": 536.0,
+     "_y": 108
+    },
+    {
+     "key": "WebCore::DedicatedWorkerThread",
+     "count": 1,
+     "folded": 0,
+     "retained": 0,
+     "held": 1424240,
+     "self": 224,
+     "cyclic": 1,
+     "unreached": 0,
+     "link": "",
+     "holders": [
+      "WorkerInspectorProxy: RefPtr<WorkerThread, RawPtrTraits<WorkerThread>, DefaultRefDerefTraits<WorkerThread> >::m\u2026",
+      "WorkerSWClientConnection: Ref<WorkerThread, RawPtrTraits<WorkerThread>, DefaultRefDerefTraits<WorkerThread> >::m_ptr",
+      "ThreadSafeWeakPtrControlBlock: ThreadSafeWeakPtrControlBlock::m_object (weak)",
+      "2 more holders"
+     ],
+     "children": [
+      {
+       "key": "WebCore::WorkerDedicatedRunLoop",
+       "count": 1,
+       "folded": 0,
+       "retained": 0,
+       "held": 1421488,
+       "self": 96,
+       "cyclic": 1,
+       "unreached": 0,
+       "link": "std::__1::unique_ptr<WebCore::WorkerRunLoop, std::__1::default_delete<WebCore::WorkerRunLoop> >::(anonymous struct)::__ptr_",
+       "holders": [],
+       "children": [
+        {
+         "key": "std::__1::unique_ptr<WebCore::WorkerDedicatedRunLoop::Task, std::__1::default_delete<WebCore::WorkerDedicatedRunLoop::Task> >",
+         "count": 1,
+         "folded": 0,
+         "retained": 0,
+         "held": 1421392,
+         "self": 8704,
+         "cyclic": 1,
+         "unreached": 0,
+         "link": "WTF::Deque<std::__1::unique_ptr<WebCore::WorkerDedicatedRunLoop::Task, std::__1::default_delete<WebCore::WorkerDedicatedRunLoop::Task> >, 0>",
+         "holders": [],
+         "children": [
+          {
+           "key": "WebCore::WorkerDedicatedRunLoop::Task",
+           "count": 546,
+           "folded": 0,
+           "retained": 48,
+           "held": 1412688,
+           "self": 17472,
+           "cyclic": 545,
+           "unreached": 0,
+           "link": "std::__1::unique_ptr<WebCore::WorkerDedicatedRunLoop::Task, std::__1::default_delete<WebCore::WorkerDedicatedRunLoop::Task> >::(anonymous struct)::__ptr_",
+           "holders": [],
+           "children": [
+            {
+             "key": "WTF::Detail::CallableWrapper<(unnamed class), void, WebCore::ScriptExecutionContext &>",
+             "count": 546,
+             "folded": 0,
+             "retained": 16,
+             "held": 1395216,
+             "self": 34896,
+             "cyclic": 545,
+             "unreached": 0,
+             "link": "std::__1::unique_ptr<WTF::Detail::CallableWrapperBase<void, WebCore::ScriptExecutionContext &>, std::__1::default_delete<WTF::Detail::CallableWrapperBase<void, WebCore::ScriptExecutionContext &> > >::(anonymous struct)::__ptr_",
+             "holders": [],
+             "children": [
+              {
+               "key": "WebCore::SerializedScriptValue",
+               "count": 545,
+               "folded": 0,
+               "retained": 1342880,
+               "held": 1342880,
+               "self": 17440,
+               "cyclic": 0,
+               "unreached": 0,
+               "link": "WTF::RefPtr<WebCore::SerializedScriptValue, WTF::RawPtrTraits<WebCore::SerializedScriptValue>, WTF::DefaultRefDerefTraits<WebCore::SerializedScriptValue> >::m_ptr",
+               "holders": [],
+               "children": [
+                {
+                 "key": "WebCore::SerializedScriptValueInternals",
+                 "count": 545,
+                 "folded": 0,
+                 "retained": 1325440,
+                 "held": 1325440,
+                 "self": 191840,
+                 "cyclic": 0,
+                 "unreached": 0,
+                 "link": "std::__1::unique_ptr<WebCore::SerializedScriptValueInternals, std::__1::default_delete<WebCore::SerializedScriptValueInternals> >::(anonymous struct)::__ptr_",
+                 "holders": [],
+                 "children": [
+                  {
+                   "key": "unsigned char",
+                   "count": 545,
+                   "folded": 0,
+                   "retained": 1116160,
+                   "held": 1116160,
+                   "self": 1116160,
+                   "cyclic": 0,
+                   "unreached": 0,
+                   "link": "WTF::Vector<unsigned char, 0, WTF::CrashOnOverflow, 16, WTF::FastMalloc>",
+                   "holders": [],
+                   "children": [],
+                   "other": null,
+                   "_x": 1340,
+                   "_y": 968
+                  }
+                 ],
+                 "other": [
+                  2,
+                  17440,
+                  ""
+                 ],
+                 "_ox": 1608,
+                 "_oy": 968,
+                 "_x": 1474.0,
+                 "_y": 860
+                }
+               ],
+               "other": null,
+               "_x": 1474.0,
+               "_y": 752
+              }
+             ],
+             "other": [
+              1,
+              17440,
+              ""
+             ],
+             "_ox": 1876,
+             "_oy": 752,
+             "_x": 1675.0,
+             "_y": 644
+            }
+           ],
+           "other": null,
+           "_x": 1675.0,
+           "_y": 536
+          }
+         ],
+         "other": null,
+         "_x": 1675.0,
+         "_y": 428
+        }
+       ],
+       "other": null,
+       "_x": 1675.0,
+       "_y": 268
+      }
+     ],
+     "other": [
+      3,
+      2528,
+      ""
+     ],
+     "_ox": 2144,
+     "_oy": 268,
+     "_x": 1909.5,
+     "_y": 108
+    },
+    {
+     "key": "<WebConfig::g_config>",
+     "count": 1,
+     "folded": 0,
+     "retained": 627056,
+     "held": 627056,
+     "self": 0,
+     "cyclic": 0,
+     "unreached": 0,
+     "link": "",
+     "holders": [],
+     "children": [
+      {
+       "key": "(untyped)",
+       "count": 127,
+       "folded": 2,
+       "retained": 460192,
+       "held": 460192,
+       "self": 197840,
+       "cyclic": 0,
+       "unreached": 0,
+       "link": "WTF::CodePtr<26129, WTF::FunctionAttributes::None> (63 of 127)",
+       "holders": [],
+       "children": [],
+       "other": [
+        15,
+        262352,
+        ""
+       ],
+       "_ox": 2412,
+       "_oy": 428,
+       "_x": 2412.0,
+       "_y": 268
+      }
+     ],
+     "other": [
+      61,
+      166864,
+      ""
+     ],
+     "_ox": 2680,
+     "_oy": 268,
+     "_x": 2546.0,
+     "_y": 108
+    },
+    {
+     "key": "<a global variable>",
+     "count": 1,
+     "folded": 0,
+     "retained": 284928,
+     "held": 284928,
+     "self": 0,
+     "cyclic": 0,
+     "unreached": 0,
+     "link": "",
+     "holders": [],
+     "children": [
+      {
+       "key": "WebCore::Style::RuleSet",
+       "count": 3,
+       "folded": 0,
+       "retained": 137792,
+       "held": 137792,
+       "self": 4608,
+       "cyclic": 0,
+       "unreached": 0,
+       "link": "<a global variable>",
+       "holders": [],
+       "children": [
+        {
+         "key": "(untyped)",
+         "count": 31,
+         "folded": 0,
+         "retained": 127024,
+         "held": 127024,
+         "self": 36288,
+         "cyclic": 0,
+         "unreached": 0,
+         "link": "WTF::HashTable<WTF::AtomString, WTF::KeyValuePair<WTF::AtomString, std::__1::unique_ptr<WTF::Vector<WebCore::Style::RuleData, 1, WTF::CrashOnOverflow, 16, WTF::FastMalloc>, std::__1::default_delete<WTF::Vector<WebCore::Style::RuleData, 1, WTF::CrashOnOverflow, 16, WTF::FastMalloc> > > >, WTF::KeyValuePairKeyExtractor<WTF::KeyValuePair<WTF::AtomString, std::__1::unique_ptr<WTF::Vector<WebCore::Style::RuleData, 1, WTF::CrashOnOverflow, 16, WTF::FastMalloc>, std::__1::default_delete<WTF::Vector<WebCore::Style::RuleData, 1, WTF::CrashOnOverflow, 16, WTF::FastMalloc> > > > >, WTF::DefaultHash<WTF::AtomString>, WTF::HashMap<WTF::AtomString, std::__1::unique_ptr<WTF::Vector<WebCore::Style::RuleData, 1, WTF::CrashOnOverflow, 16, WTF::FastMalloc>, std::__1::default_delete<WTF::Vector<WebCore::Style::RuleData, 1, WTF::CrashOnOverflow, 16, WTF::FastMalloc> > >, WTF::DefaultHash<WTF::AtomString>, WTF::HashTraits<WTF::AtomString>, WTF::HashTraits<std::__1::unique_ptr<WTF::Vector<WebCore::Style::RuleData, 1, WTF::CrashOnOverflow, 16, WTF::FastMalloc>, std::__1::default_delete<WTF::Vector<WebCore::Style::RuleData, 1, WTF::CrashOnOverflow, 16, WTF::FastMalloc> > > >, WTF::HashTableTraits, 255, WTF::FastMalloc>::KeyValuePairTraits, WTF::HashTraits<WTF::AtomString>, WTF::FastMalloc> (14 of 31)",
+         "holders": [],
+         "children": [],
+         "other": [
+          2,
+          90736,
+          ""
+         ],
+         "_ox": 2948,
+         "_oy": 536,
+         "_x": 2948.0,
+         "_y": 428
+        }
+       ],
+       "other": [
+        4,
+        6160,
+        ""
+       ],
+       "_ox": 3216,
+       "_oy": 428,
+       "_x": 3082.0,
+       "_y": 268
+      }
+     ],
+     "other": [
+      12,
+      147136,
+      ""
+     ],
+     "_ox": 3484,
+     "_oy": 268,
+     "_x": 3283.0,
+     "_y": 108
+    }
+   ],
+   "other": [
+    150,
+    1369632,
+    ""
+   ],
+   "_ox": 3752,
+   "_oy": 108,
+   "_x": 2144.0,
+   "_y": 0
+  },
+  "topRetainers": [
+   {
+    "id": 32396,
+    "class": "JSC::VM",
+    "retained": 1111360,
+    "self": 110592,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 32395,
+    "class": "JSC::VM",
+    "retained": 846672,
+    "self": 110592,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 33199,
+    "class": "<WebConfig::g_config>",
+    "retained": 627056,
+    "self": 0,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 33198,
+    "class": "<a global variable>",
+    "retained": 284928,
+    "self": 0,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 6265,
+    "class": "WebCore::FontCascadeFonts",
+    "retained": 265952,
+    "self": 352,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 32392,
+    "class": "(untyped)",
+    "retained": 262144,
+    "self": 36864,
+    "dominator": 6265,
+    "dominatorClass": "WebCore::FontCascadeFonts"
+   },
+   {
+    "id": 32073,
+    "class": "JSC::MegamorphicCache",
+    "retained": 141024,
+    "self": 141024,
+    "dominator": 32395,
+    "dominatorClass": "JSC::VM"
+   },
+   {
+    "id": 32075,
+    "class": "JSC::MegamorphicCache",
+    "retained": 141024,
+    "self": 141024,
+    "dominator": 32396,
+    "dominatorClass": "JSC::VM"
+   },
+   {
+    "id": 4926,
+    "class": "WTF::Thread",
+    "retained": 139184,
+    "self": 192,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 32193,
+    "class": "(untyped)",
+    "retained": 126256,
+    "self": 9728,
+    "dominator": 33199,
+    "dominatorClass": "<WebConfig::g_config>"
+   },
+   {
+    "id": 32398,
+    "class": "(untyped)",
+    "retained": 102400,
+    "self": 102400,
+    "dominator": 4926,
+    "dominatorClass": "WTF::Thread"
+   },
+   {
+    "id": 11979,
+    "class": "JSC::Collector",
+    "retained": 81952,
+    "self": 384,
+    "dominator": 32395,
+    "dominatorClass": "JSC::VM"
+   },
+   {
+    "id": 11980,
+    "class": "JSC::Collector",
+    "retained": 81696,
+    "self": 384,
+    "dominator": 32396,
+    "dominatorClass": "JSC::VM"
+   },
+   {
+    "id": 32393,
+    "class": "(untyped)",
+    "retained": 69632,
+    "self": 69632,
+    "dominator": 33199,
+    "dominatorClass": "<WebConfig::g_config>"
+   },
+   {
+    "id": 32394,
+    "class": "(untyped)",
+    "retained": 69632,
+    "self": 69632,
+    "dominator": 33199,
+    "dominatorClass": "<WebConfig::g_config>"
+   },
+   {
+    "id": 32456,
+    "class": "(untyped)",
+    "retained": 66320,
+    "self": 4608,
+    "dominator": 32396,
+    "dominatorClass": "JSC::VM"
+   },
+   {
+    "id": 32194,
+    "class": "WebCore::Style::RuleSet",
+    "retained": 66224,
+    "self": 1536,
+    "dominator": 33198,
+    "dominatorClass": "<a global variable>"
+   },
+   {
+    "id": 32211,
+    "class": "WebCore::Style::RuleSet",
+    "retained": 66224,
+    "self": 1536,
+    "dominator": 33198,
+    "dominatorClass": "<a global variable>"
+   },
+   {
+    "id": 8559,
+    "class": "WebCore::StyleSheetContents",
+    "retained": 58000,
+    "self": 256,
+    "dominator": 33198,
+    "dominatorClass": "<a global variable>"
+   },
+   {
+    "id": 32337,
+    "class": "WTF::Ref<WebCore::StyleRuleBase, WTF::RawPtrTraits<WebCore::StyleRuleBase>, WTF::DefaultRefDerefTraits<WebCore::StyleRuleBase> >",
+    "retained": 57728,
+    "self": 1024,
+    "dominator": 8559,
+    "dominatorClass": "WebCore::StyleSheetContents"
+   },
+   {
+    "id": 32182,
+    "class": "(untyped)",
+    "retained": 57184,
+    "self": 8704,
+    "dominator": 33199,
+    "dominatorClass": "<WebConfig::g_config>"
+   },
+   {
+    "id": 8599,
+    "class": "std::__1::unique_ptr<JSC::SlotVisitor, std::__1::default_delete<JSC::SlotVisitor> >",
+    "retained": 57152,
+    "self": 128,
+    "dominator": 11979,
+    "dominatorClass": "JSC::Collector"
+   },
+   {
+    "id": 25730,
+    "class": "std::__1::unique_ptr<JSC::SlotVisitor, std::__1::default_delete<JSC::SlotVisitor> >",
+    "retained": 57152,
+    "self": 128,
+    "dominator": 11980,
+    "dominatorClass": "JSC::Collector"
+   },
+   {
+    "id": 32143,
+    "class": "(untyped)",
+    "retained": 57120,
+    "self": 2560,
+    "dominator": 33199,
+    "dominatorClass": "<WebConfig::g_config>"
+   },
+   {
+    "id": 24141,
+    "class": "WTF::Thread",
+    "retained": 55792,
+    "self": 192,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 32397,
+    "class": "(untyped)",
+    "retained": 55200,
+    "self": 53248,
+    "dominator": 24141,
+    "dominatorClass": "WTF::Thread"
+   },
+   {
+    "id": 32072,
+    "class": "JSC::JSONCache",
+    "retained": 49376,
+    "self": 49376,
+    "dominator": 32395,
+    "dominatorClass": "JSC::VM"
+   },
+   {
+    "id": 32074,
+    "class": "JSC::JSONCache",
+    "retained": 49376,
+    "self": 49376,
+    "dominator": 32396,
+    "dominatorClass": "JSC::VM"
+   },
+   {
+    "id": 33197,
+    "class": "<the VM>",
+    "retained": 48512,
+    "self": 0,
+    "dominator": 0,
+    "dominatorClass": "<root>"
+   },
+   {
+    "id": 32187,
+    "class": "WebCore::JSVMClientData",
+    "retained": 42368,
+    "self": 20992,
+    "dominator": 32395,
+    "dominatorClass": "JSC::VM"
+   }
+  ]
+ }
+]

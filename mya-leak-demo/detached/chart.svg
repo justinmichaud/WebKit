@@ -1,0 +1,236 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="4236" height="1401" viewBox="0 0 4236 1401">
+
+<style>
+  svg { --bg:#ffffff; --fg:#0f172a; --dim:#64748b; --edge:#cbd5e1; --node:#f8fafc; --stroke:#334155;
+        --other:#f1f5f9; --cycle:#fff7ed; --cyclestroke:#b45309; --panel:#e2e8f0; }
+  @media (prefers-color-scheme: dark) {
+    svg { --bg:#0b1220; --fg:#e2e8f0; --dim:#94a3b8; --edge:#334155; --node:#111a2e; --stroke:#94a3b8;
+          --other:#0f172a; --cycle:#2a1a0a; --cyclestroke:#f59e0b; --panel:#1e293b; }
+  }
+  .bg { fill: var(--bg); }
+  text { font-family: ui-sans-serif, -apple-system, "Segoe UI", Roboto, sans-serif; fill: var(--fg); }
+  .title { font-size: 20px; font-weight: 700; }
+  .sub { font-size: 13px; fill: var(--dim); }
+  .ptitle { font-size: 17px; font-weight: 700; }
+  .name { font-size: 13px; font-weight: 600; }
+  .size { font-size: 12px; }
+  .self, .link { font-size: 10.5px; fill: var(--dim); }
+  .held { font-size: 10px; fill: var(--cyclestroke); }
+  .dim { fill: var(--dim); }
+  .node { fill: var(--node); stroke: var(--stroke); stroke-width: 1.5; }
+  .other { fill: var(--other); stroke: var(--edge); stroke-width: 1.5; stroke-dasharray: 4 3; }
+  .cycle { fill: var(--cycle); stroke: var(--cyclestroke); stroke-width: 2.5; }
+  .panel { fill: none; stroke: var(--panel); stroke-width: 1.5; }
+</style>
+
+<rect class="bg" width="4236" height="1401"/>
+<text x="28" y="36" class="title">Detached DOM subtree leak (detached/page): retention trees of one WebContent process, 90 s in</text>
+<text x="28" y="58" class="sub">Dominator tree: each box retains its subtree, and its parent is the link whose removal frees it. Same-class siblings grouped; levels show groups over 2% of the heap, at most 4. A cycle (amber) holds itself alive through a C++ object: it retains 0 B, and shows what it holds.</text>
+<rect class="panel" x="28" y="72" width="1396" height="1301" rx="10"/>
+<text x="56" y="98" class="ptitle">JSC&#x27;s own heap snapshot (notifyutil com.apple.WebKit.dumpGCHeap)</text>
+<text x="56" y="116" class="sub">10904 nodes (10904 JS cells) · 4.3 MB · 0 nodes in cycles · 0 B reached by no path</text>
+<path d="M784.0,208.0 C784.0,230.0 315.0,230.0 315.0,252.0" fill="none" stroke="var(--edge)" stroke-width="1.5"/>
+<path d="M315.0,316.0 C315.0,364.0 181.0,364.0 181.0,412.0" fill="none" stroke="var(--edge)" stroke-width="1.5"/>
+<path d="M181.0,476.0 C181.0,498.0 181.0,498.0 181.0,520.0" fill="none" stroke="var(--edge)" stroke-width="1.5"/>
+<text x="181.0" y="515.0" class="link" text-anchor="middle">data</text>
+<rect x="56.0" y="520.0" width="250" height="64" rx="6" class="node"/>
+<text x="66.0" y="542.0" class="name">×1960 Uint16Array</text>
+<text x="66.0" y="562.0" class="size">retained 3.8 MB · 89.9%</text>
+<text x="66.0" y="577.0" class="self">self 3.8 MB</text>
+<rect x="56.0" y="412.0" width="250" height="64" rx="6" class="node"/>
+<text x="66.0" y="434.0" class="name">×1960 JSLexicalEnvironment</text>
+<text x="66.0" y="454.0" class="size">retained 3.9 MB · 92.0%</text>
+<text x="66.0" y="469.0" class="self">self 91.9 KB</text>
+<path d="M315.0,316.0 C315.0,364.0 449.0,364.0 449.0,412.0" fill="none" stroke="var(--edge)" stroke-width="1.5" stroke-dasharray="4 3"/>
+<rect x="324.0" y="412.0" width="250" height="64" rx="6" class="other"/>
+<text x="334.0" y="434.0" class="name dim">5 other groups</text>
+<text x="334.0" y="454.0" class="size dim">retained 4.0 KB · 0.1%</text>
+<rect x="190.0" y="252.0" width="250" height="64" rx="6" class="node"/>
+<text x="200.0" y="274.0" class="name">×1982 Function</text>
+<text x="200.0" y="294.0" class="size">retained 4.0 MB · 93.5%</text>
+<text x="200.0" y="309.0" class="self">self 62.7 KB · 19 more of its class folded in</text>
+<text x="194.0" y="328.0" class="held">held by &lt;root&gt; (x1962)</text>
+<text x="194.0" y="341.0" class="held">and HTMLSpanElement (x1960)</text>
+<text x="194.0" y="354.0" class="held">and Structure (x47)</text>
+<text x="194.0" y="367.0" class="held">and 19 more holders</text>
+<path d="M784.0,208.0 C784.0,230.0 717.0,230.0 717.0,252.0" fill="none" stroke="var(--edge)" stroke-width="1.5"/>
+<path d="M717.0,316.0 C717.0,364.0 717.0,364.0 717.0,412.0" fill="none" stroke="var(--edge)" stroke-width="1.5" stroke-dasharray="4 3"/>
+<rect x="592.0" y="412.0" width="250" height="64" rx="6" class="other"/>
+<text x="602.0" y="434.0" class="name dim">3 other groups</text>
+<text x="602.0" y="454.0" class="size dim">retained 223 B · 0.0%</text>
+<rect x="592.0" y="252.0" width="250" height="64" rx="6" class="node"/>
+<text x="602.0" y="274.0" class="name">×1961 HTMLSpanElement</text>
+<text x="602.0" y="294.0" class="size">retained 92.1 KB · 2.1%</text>
+<text x="602.0" y="309.0" class="self">self 91.9 KB</text>
+<text x="596.0" y="328.0" class="held">held by &lt;root&gt; (x1960)</text>
+<text x="596.0" y="341.0" class="held">and Structure</text>
+<text x="596.0" y="354.0" class="held">and FunctionCodeBlock</text>
+<path d="M784.0,208.0 C784.0,230.0 985.0,230.0 985.0,252.0" fill="none" stroke="var(--edge)" stroke-width="1.5"/>
+<path d="M985.0,316.0 C985.0,364.0 985.0,364.0 985.0,412.0" fill="none" stroke="var(--edge)" stroke-width="1.5" stroke-dasharray="4 3"/>
+<rect x="860.0" y="412.0" width="250" height="64" rx="6" class="other"/>
+<text x="870.0" y="434.0" class="name dim">36 other groups</text>
+<text x="870.0" y="454.0" class="size dim">retained 85.4 KB · 2.0%</text>
+<rect x="860.0" y="252.0" width="250" height="64" rx="6" class="node"/>
+<text x="870.0" y="274.0" class="name">×2 Window</text>
+<text x="870.0" y="294.0" class="size">retained 89.9 KB · 2.1%</text>
+<text x="870.0" y="309.0" class="self">self 4.5 KB</text>
+<text x="864.0" y="328.0" class="held">held by Function (x552)</text>
+<text x="864.0" y="341.0" class="held">and Structure (x193)</text>
+<text x="864.0" y="354.0" class="held">and FunctionCodeBlock (x3)</text>
+<text x="864.0" y="367.0" class="held">and 3 more holders</text>
+<path d="M784.0,208.0 C784.0,230.0 1253.0,230.0 1253.0,252.0" fill="none" stroke="var(--edge)" stroke-width="1.5" stroke-dasharray="4 3"/>
+<rect x="1128.0" y="252.0" width="250" height="64" rx="6" class="other"/>
+<text x="1138.0" y="274.0" class="name dim">32 other groups</text>
+<text x="1138.0" y="294.0" class="size dim">retained 100.0 KB · 2.3%</text>
+<rect x="659.0" y="144.0" width="250" height="64" rx="6" class="node"/>
+<text x="669.0" y="166.0" class="name">&lt;root&gt;</text>
+<text x="669.0" y="186.0" class="size">retained 4.3 MB · 100.0%</text>
+<text x="669.0" y="201.0" class="self">self 0 B</text>
+<rect class="panel" x="1472" y="72" width="2736" height="1301" rx="10"/>
+<text x="1500" y="98" class="ptitle">mya heapdump --collector (JSC&#x27;s snapshot)</text>
+<text x="1500" y="116" class="sub">43378 nodes (13256 JS cells) · 9.8 MB · 1182 nodes in cycles · 39.9 KB reached by no path</text>
+<path d="M3099.0,208.0 C3099.0,230.0 2161.0,230.0 2161.0,252.0" fill="none" stroke="var(--edge)" stroke-width="1.5"/>
+<path d="M2161.0,316.0 C2161.0,357.5 1893.0,357.5 1893.0,399.0" fill="none" stroke="var(--edge)" stroke-width="1.5"/>
+<text x="1893.0" y="394.0" class="link" text-anchor="middle">JSValue</text>
+<path d="M1893.0,463.0 C1893.0,511.0 1893.0,511.0 1893.0,559.0" fill="none" stroke="var(--edge)" stroke-width="1.5"/>
+<text x="1893.0" y="554.0" class="link" text-anchor="middle">Ref&lt;EventTarget, RawPtrTraits&lt;EventTarget&gt;,…</text>
+<path d="M1893.0,623.0 C1893.0,645.0 1893.0,645.0 1893.0,667.0" fill="none" stroke="var(--edge)" stroke-width="1.5"/>
+<text x="1893.0" y="662.0" class="link" text-anchor="middle">CheckedPtr&lt;Node, RawPtrTraits&lt;Node&gt; &gt;::m_pt…</text>
+<path d="M1893.0,731.0 C1893.0,753.0 1625.0,753.0 1625.0,775.0" fill="none" stroke="var(--edge)" stroke-width="1.5"/>
+<path d="M1625.0,839.0 C1625.0,874.0 1625.0,874.0 1625.0,909.0" fill="none" stroke="var(--edge)" stroke-width="1.5"/>
+<text x="1625.0" y="904.0" class="link" text-anchor="middle">WriteBarrierBase&lt;JSScope, RawPtrTraits&lt;JSSc…</text>
+<path d="M1625.0,973.0 C1625.0,995.0 1625.0,995.0 1625.0,1017.0" fill="none" stroke="var(--edge)" stroke-width="1.5"/>
+<text x="1625.0" y="1012.0" class="link" text-anchor="middle">JSValue</text>
+<path d="M1625.0,1081.0 C1625.0,1103.0 1625.0,1103.0 1625.0,1125.0" fill="none" stroke="var(--edge)" stroke-width="1.5"/>
+<text x="1625.0" y="1120.0" class="link" text-anchor="middle">CagedPtr&lt;Gigacage::Kind::Primitive, void, R…</text>
+<rect x="1500.0" y="1125.0" width="250" height="64" rx="6" class="node"/>
+<text x="1510.0" y="1147.0" class="name">×1951 (auxiliary cell)</text>
+<text x="1510.0" y="1167.0" class="size">retained 5.0 MB · 50.5%</text>
+<text x="1510.0" y="1182.0" class="self">self 5.0 MB</text>
+<rect x="1500.0" y="1017.0" width="250" height="64" rx="6" class="node"/>
+<text x="1510.0" y="1039.0" class="name">×1951 JSGenericTypedArrayView&lt;Uin…</text>
+<text x="1510.0" y="1059.0" class="size">retained 5.1 MB · 51.4%</text>
+<text x="1510.0" y="1074.0" class="self">self 91.5 KB</text>
+<rect x="1500.0" y="909.0" width="250" height="64" rx="6" class="node"/>
+<text x="1510.0" y="931.0" class="name">×1951 JSLexicalEnvironment</text>
+<text x="1510.0" y="951.0" class="size">retained 5.2 MB · 52.3%</text>
+<text x="1510.0" y="966.0" class="self">self 91.5 KB</text>
+<rect x="1500.0" y="775.0" width="250" height="64" rx="6" class="node"/>
+<text x="1510.0" y="797.0" class="name">×1951 JSArrowFunction</text>
+<text x="1510.0" y="817.0" class="size">retained 5.2 MB · 52.9%</text>
+<text x="1510.0" y="832.0" class="self">self 61.0 KB</text>
+<text x="1504.0" y="851.0" class="held">held by JSHTMLSpanElement: Weak&lt;JSObject&gt;::m_impl (the collector marks it) (x1951)</text>
+<text x="1504.0" y="864.0" class="held">and JSEventListener: Weak&lt;JSObject&gt;::m_impl (weak) (x1951)</text>
+<path d="M1893.0,731.0 C1893.0,753.0 1893.0,753.0 1893.0,775.0" fill="none" stroke="var(--edge)" stroke-width="1.5"/>
+<text x="1893.0" y="770.0" class="link" text-anchor="middle">CompactPointerTuple&lt;WeakPtrImplWithEventTar…</text>
+<path d="M1893.0,839.0 C1893.0,874.0 1893.0,874.0 1893.0,909.0" fill="none" stroke="var(--edge)" stroke-width="1.5"/>
+<text x="1893.0" y="904.0" class="link" text-anchor="middle">Vector&lt;pair&lt;AtomString, Vector&lt;Ref&lt;Register…</text>
+<path d="M1893.0,973.0 C1893.0,995.0 1893.0,995.0 1893.0,1017.0" fill="none" stroke="var(--edge)" stroke-width="1.5"/>
+<text x="1893.0" y="1012.0" class="link" text-anchor="middle">Ref&lt;RegisteredEventListener, RawPtrTraits&lt;R…</text>
+<path d="M1893.0,1081.0 C1893.0,1103.0 1893.0,1103.0 1893.0,1125.0" fill="none" stroke="var(--edge)" stroke-width="1.5"/>
+<text x="1893.0" y="1120.0" class="link" text-anchor="middle">Ref&lt;EventListener, RawPtrTraits&lt;EventListen…</text>
+<path d="M1893.0,1189.0 C1893.0,1211.0 1893.0,1211.0 1893.0,1233.0" fill="none" stroke="var(--edge)" stroke-width="1.5" stroke-dasharray="4 3"/>
+<rect x="1768.0" y="1233.0" width="250" height="64" rx="6" class="other"/>
+<text x="1778.0" y="1255.0" class="name dim">1 other group</text>
+<text x="1778.0" y="1275.0" class="size dim">retained 164.1 KB · 1.6%</text>
+<rect x="1768.0" y="1125.0" width="250" height="64" rx="6" class="node"/>
+<text x="1778.0" y="1147.0" class="name">×2011 JSEventListener</text>
+<text x="1778.0" y="1167.0" class="size">retained 352.6 KB · 3.5%</text>
+<text x="1778.0" y="1182.0" class="self">self 188.5 KB</text>
+<rect x="1768.0" y="1017.0" width="250" height="64" rx="6" class="node"/>
+<text x="1778.0" y="1039.0" class="name">×2011 RegisteredEventListener</text>
+<text x="1778.0" y="1059.0" class="size">retained 415.4 KB · 4.1%</text>
+<text x="1778.0" y="1074.0" class="self">self 62.8 KB</text>
+<rect x="1768.0" y="909.0" width="250" height="64" rx="6" class="node"/>
+<text x="1778.0" y="931.0" class="name">×2011 pair&lt;AtomString, Vector&lt;Ref…</text>
+<text x="1778.0" y="951.0" class="size">retained 666.8 KB · 6.6%</text>
+<text x="1778.0" y="966.0" class="self">self 251.4 KB</text>
+<rect x="1768.0" y="775.0" width="250" height="64" rx="6" class="node"/>
+<text x="1778.0" y="797.0" class="name">×2011 WeakPtrImplWithEventTargetD…</text>
+<text x="1778.0" y="817.0" class="size">retained 823.9 KB · 8.2%</text>
+<text x="1778.0" y="832.0" class="self">self 157.1 KB</text>
+<path d="M1893.0,731.0 C1893.0,753.0 2161.0,753.0 2161.0,775.0" fill="none" stroke="var(--edge)" stroke-width="1.5" stroke-dasharray="4 3"/>
+<rect x="2036.0" y="775.0" width="250" height="64" rx="6" class="other"/>
+<text x="2046.0" y="797.0" class="name dim">1 other group</text>
+<text x="2046.0" y="817.0" class="size dim">retained 94.3 KB · 0.9%</text>
+<rect x="1768.0" y="667.0" width="250" height="64" rx="6" class="node"/>
+<text x="1778.0" y="689.0" class="name">×202 HTMLSpanElement</text>
+<text x="1778.0" y="709.0" class="size">retained 6.4 MB · 65.2%</text>
+<text x="1778.0" y="724.0" class="self">self 314.2 KB · 1809 more of its class folded in</text>
+<rect x="1768.0" y="559.0" width="250" height="64" rx="6" class="node"/>
+<text x="1778.0" y="581.0" class="name">×101 HTMLDivElement</text>
+<text x="1778.0" y="601.0" class="size">retained 6.4 MB · 65.3%</text>
+<text x="1778.0" y="616.0" class="self">self 15.8 KB</text>
+<rect x="1768.0" y="399.0" width="250" height="64" rx="6" class="cycle"/>
+<text x="1778.0" y="421.0" class="name">×101 JSHTMLDivElement</text>
+<text x="1778.0" y="441.0" class="size">cycle · retained 0 B · holds 6.4 MB · 65.4%</text>
+<text x="1778.0" y="456.0" class="self">self 4.7 KB</text>
+<path d="M2161.0,316.0 C2161.0,357.5 2429.0,357.5 2429.0,399.0" fill="none" stroke="var(--edge)" stroke-width="1.5" stroke-dasharray="4 3"/>
+<rect x="2304.0" y="399.0" width="250" height="64" rx="6" class="other"/>
+<text x="2314.0" y="421.0" class="name dim">1 other group</text>
+<text x="2314.0" y="441.0" class="size dim">retained 15.1 KB · 0.2%</text>
+<rect x="2036.0" y="252.0" width="250" height="64" rx="6" class="cycle"/>
+<text x="2046.0" y="274.0" class="name">JSArray</text>
+<text x="2046.0" y="294.0" class="size">cycle · retained 0 B · holds 6.4 MB · 65.5%</text>
+<text x="2046.0" y="309.0" class="self">self 16 B</text>
+<text x="2040.0" y="328.0" class="held">held by FunctionCodeBlock: WriteBarrierBase&lt;JSCell, RawPtrTraits&lt;JSCell&gt; &gt;::m_cell (the collector marks it)</text>
+<text x="2040.0" y="341.0" class="held">and JSGlobalLexicalEnvironment: detached (the collector marks it)</text>
+<path d="M3099.0,208.0 C3099.0,230.0 2831.0,230.0 2831.0,252.0" fill="none" stroke="var(--edge)" stroke-width="1.5"/>
+<path d="M2831.0,316.0 C2831.0,357.5 2697.0,357.5 2697.0,399.0" fill="none" stroke="var(--edge)" stroke-width="1.5"/>
+<text x="2697.0" y="394.0" class="link" text-anchor="middle">FreeList::m_intervalStart, FreeList::m_next…</text>
+<rect x="2572.0" y="399.0" width="250" height="64" rx="6" class="node"/>
+<text x="2582.0" y="421.0" class="name">×47 MarkedBlock less its cells</text>
+<text x="2582.0" y="441.0" class="size">retained 337.6 KB · 3.4%</text>
+<text x="2582.0" y="456.0" class="self">self 337.6 KB</text>
+<text x="2576.0" y="475.0" class="held">held by (untyped): &lt;the VM&gt; (weak) (x47)</text>
+<text x="2576.0" y="488.0" class="held">and pair&lt;MarkedBlock::Handle *, MarkedBlock…: pair&lt;MarkedBlock::Handle *, MarkedBlock *&gt;::second (weak) (x46)</text>
+<text x="2576.0" y="501.0" class="held">and VM: FreeList::m_intervalStart, FreeList::m_nextInterval (weak) (x2)</text>
+<text x="2576.0" y="514.0" class="held">and 2 more holders</text>
+<path d="M2831.0,316.0 C2831.0,357.5 2965.0,357.5 2965.0,399.0" fill="none" stroke="var(--edge)" stroke-width="1.5" stroke-dasharray="4 3"/>
+<rect x="2840.0" y="399.0" width="250" height="64" rx="6" class="other"/>
+<text x="2850.0" y="421.0" class="name dim">66 other groups</text>
+<text x="2850.0" y="441.0" class="size dim">retained 874.1 KB · 8.7%</text>
+<rect x="2706.0" y="252.0" width="250" height="64" rx="6" class="node"/>
+<text x="2716.0" y="274.0" class="name">VM</text>
+<text x="2716.0" y="294.0" class="size">retained 1.3 MB · 13.1%</text>
+<text x="2716.0" y="309.0" class="self">self 108.0 KB</text>
+<text x="2710.0" y="328.0" class="held">held by &lt;the VM&gt;: &lt;the VM&gt;</text>
+<text x="2710.0" y="341.0" class="held">and &lt;a global variable&gt;: &lt;a global variable&gt;</text>
+<text x="2710.0" y="354.0" class="held">and &lt;WebConfig::g_config&gt;: DoublyLinkedList&lt;VMThreadContext&gt;::m_head, DoublyLinkedList&lt;VMThreadContext&gt;::m_tail</text>
+<path d="M3099.0,208.0 C3099.0,230.0 3367.0,230.0 3367.0,252.0" fill="none" stroke="var(--edge)" stroke-width="1.5"/>
+<path d="M3367.0,316.0 C3367.0,357.5 3233.0,357.5 3233.0,399.0" fill="none" stroke="var(--edge)" stroke-width="1.5"/>
+<text x="3233.0" y="394.0" class="link" text-anchor="middle">CodePtr&lt;26129, FunctionAttributes::None&gt; (6…</text>
+<path d="M3233.0,463.0 C3233.0,511.0 3233.0,511.0 3233.0,559.0" fill="none" stroke="var(--edge)" stroke-width="1.5" stroke-dasharray="4 3"/>
+<rect x="3108.0" y="559.0" width="250" height="64" rx="6" class="other"/>
+<text x="3118.0" y="581.0" class="name dim">15 other groups</text>
+<text x="3118.0" y="601.0" class="size dim">retained 172.8 KB · 1.7%</text>
+<rect x="3108.0" y="399.0" width="250" height="64" rx="6" class="node"/>
+<text x="3118.0" y="421.0" class="name">×121 (untyped)</text>
+<text x="3118.0" y="441.0" class="size">retained 356.8 KB · 3.5%</text>
+<text x="3118.0" y="456.0" class="self">self 184.0 KB · 1 more of its class folded in</text>
+<path d="M3367.0,316.0 C3367.0,357.5 3501.0,357.5 3501.0,399.0" fill="none" stroke="var(--edge)" stroke-width="1.5" stroke-dasharray="4 3"/>
+<rect x="3376.0" y="399.0" width="250" height="64" rx="6" class="other"/>
+<text x="3386.0" y="421.0" class="name dim">61 other groups</text>
+<text x="3386.0" y="441.0" class="size dim">retained 159.9 KB · 1.6%</text>
+<rect x="3242.0" y="252.0" width="250" height="64" rx="6" class="node"/>
+<text x="3252.0" y="274.0" class="name">&lt;WebConfig::g_config&gt;</text>
+<text x="3252.0" y="294.0" class="size">retained 516.6 KB · 5.1%</text>
+<text x="3252.0" y="309.0" class="self">self 0 B</text>
+<path d="M3099.0,208.0 C3099.0,230.0 3769.0,230.0 3769.0,252.0" fill="none" stroke="var(--edge)" stroke-width="1.5"/>
+<path d="M3769.0,316.0 C3769.0,357.5 3769.0,357.5 3769.0,399.0" fill="none" stroke="var(--edge)" stroke-width="1.5" stroke-dasharray="4 3"/>
+<rect x="3644.0" y="399.0" width="250" height="64" rx="6" class="other"/>
+<text x="3654.0" y="421.0" class="name dim">14 other groups</text>
+<text x="3654.0" y="441.0" class="size dim">retained 285.8 KB · 2.8%</text>
+<rect x="3644.0" y="252.0" width="250" height="64" rx="6" class="node"/>
+<text x="3654.0" y="274.0" class="name">&lt;a global variable&gt;</text>
+<text x="3654.0" y="294.0" class="size">retained 285.8 KB · 2.8%</text>
+<text x="3654.0" y="309.0" class="self">self 0 B</text>
+<path d="M3099.0,208.0 C3099.0,230.0 4037.0,230.0 4037.0,252.0" fill="none" stroke="var(--edge)" stroke-width="1.5" stroke-dasharray="4 3"/>
+<rect x="3912.0" y="252.0" width="250" height="64" rx="6" class="other"/>
+<text x="3922.0" y="274.0" class="name dim">150 other groups</text>
+<text x="3922.0" y="294.0" class="size dim">retained 883.7 KB · 8.8%</text>
+<rect x="2974.0" y="144.0" width="250" height="64" rx="6" class="node"/>
+<text x="2984.0" y="166.0" class="name">&lt;root&gt;</text>
+<text x="2984.0" y="186.0" class="size">retained 2.9 MB · 29.8%</text>
+<text x="2984.0" y="201.0" class="self">self 0 B</text>
+</svg>
