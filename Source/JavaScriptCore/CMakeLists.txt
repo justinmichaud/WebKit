@@ -1705,6 +1705,7 @@ if (ENABLE_JAVASCRIPTCORE_TOOLS)
         corpse/CorpseProcess.h
         corpse/CorpseRegion.h
         corpse/CorpseSnapshot.h
+        corpse/CorpseSnapshotDebugInfo.h
         corpse/CorpseSymbol.h
         corpse/CorpseThread.h
     )

@@ -60,6 +60,7 @@
 #include <wtf/HashSet.h>
 #include <wtf/Scope.h>
 #include <wtf/text/MakeString.h>
+#include <wtf/text/StringBuilder.h>
 
 namespace JSCToolsTest {
 
@@ -179,16 +180,16 @@ static void testImages(RefPtr<Process> process)
 #if OS(DARWIN)
     unsigned withoutUUID = 0;
     for (const Image& image : images) {
-        if (std::ranges::all_of(image.uuid(), [](uint8_t byte) { return !byte; }))
+        if (std::ranges::all_of(image.uuid().span(), [](char8_t digit) { return digit == '0'; }))
             ++withoutUUID;
     }
     TEST_ASSERT_EQ(withoutUUID, 0u, "every image has a UUID");
     if (executable && javaScriptCore)
-        TEST_ASSERT(!std::ranges::equal(executable->uuid(), javaScriptCore->uuid()), "two images have two UUIDs");
+        TEST_ASSERT(executable->uuid() != javaScriptCore->uuid(), "two images have two UUIDs");
     TEST_ASSERT(!imageContaining(images, reinterpret_cast<const void*>(&malloc)),
         "a shared-cache image is not listed");
 #else
-    TEST_ASSERT(std::ranges::all_of(images, [](const Image& image) { return image.uuid().empty(); }),
+    TEST_ASSERT(std::ranges::all_of(images, [](const Image& image) { return image.uuid().isNull(); }),
         "a Linux image has no UUID: liblldb reads the build-id from the file");
     TEST_ASSERT(imageContaining(images, reinterpret_cast<const void*>(&malloc)),
         "the image list has libc");
@@ -226,7 +227,7 @@ static void analyzeReplacedExecutable(Snapshot& snapshot, Address)
     const Image* original = self ? imageContaining(self->images(), reinterpret_cast<const void*>(&testSnapshot)) : nullptr;
     const Vector<Image>& images = snapshot.images();
     auto replaced = std::ranges::find_if(images, isReplacedCopy);
-    TEST_ASSERT(original && replaced != images.end() && std::ranges::equal(replaced->uuid(), original->uuid()),
+    TEST_ASSERT(original && replaced != images.end() && replaced->uuid() == original->uuid(),
         "a replaced executable is listed, with the UUID it was loaded with");
 #else
     ExpectedErrors expectedErrors;

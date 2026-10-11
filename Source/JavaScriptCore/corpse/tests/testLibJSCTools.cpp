@@ -39,6 +39,7 @@
 #include "CorpseSnapshotTest.h"
 #include "CorpseSymbolTest.h"
 #include "CorpseThreadTest.h"
+#include "DebugInfoTest.h"
 #include "LibJSCToolsTestUtilities.h"
 #include "TypeinfoTest.h"
 
@@ -174,6 +175,7 @@ int main(int argc, char** argv)
         JSCToolsTest::testDiagnostics();
 #if ENABLE(MYA_HEAP)
         JSCToolsTest::testTypeinfo();
+        JSCToolsTest::testDebugInfo();
 #endif
     }
 

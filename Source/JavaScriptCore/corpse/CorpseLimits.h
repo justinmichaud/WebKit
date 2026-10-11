@@ -42,6 +42,7 @@ namespace Corpse {
 constexpr uint32_t maxImageCount = 16 * 1024; // About 6x the 2,800 images of a process that dlopens every framework.
 constexpr size_t maxImagePathLength = 4 * KB; // Linux's PATH_MAX, 4x Darwin's.
 constexpr size_t maxRegionCount = 1024 * 1024; // A browser process measured 12,375.
+constexpr size_t maxVTableSize = 64 * KB; // A vtable group, _ZTV. JavaScriptCore's largest measured 1 KB.
 
 } // namespace Corpse
 } // namespace JSC

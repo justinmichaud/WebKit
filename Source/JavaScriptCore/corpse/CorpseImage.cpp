@@ -41,6 +41,7 @@
 #include <mach/mach_error.h>
 #include <mach/task_info.h>
 #include <wtf/HashMap.h>
+#include <wtf/HexNumber.h>
 #else
 #include <elf.h>
 #include <string_view>
@@ -149,7 +150,7 @@ Vector<Image> Image::collect(Snapshot& snapshot)
                 loadAddress.toMachVMAddress(), static_cast<int>(snapshot.process()->pid()));
             continue;
         }
-        result.append(Image { loadAddress, WTF::move(*path), Vector<uint8_t> { std::span { entry.imageUUID } } });
+        result.append(Image { loadAddress, WTF::move(*path), toHexString(std::span<const uint8_t> { entry.imageUUID }).utf8() });
     }
     return result;
 }
