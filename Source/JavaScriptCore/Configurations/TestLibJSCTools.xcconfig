@@ -28,3 +28,6 @@ EXCLUDED_SOURCE_FILE_NAMES = $(WK_JAVASCRIPTCORE_TOOLS_EXCLUDED_SOURCE_FILE_NAME
 OTHER_LDFLAGS = $(inherited) -lJavaScriptCoreTools $(WK_LLDB_LDFLAGS);
 
 SYSTEM_HEADER_SEARCH_PATHS = $(inherited) $(WK_LLDB_SYSTEM_HEADER_SEARCH_PATHS);
+
+// HeapWalkSwift.swift imports the module this defines.
+SWIFT_INCLUDE_PATHS = $(inherited) $(SRCROOT)/corpse/tests/Modules;
