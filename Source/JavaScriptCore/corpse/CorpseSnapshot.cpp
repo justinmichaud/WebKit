@@ -37,6 +37,7 @@
 #include <signal.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <wtf/FileSystem.h>
 #include <wtf/MainThread.h>
 #include <wtf/SafeStrerror.h>
 #if OS(DARWIN)
@@ -47,7 +48,6 @@
 #else
 #include <stdio.h>
 #include <sys/prctl.h>
-#include <wtf/FileSystem.h>
 #include <wtf/text/StringToIntegerConversion.h>
 #endif
 #include <wtf/TZoneMallocInlines.h>

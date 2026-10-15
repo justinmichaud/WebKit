@@ -29,6 +29,7 @@
 #if ENABLE(LIB_JSC_TOOLS)
 
 #include <memory>
+#include <optional>
 #include <span>
 #include <stdint.h>
 #include <string_view>
@@ -52,6 +53,8 @@ class VM;
 namespace Corpse {
 class Process;
 class Snapshot;
+class SnapshotDebugInfo;
+struct TargetType;
 }
 }
 
@@ -66,6 +69,8 @@ extern unsigned suitesSkipped;
 extern const char* suiteFilter;
 
 extern bool verbose;
+// The URL the HeapWalkWebsite suite has MiniBrowser load. The suite runs only when one is given.
+extern const char* website;
 
 void skipSuite(const char* name, const char* why);
 
@@ -77,6 +82,17 @@ bool linuxSkip(const char* name, const char* why);
 // must find each copy's type in the compile unit that defines it.
 constinit const ASCIILiteral copiedHeaderConstant = "copied header constant"_s;
 const ASCIILiteral* copiedHeaderConstantInUtilities();
+
+// A function of this executable whose parameter has the type T* as this executable's debug info gives it.
+template<typename T> NEVER_INLINE void takesPointerTo(T*) { }
+
+template<typename T> JSC::Corpse::Address functionTakingPointerTo()
+{
+    return JSC::Corpse::Address { reinterpret_cast<const void*>(&takesPointerTo<T>) };
+}
+
+// The class that parameter `index` of the function at `function` points to, or null, which fails the test.
+const JSC::Corpse::TargetType* parameterClass(JSC::Corpse::SnapshotDebugInfo&, JSC::Corpse::Address function, unsigned index = 0);
 #endif
 
 // Announces a suite, times it, and reports on the way out. Destroyed on every path out

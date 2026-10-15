@@ -40,6 +40,7 @@
 #include "CorpseSymbolTest.h"
 #include "CorpseThreadTest.h"
 #include "DebugInfoTest.h"
+#include "HeapWalkTest.h"
 #include "LibJSCToolsTestUtilities.h"
 #include "TypeinfoTest.h"
 
@@ -64,12 +65,13 @@ constexpr unsigned defaultFuzzIterations = 20000;
 
 void printUsage()
 {
-    dataLogLn("Usage: testLibJSCTools [--verbose] [<suite filter>]");
+    dataLogLn("Usage: testLibJSCTools [--verbose] [--website <url>] [<suite filter>]");
     dataLogLn("       testLibJSCTools --fuzz-trie [<seed> [<iterations>]]");
     dataLogLn("       testLibJSCTools --target <offset>");
     dataLogLn("");
     dataLogLn("  Runs the tests for libJavaScriptCoreTools. With a filter, only the");
-    dataLogLn("  suites whose name contains it run.");
+    dataLogLn("  suites whose name contains it run. --website also walks the heap of the");
+    dataLogLn("  MiniBrowser beside this test once it has loaded <url>.");
 }
 
 bool parseUint64(std::string_view text, uint64_t& out)
@@ -129,6 +131,15 @@ int main(int argc, char** argv)
             JSCToolsTest::verbose = true;
             continue;
         }
+        if (argument == "--website") {
+            if (index + 1 >= arguments.size()) {
+                dataLogLn("--website needs the URL of a website");
+                printUsage();
+                return 1;
+            }
+            JSCToolsTest::website = arguments[++index];
+            continue;
+        }
         if (argument == "--target") {
             if (index + 1 >= arguments.size()) {
                 dataLogLn("--target needs the offset of a create function into this executable, in hex");
@@ -176,6 +187,8 @@ int main(int argc, char** argv)
 #if ENABLE(MYA_HEAP)
         JSCToolsTest::testTypeinfo();
         JSCToolsTest::testDebugInfo();
+        JSCToolsTest::testHeapWalk();
+        JSCToolsTest::testHeapWalkWebsite();
 #endif
     }
 

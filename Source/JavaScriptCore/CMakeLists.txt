@@ -1696,6 +1696,8 @@ if (ENABLE_JAVASCRIPTCORE_TOOLS)
         corpse/CorpseClient.h
         corpse/CorpseError.h
         corpse/CorpseExportsTrie.h
+        corpse/CorpseHeapWalk.h
+        corpse/CorpseIgnoredDeclarations.h
         corpse/CorpseImage.h
         corpse/CorpseLimits.h
         corpse/CorpseMemory.h
@@ -1707,6 +1709,7 @@ if (ENABLE_JAVASCRIPTCORE_TOOLS)
         corpse/CorpseSnapshot.h
         corpse/CorpseSnapshotDebugInfo.h
         corpse/CorpseSymbol.h
+        corpse/CorpseTargetType.h
         corpse/CorpseThread.h
     )
 endif ()
